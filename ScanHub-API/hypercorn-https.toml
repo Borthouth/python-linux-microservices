@@ -1,0 +1,32 @@
+# ============================================================================
+# ScanHub HTTPS Configuration
+# ============================================================================
+# HTTPS/TLS enabled
+# HTTP/2 enabled automatically via ALPN
+# Used by run_https.sh
+# ============================================================================
+
+bind = ["0.0.0.0:9443"]
+
+# Hypercorn workers
+workers = 2
+
+# TLS certificate and key
+certfile = "scanhubapi.crt"
+keyfile = "scanhubapi.key"
+
+# HTTP/2 settings
+h2_max_concurrent_streams = 256
+
+# Connection management
+keep_alive_timeout = 60
+
+# Logging
+accesslog = "logs/hypercorn-access.log"
+errorlog = "logs/hypercorn-error.log"
+
+# Networking
+backlog = 2048
+
+# Graceful shutdown
+graceful_timeout = 30

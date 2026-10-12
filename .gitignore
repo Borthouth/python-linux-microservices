@@ -1,0 +1,28 @@
+# SVN
+.svn/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Logs
+*.log
+logs/
+
+# VS Code
+.vscode/
+
+# JetBrains
+.idea/
+
+# Python virtual environments
+venv/
+.venv/
+

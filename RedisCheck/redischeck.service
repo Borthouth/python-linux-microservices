@@ -1,0 +1,23 @@
+# /etc/systemd/system/redischeck.service
+
+[Unit]
+Description=Redis Health Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+WorkingDirectory=/home/RedisCheck
+
+ExecStart=/usr/bin/python3 /home/RedisCheck/redis_check.py
+
+Restart=always
+RestartSec=5
+
+StandardOutput=append:/home/RedisCheck/redis_check.log
+StandardError=append:/home/RedisCheck/redis_check.log
+
+[Install]
+WantedBy=multi-user.target

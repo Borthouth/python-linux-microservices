@@ -1,0 +1,21 @@
+# ============================================================================
+# ScanHub HTTP Configuration
+# ============================================================================
+# HTTP only
+# HTTP/1.1
+# Intended for development and testing
+# Used by run_http.sh
+# ============================================================================
+
+bind = ["0.0.0.0:8000"]
+
+workers = 2
+
+keep_alive_timeout = 60
+
+accesslog = "logs/hypercorn-access.log"
+errorlog = "logs/hypercorn-error.log"
+
+backlog = 2048
+
+graceful_timeout = 30
