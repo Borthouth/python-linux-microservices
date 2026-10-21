@@ -10,10 +10,10 @@ LimitNOFILE=65535
 
 User=scanhub
 Group=scanhub
-SupplementaryGroups=clamav
+SupplementaryGroups=clamscan
 
-WorkingDirectory=/home/ScanHub-API
-ExecStart=/home/ScanHub-API/https_run.sh
+WorkingDirectory=/home/accountis/BacsHub/ScanHub-API
+ExecStart=/home/accountis/BacsHub/ScanHub-API/run_https.sh
 
 Restart=always
 RestartSec=5

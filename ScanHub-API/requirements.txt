@@ -1,0 +1,8 @@
+fastapi==0.156.6
+starlette==1.9.0
+hypercorn==0.18.0
+uvloop==0.23.0
+pydantic==2.14.1
+pyClamd==0.4.0
+python-multipart==0.0.32
+orjson==3.13.0
