@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  sentinel:
+    build: .
+    container_name: dockersentinel
+    restart: always
+    ports:
+      - "8000:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /:/host/root:ro
+    environment:
+      - DISK_THRESHOLD_PERCENT=85.0
+      - RAM_THRESHOLD_PERCENT=90.0
+      - CONTAINER_RESTART_THRESHOLD=3
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request, ssl; ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE; urllib.request.urlopen('https://localhost:8000/health', context=ctx)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
