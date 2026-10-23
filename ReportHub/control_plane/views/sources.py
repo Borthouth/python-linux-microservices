@@ -1,10 +1,14 @@
-from django.contrib.auth.decorators import login_required
+from django.contrib.auth.decorators import login_required, user_passes_test
 from django.shortcuts import render, get_object_or_404, redirect
 from django.core.paginator import Paginator
 from control_plane.models import SourceProfile
 from control_plane.forms import SourceProfileForm
 
+def is_admin(user):
+    return user.is_staff or user.is_superuser
+
 @login_required
+@user_passes_test(is_admin)
 def source_list_view(request):
     sources_qs = SourceProfile.objects.all().order_by('name')
     
@@ -18,6 +22,7 @@ def source_list_view(request):
     return render(request, 'control_plane/source_list.html', context)
 
 @login_required
+@user_passes_test(is_admin)
 def source_create_view(request):
     if request.method == 'POST':
         form = SourceProfileForm(request.POST)
@@ -29,6 +34,7 @@ def source_create_view(request):
     return render(request, 'control_plane/source_form.html', {'form': form})
 
 @login_required
+@user_passes_test(is_admin)
 def source_edit_view(request, pk):
     profile = get_object_or_404(SourceProfile, pk=pk)
     if request.method == 'POST':
@@ -42,6 +48,7 @@ def source_edit_view(request, pk):
     return render(request, 'control_plane/source_form.html', {'form': form, 'profile': profile})
 
 @login_required
+@user_passes_test(is_admin)
 def source_delete_view(request, pk):
     profile = get_object_or_404(SourceProfile, pk=pk)
     if request.method == 'POST':
@@ -51,6 +58,7 @@ def source_delete_view(request, pk):
     return render(request, 'control_plane/source_confirm_delete.html', {'profile': profile})
 
 @login_required
+@user_passes_test(is_admin)
 def source_toggle_active_view(request, pk):
     profile = get_object_or_404(SourceProfile, pk=pk)
     profile.is_active = not profile.is_active
