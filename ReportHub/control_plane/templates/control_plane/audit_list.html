@@ -1,88 +1,199 @@
 {% extends 'control_plane/base.html' %}
 
-{% block title %}Audit Logs - ReportHub{% endblock %}
-
 {% block content %}
-<div class="flex items-center justify-between mb-8">
-    <div>
-        <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">Audit Trails</h1>
-        <p class="text-slate-400 text-sm">Track historical configuration changes and administrative actions across data sources.</p>
+<div class="max-w-7xl mx-auto px-4 py-8">
+    <div class="mb-8">
+        <h1 class="text-3xl font-bold text-white">Audit Trails</h1>
+        <p class="text-gray-400 text-sm mt-1">Track internal configuration changes and administrative activity across data sources and users.</p>
     </div>
-</div>
 
-<!-- Search & Filter Bar -->
-<div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 mb-6 shadow-xl">
-    <form method="get" class="flex flex-col sm:flex-row items-center gap-4">
-        <div class="w-full sm:flex-1">
-            <input type="text" name="q" value="{{ search_query }}" placeholder="Search by source name or username..." class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-all">
+    <!-- Search & Filter Bar -->
+    <form method="get" class="mb-6 flex gap-4 items-center">
+        <div class="flex-1">
+            <input type="text" name="q" value="{{ search_query }}" placeholder="Search by source, name, or user..." 
+                   class="w-full bg-gray-900 border border-gray-700 text-white px-4 py-2 rounded-lg focus:outline-none focus:border-indigo-500">
         </div>
-        <div class="w-full sm:w-48">
-            <select name="action" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-300 focus:outline-none focus:border-indigo-500 transition-all">
+        <div>
+            <select name="action" class="bg-gray-900 border border-gray-700 text-white px-4 py-2 rounded-lg focus:outline-none focus:border-indigo-500">
                 <option value="">All Actions</option>
                 <option value="+" {% if selected_action == '+' %}selected{% endif %}>Created (+)</option>
-                <option value="~" {% if selected_action == '~' %}selected{% endif %}>Modified (~)</option>
+                <option value="~" {% if selected_action == '~' %}selected{% endif %}>Updated (~)</option>
                 <option value="-" {% if selected_action == '-' %}selected{% endif %}>Deleted (-)</option>
             </select>
         </div>
-        <div class="flex items-center space-x-2 w-full sm:w-auto">
-            <button type="submit" class="w-full sm:w-auto px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">
-                Filter Logs
-            </button>
-            {% if search_query or selected_action %}
-                <a href="{% url 'control_plane:audit_log' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all text-center">
-                    Reset
-                </a>
-            {% endif %}
-        </div>
+        <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-lg font-medium transition">Filter</button>
+        {% if search_query or selected_action %}
+            <a href="{% url 'control_plane:audit_log' %}" class="text-gray-400 hover:text-white text-sm underline">Reset</a>
+        {% endif %}
     </form>
-</div>
 
-<!-- Audit Table -->
-<div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
-    <div class="overflow-x-auto">
+    <!-- Audit Table -->
+    <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden shadow-xl">
         <table class="w-full text-left border-collapse">
             <thead>
-                <tr class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400">
-                    <th class="py-3 px-4">Timestamp</th>
-                    <th class="py-3 px-4">Action</th>
-                    <th class="py-3 px-4">Source Name</th>
-                    <th class="py-3 px-4">Database Type</th>
-                    <th class="py-3 px-4">User</th>
+                <tr class="border-b border-gray-800 text-gray-400 text-xs uppercase tracking-wider bg-gray-950/50">
+                    <th class="py-4 px-6">Timestamp</th>
+                    <th class="py-4 px-6">Action</th>
+                    <th class="py-4 px-6">Source / Name</th>
+                    <th class="py-4 px-6">Context</th>
+                    <th class="py-4 px-6">User</th>
+                    <th class="py-4 px-6">Details</th> <!-- Moved left & left-aligned -->
                 </tr>
             </thead>
-            <tbody class="divide-y divide-slate-800/60 text-sm">
-                {% for record in page_obj %}
-                    <tr class="hover:bg-slate-800/40 transition-all">
-                        <td class="py-3.5 px-4 text-slate-300 font-mono text-xs">{{ record.history_date|date:"Y-m-d H:i:s" }}</td>
-                        <td class="py-3.5 px-4">
-                            {% if record.history_type == '+' %}
-                                <span class="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full text-xs font-semibold">Created</span>
-                            {% elif record.history_type == '~' %}
-                                <span class="px-2.5 py-1 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-full text-xs font-semibold">Updated</span>
-                            {% else %}
-                                <span class="px-2.5 py-1 bg-red-500/10 border border-red-500/20 text-red-400 rounded-full text-xs font-semibold">Deleted</span>
-                            {% endif %}
-                        </td>
-                        <td class="py-3.5 px-4 font-medium text-white">{{ record.name }}</td>
-                        <td class="py-3.5 px-4 text-slate-300 uppercase text-xs font-bold tracking-wider">{{ record.db_type }}</td>
-                        <td class="py-3.5 px-4 text-slate-300">
-                            {% if record.history_user %}
-                                <span class="text-indigo-400 font-medium">{{ record.history_user.username }}</span>
-                            {% else %}
-                                <span class="text-slate-500 italic">System / API</span>
-                            {% endif %}
-                        </td>
-                    </tr>
+            <tbody class="divide-y divide-gray-800 text-sm text-gray-300">
+                {% for entry in audit_data %}
+                <tr class="hover:bg-gray-800/50 transition">
+                    <td class="py-4 px-6 whitespace-nowrap text-gray-400">{{ entry.timestamp|date:"Y-m-d H:i:s" }}</td>
+                    <td class="py-4 px-6 whitespace-nowrap">
+                        {% if entry.action_code == '+' %}
+                            <span class="px-2.5 py-1 bg-green-950 text-green-400 border border-green-800/50 rounded-full text-xs font-semibold">Created</span>
+                        {% elif entry.action_code == '~' %}
+                            <span class="px-2.5 py-1 bg-amber-950 text-amber-400 border border-amber-800/50 rounded-full text-xs font-semibold">Updated</span>
+                        {% else %}
+                            <span class="px-2.5 py-1 bg-red-950 text-red-400 border border-red-800/50 rounded-full text-xs font-semibold">Deleted</span>
+                        {% endif %}
+                    </td>
+                    <td class="py-4 px-6 font-medium text-white flex items-center space-x-2">
+                        <span class="px-2 py-0.5 bg-gray-800 border border-gray-700 text-xs rounded text-indigo-300 font-mono">{{ entry.model_name }}</span>
+                        <span>{{ entry.record_name }}</span>
+                    </td>
+                    <td class="py-4 px-6 text-gray-400 font-mono text-xs">{{ entry.context_label }}</td>
+                    <td class="py-4 px-6 text-gray-400">{{ entry.user|default:"System" }}</td>
+                    <td class="py-4 px-6"> <!-- Removed text-right so it sits neatly -->
+                        <button data-changes="{{ entry.changes_json }}"
+                                data-record-name="{{ entry.record_name }}"
+                                data-timestamp="{{ entry.timestamp|date:'Y-m-d H:i:s' }}"
+                                onclick="openAuditModal(this)"
+                                class="text-indigo-400 hover:text-indigo-300 font-medium text-xs bg-indigo-950/40 border border-indigo-900/50 px-3 py-1.5 rounded-lg transition">
+                            View Changes
+                        </button>
+                    </td>
+                </tr>
                 {% empty %}
-                    <tr>
-                        <td colspan="5" class="py-12 text-center text-slate-500 text-sm">
-                            No audit log records found matching your criteria.
-                        </td>
-                    </tr>
+                <tr>
+                    <td colspan="6" class="py-8 text-center text-gray-500">No audit logs found matching your criteria.</td>
+                </tr>
                 {% endfor %}
             </tbody>
         </table>
     </div>
-    {% include 'control_plane/components/pagination.html' %}
+
+    <!-- Pagination -->
+    {% if page_obj.has_other_pages %}
+    <div class="mt-6 flex justify-between items-center text-sm text-gray-400">
+        <div>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</div>
+        <div class="flex space-x-2">
+            {% if page_obj.has_previous %}
+                <a href="?page={{ page_obj.previous_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_action %}&action={{ selected_action }}{% endif %}" 
+                   class="bg-gray-800 px-3 py-1 rounded hover:bg-gray-700 text-white">Previous</a>
+            {% endif %}
+            {% if page_obj.has_next %}
+                <a href="?page={{ page_obj.next_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_action %}&action={{ selected_action }}{% endif %}" 
+                   class="bg-gray-800 px-3 py-1 rounded hover:bg-gray-700 text-white">Next</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
 </div>
+
+<!-- Modal Overlay -->
+<div id="auditModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="bg-gray-900 border border-gray-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl relative">
+        <div class="flex justify-between items-start mb-4 border-b border-gray-800 pb-3">
+            <div>
+                <h3 id="modalTitle" class="text-lg font-bold text-white">Changes for Record</h3>
+                <p id="modalTimestamp" class="text-xs text-gray-400 mt-0.5"></p>
+            </div>
+            <button onclick="closeAuditModal()" class="text-gray-400 hover:text-white text-xl font-bold">&times;</button>
+        </div>
+        
+        <!-- Changes Container -->
+        <div id="modalChangesBody" class="space-y-3 max-h-96 overflow-y-auto pr-1">
+            <!-- Populated dynamically via JS -->
+        </div>
+
+        <div class="mt-6 text-right">
+            <button onclick="closeAuditModal()" class="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded-lg text-sm transition">Close</button>
+        </div>
+    </div>
+</div>
+
+<script>
+function openAuditModal(button) {
+    const changesJson = button.getAttribute('data-changes');
+    const recordName = button.getAttribute('data-record-name');
+    const timestamp = button.getAttribute('data-timestamp');
+    
+    let changesObj = {};
+    try {
+        changesObj = JSON.parse(changesJson);
+    } catch (e) {
+        changesObj = {};
+    }
+
+    document.getElementById('modalTitle').innerText = `Changes for: ${recordName}`;
+    document.getElementById('modalTimestamp').innerText = `Timestamp: ${timestamp}`;
+    
+    const container = document.getElementById('modalChangesBody');
+    container.innerHTML = '';
+    
+    if (Object.keys(changesObj).length === 0) {
+        container.innerHTML = '<p class="text-gray-400 text-sm text-center py-4">No specific field diffs recorded.</p>';
+    } else {
+        for (const [field, data] of Object.entries(changesObj)) {
+            const fieldCard = document.createElement('div');
+            fieldCard.className = 'bg-gray-950 p-3 rounded-xl border border-gray-800/80';
+            
+            const fieldTitle = document.createElement('div');
+            fieldTitle.className = 'text-xs font-mono text-indigo-400 uppercase mb-1.5 font-semibold';
+            fieldTitle.textContent = field;
+            
+            const flexDiv = document.createElement('div');
+            flexDiv.className = 'flex items-center justify-start text-sm gap-3';
+            
+            const fromSpan = document.createElement('span');
+            fromSpan.className = 'px-2.5 py-1 bg-red-950/60 text-red-300 border border-red-900/40 rounded-lg line-through truncate';
+            fromSpan.textContent = data.from !== null ? data.from : 'None';
+            
+            const arrowSpan = document.createElement('span');
+            arrowSpan.className = 'text-gray-500 font-bold';
+            arrowSpan.textContent = '→';
+            
+            const toSpan = document.createElement('span');
+            toSpan.className = 'px-2.5 py-1 bg-green-950/60 text-green-300 border border-green-900/40 rounded-lg truncate';
+            toSpan.textContent = data.to !== null ? data.to : 'None';
+            
+            flexDiv.appendChild(fromSpan);
+            flexDiv.appendChild(arrowSpan);
+            flexDiv.appendChild(toSpan);
+            
+            fieldCard.appendChild(fieldTitle);
+            fieldCard.appendChild(flexDiv);
+            container.appendChild(fieldCard);
+        }
+    }
+    
+    const modal = document.getElementById('auditModal');
+    if (modal) {
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+    }
+}
+
+function closeAuditModal() {
+    const modal = document.getElementById('auditModal');
+    if (modal) {
+        modal.classList.remove('flex');
+        modal.classList.add('hidden');
+    }
+}
+
+// Close modal on background click
+window.onclick = function(event) {
+    const modal = document.getElementById('auditModal');
+    if (event.target === modal) {
+        closeAuditModal();
+    }
+}
+</script>
 {% endblock %}

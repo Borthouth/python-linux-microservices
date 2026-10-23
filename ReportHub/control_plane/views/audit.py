@@ -1,28 +1,111 @@
+import json
+from operator import attrgetter
+from django.apps import apps
 from django.shortcuts import render
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import Paginator
-from control_plane.models import SourceProfile
+from django.contrib.auth import get_user_model
 
 @login_required
 def audit_log_view(request):
-    audit_list = SourceProfile.history.all().order_by('-history_date')
-    print("TOTAL HISTORY RECORDS:", audit_list.count()) # Check your terminal output!
+    cp_config = apps.get_app_config('control_plane')
+    all_history_entries = []
+    
+    # 1. Grab history from control_plane models
+    for model in cp_config.get_models():
+        if hasattr(model, 'history'):
+            all_history_entries.extend(list(model.history.all()))
+            
+    # 2. Explicitly grab history from Django's User/TrackedUser model
+    User = get_user_model()
+    if hasattr(User, 'history'):
+        all_history_entries.extend(list(User.history.all()))
+
+    # Sort all combined history entries globally by date descending
+    audit_list = sorted(
+        all_history_entries,
+        key=attrgetter('history_date'),
+        reverse=True
+    )
     
     q = request.GET.get('q', '').strip()
     if q:
-        audit_list = audit_list.filter(name__icontains=q) | audit_list.filter(history_user__username__icontains=q)
+        filtered_list = []
+        for entry in audit_list:
+            name_val = getattr(entry, 'name', getattr(entry, 'username', ''))
+            user_val = getattr(entry.history_user, 'username', '') if entry.history_user else ''
+            if q.lower() in str(name_val).lower() or q.lower() in str(user_val).lower():
+                filtered_list.append(entry)
+        audit_list = filtered_list
         
     action_type = request.GET.get('action', '').strip()
     if action_type in ['+', '~', '-']:
-        audit_list = audit_list.filter(history_type=action_type)
+        audit_list = [entry for entry in audit_list if entry.history_type == action_type]
 
     paginator = Paginator(audit_list, 15)
     page_number = request.GET.get('page')
     page_obj = paginator.get_page(page_number)
-    print("RECORDS ON THIS PAGE:", len(page_obj)) # Check your terminal output!
+
+    audit_data = []
+    for entry in page_obj:
+        prev = entry.prev_record
+        changes = {}
+        
+        # Normalize model name for User/TrackedUser
+        raw_model_name = entry.instance.__class__.__name__ if hasattr(entry, 'instance') else entry._meta.model.__name__
+        model_name = 'User' if raw_model_name in ['User', 'Track5edUser', 'TrackedUser'] else raw_model_name
+        
+        if entry.history_type == '+':
+            changes = {"action": {"from": "None", "to": f"Created new {model_name}"}}
+        elif entry.history_type == '-':
+            changes = {"action": {"from": "Active Record", "to": f"Deleted {model_name}"}}
+        elif prev:
+            delta = entry.diff_against(prev)
+            if delta and delta.changes:
+                for change in delta.changes:
+                    old_val = "********" if 'password' in change.field.lower() else change.old
+                    new_val = "********" if 'password' in change.field.lower() else change.new
+                    changes[change.field] = {"from": old_val, "to": new_val}
+            else:
+                changes = {"status": {"from": "Existing", "to": "Saved with no field modifications"}}
+        else:
+            changes = {"status": {"from": None, "to": "Historical entry"}}
+            
+        # Separate primary record identifier from context details
+        if model_name == 'UserSourceAccess':
+            record_name = str(getattr(entry, 'user', 'User'))
+            source_str = str(getattr(entry, 'source', 'Source'))
+            role_str = str(getattr(entry, 'role', 'Viewer'))
+            context_label = f"→ {source_str} ({role_str})"
+        elif model_name == 'SourceProfile':
+            record_name = getattr(entry, 'name', 'Unnamed Source')
+            context_label = getattr(entry, 'db_type', 'DATABASE')
+        elif model_name == 'User':
+            record_name = getattr(entry, 'username', 'User')
+            context_label = "PLATFORM USER"
+        else:
+            if hasattr(entry, 'name'):
+                record_name = entry.name
+            elif hasattr(entry, 'username'):
+                record_name = entry.username
+            else:
+                record_name = f"Record #{entry.id}"
+            context_label = model_name
+        
+        audit_data.append({
+            'timestamp': entry.history_date,
+            'action': entry.get_history_type_display(),
+            'action_code': entry.history_type,
+            'model_name': model_name,
+            'record_name': record_name,
+            'context_label': context_label,
+            'user': entry.history_user,
+            'changes_json': json.dumps(changes, default=str),
+        })
 
     context = {
         'page_obj': page_obj,
+        'audit_data': audit_data,
         'search_query': q,
         'selected_action': action_type,
     }

@@ -74,3 +74,14 @@ class UserSourceAccess(TimeStampedAuditedModel):
     def __str__(self):
         return f"{self.user.username} -> {self.source.name} [{self.role}]"
 
+    def get_audit_display_name(self):
+        return f"Access: {self.user.username} &rarr; {self.source.name}"
+
+class TrackedUser(User):
+    history = HistoricalRecords()
+
+    class Meta:
+        proxy = True
+        verbose_name = 'Tracked User'
+        verbose_name_plural = 'Tracked Users'
+
