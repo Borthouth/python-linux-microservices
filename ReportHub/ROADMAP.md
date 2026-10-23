@@ -3,10 +3,10 @@
 Track the development and implementation phases of `ReportHub`.
 
 ## Phase 1: Infrastructure & Containerization
-- [ ] Initialize repository structure (`README.md`, `ROADMAP.md`, `.gitignore`).
-- [ ] Configure `Dockerfile`, `requirements.txt`, and entrypoint scripts.
-- [ ] Set up `docker-compose.yml` orchestrating PostgreSQL (tuned for analytics), Redis (with AOF persistence), Django Web, and Celery workers.
-- [ ] Configure environment variables (`.env.example`) and verify local container startup.
+- [x] Initialize repository structure (`README.md`, `ROADMAP.md`, `.gitignore`).
+- [x] Configure `Dockerfile`, `requirements.txt`, and entrypoint scripts.
+- [x] Set up `docker-compose.yml` orchestrating PostgreSQL (tuned for analytics), Redis (with AOF persistence), Django Web, and Celery workers.
+- [x] Configure environment variables (`.env.example`) and verify local container startup.
 
 ## Phase 2: Django Control Plane & Security Engine
 - [ ] Initialize Django project and core apps (`control_plane`, `warehouse`, `etl`).
