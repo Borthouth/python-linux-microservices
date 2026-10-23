@@ -1,0 +1,49 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}Register Data Source - ReportHub{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto">
+    <div class="mb-6 flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-extrabold tracking-tight text-white">Register New Data Source</h1>
+            <p class="text-slate-400 text-sm mt-1">Configure connection parameters for an external PostgreSQL or MySQL database.</p>
+        </div>
+        <a href="{% url 'control_plane:source_list' %}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium rounded-lg transition-all">
+            &larr; Back to Sources
+        </a>
+    </div>
+
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-xl">
+        <form method="post" class="space-y-5">
+            {% csrf_token %}
+            
+            {% for field in form %}
+                <div>
+                    <label class="block text-xs font-medium text-slate-300 uppercase tracking-wider mb-2" for="{{ field.id_for_label }}">
+                        {{ field.label }}
+                    </label>
+                    
+                    {{ field }}
+                    
+                    {% if field.help_text %}
+                        <p class="text-xs text-slate-500 mt-1">{{ field.help_text }}</p>
+                    {% endif %}
+                    {% for error in field.errors %}
+                        <p class="text-xs text-red-400 mt-1">{{ error }}</p>
+                    {% endfor %}
+                </div>
+            {% endfor %}
+
+            <div class="pt-4 flex items-center justify-end space-x-3">
+                <a href="{% url 'control_plane:source_list' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl transition-all">
+                    Cancel
+                </a>
+                <button type="submit" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">
+                    Save Data Source
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

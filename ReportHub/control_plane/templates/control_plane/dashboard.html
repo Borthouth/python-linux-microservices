@@ -1,0 +1,114 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}Dashboard - ReportHub{% endblock %}
+
+{% block content %}
+<!-- Welcome Hero Banner -->
+<div class="bg-gradient-to-br from-slate-900 to-slate-900/40 border border-slate-800 rounded-2xl p-8 mb-8 shadow-xl">
+    <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">
+        Welcome back, {{ request.user.first_name|default:request.user.username }}
+    </h1>
+    <p class="text-slate-400 max-w-3xl text-sm leading-relaxed">
+        Manage your multi-source database connections, granular user permissions, and secure ETL report generation pipelines from your unified command center.
+    </p>
+</div>
+
+<!-- Quick Stats Grid -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-sm hover:border-slate-700 transition-all">
+        <div class="flex items-center justify-between mb-4">
+            <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Registered Data Sources</span>
+            <span class="p-2 bg-blue-500/10 text-blue-400 rounded-xl text-sm font-bold">🔗</span>
+        </div>
+        <div class="text-3xl font-bold text-white mb-1">{{ total_sources }}</div>
+        <p class="text-xs text-slate-500">Active MySQL/PostgreSQL source profiles mapped to ReportHub.</p>
+    </div>
+
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-sm hover:border-slate-700 transition-all">
+        <div class="flex items-center justify-between mb-4">
+            <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Your Source Access Permissions</span>
+            <span class="p-2 bg-emerald-500/10 text-emerald-400 rounded-xl text-sm font-bold">🛡️</span>
+        </div>
+        <div class="text-3xl font-bold text-white mb-1">{{ user_access_count }}</div>
+        <p class="text-xs text-slate-500">Layer 1 security matrix clearances assigned to your account.</p>
+    </div>
+</div>
+
+<!-- ETL Operations Section -->
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    
+    <!-- Current Running Reports -->
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-bold text-white flex items-center">
+                <span class="mr-2">⚡</span> Active Pipeline Executions
+            </h2>
+            <span class="px-2 py-0.5 bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs font-semibold rounded-full">
+                {{ running_jobs|length }} Running
+            </span>
+        </div>
+
+        <div class="space-y-3">
+            {% for job in running_jobs %}
+                <div class="p-4 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between">
+                    <div>
+                        <div class="text-sm font-semibold text-white">{{ job.name }}</div>
+                        <div class="text-xs text-slate-500">Started: {{ job.started_at|date:"H:i:s" }}</div>
+                    </div>
+                    <span class="px-2.5 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-full text-xs font-medium animate-pulse">
+                        Processing...
+                    </span>
+                </div>
+            {% empty %}
+                <div class="py-8 text-center text-slate-500 text-sm border border-dashed border-slate-800 rounded-xl">
+                    No extraction pipelines currently running.
+                </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Recent Report Status History -->
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-bold text-white flex items-center">
+                <span class="mr-2">📋</span> Recent Pipeline Runs
+            </h2>
+            <span class="text-xs text-slate-500">Last 5 Executions</span>
+        </div>
+
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400">
+                        <th class="py-2.5 px-3">Pipeline</th>
+                        <th class="py-2.5 px-3">Completed At</th>
+                        <th class="py-2.5 px-3">Status</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/60 text-sm">
+                    {% for job in recent_jobs %}
+                        <tr class="hover:bg-slate-800/40 transition-all">
+                            <td class="py-3 px-3 font-medium text-white">{{ job.name }}</td>
+                            <td class="py-3 px-3 text-slate-400 text-xs">{{ job.completed_at|date:"M j, H:i" }}</td>
+                            <td class="py-3 px-3">
+                                {% if job.status == 'SUCCESS' %}
+                                    <span class="px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full text-xs font-semibold">Completed</span>
+                                {% else %}
+                                    <span class="px-2 py-0.5 bg-red-500/10 border border-red-500/20 text-red-400 rounded-full text-xs font-semibold">Failed</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="3" class="py-8 text-center text-slate-500 text-sm border border-dashed border-slate-800 rounded-xl">
+                                No historical execution logs found. Ready for Phase 4 ETL buildout.
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+</div>
+{% endblock %}

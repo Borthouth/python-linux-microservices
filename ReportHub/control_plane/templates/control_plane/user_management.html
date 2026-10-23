@@ -1,0 +1,124 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}Users & Access - ReportHub{% endblock %}
+
+{% block content %}
+<div class="mb-8">
+    <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">Users & Access</h1>
+    <p class="text-slate-400 text-sm">Onboard platform users and manage their granular data source permission matrices.</p>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
+    
+    <!-- Left Column: Registration Form -->
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl h-fit">
+        <h2 class="text-lg font-bold text-white mb-4 flex items-center">
+            <span class="mr-2">👤</span> Onboard New User
+        </h2>
+        
+        <form method="post" class="space-y-4">
+            {% csrf_token %}
+            
+            {% for field in form %}
+                <div>
+                    <label class="block text-xs font-medium text-slate-300 uppercase tracking-wider mb-1.5" for="{{ field.id_for_label }}">
+                        {{ field.label }}
+                    </label>
+                    {{ field }}
+                    {% if field.help_text %}
+                        <p class="text-xs text-slate-500 mt-1">{{ field.help_text }}</p>
+                    {% endif %}
+                    {% for error in field.errors %}
+                        <p class="text-xs text-red-400 mt-1">{{ error }}</p>
+                    {% endfor %}
+                </div>
+            {% endfor %}
+
+            <button type="submit" class="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl shadow-lg shadow-indigo-600/20 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all text-sm mt-4">
+                Create User
+            </button>
+        </form>
+    </div>
+
+    <!-- Right Column: Users & Access Matrix -->
+    <div class="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
+        <div>
+            <!-- Header & Search Bar -->
+            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+                <h2 class="text-lg font-bold text-white flex items-center">
+                    <span class="mr-2">🛡️</span> Users & Access
+                </h2>
+                
+                <form method="get" class="w-full sm:w-auto flex items-center">
+                    <input type="text" name="q" value="{{ search_query }}" placeholder="Search username or email..." 
+                           class="w-full sm:w-64 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white placeholder-slate-500 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                    <button type="submit" class="ml-2 px-3 py-2 bg-slate-800 hover:bg-indigo-600 text-slate-300 hover:text-white rounded-xl text-xs font-medium transition-all">
+                        Search
+                    </button>
+                    {% if search_query %}
+                        <a href="{% url 'control_plane:user_management' %}" class="ml-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-xl text-xs transition-all">
+                            Clear
+                        </a>
+                    {% endif %}
+                </form>
+            </div>
+
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400">
+                            <th class="py-3 px-4">User</th>
+                            <th class="py-3 px-4">Email</th>
+                            <th class="py-3 px-4">Assigned Sources</th>
+                            <th class="py-3 px-4 text-right">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-800/60 text-sm">
+                        {% for u_item in page_obj %}
+                            <tr class="hover:bg-slate-800/40 transition-all">
+                                <td class="py-3.5 px-4 font-medium text-white">{{ u_item.username }}</td>
+                                <td class="py-3.5 px-4 text-slate-300 text-xs">{{ u_item.email|default:"No email" }}</td>
+                                <td class="py-3.5 px-4">
+                                    {% with source_count=u_item.source_access.count %}
+                                        {% if source_count > 0 %}
+                                            <span class="px-2.5 py-1 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-lg text-xs font-mono font-medium">
+                                                {{ source_count }} Source{% if source_count > 1 %}s{% endif %} Authorized
+                                            </span>
+                                        {% else %}
+                                            <span class="text-xs text-slate-500 italic">No sources assigned</span>
+                                        {% endif %}
+                                    {% endwith %}
+                                </td>
+                                <td class="py-3.5 px-4 text-right space-x-2">
+                                    <a href="{% url 'control_plane:user_edit' u_item.id %}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg text-xs font-medium transition-all">
+                                        Edit
+                                    </a>
+                                    <a href="{% url 'control_plane:user_edit_access' u_item.id %}" class="px-3 py-1.5 bg-slate-800 hover:bg-indigo-600 text-slate-300 hover:text-white rounded-lg text-xs font-medium transition-all">
+                                        Manage Access
+                                    </a>
+                                </td>
+                            </tr>
+                        {% empty %}
+                            <tr>
+                                <td colspan="4" class="py-12 text-center text-slate-500 text-sm">
+                                    {% if search_query %}
+                                        No users found matching "{{ search_query }}".
+                                    {% else %}
+                                        No platform users found. Use the onboarding form to add users.
+                                    {% endif %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Paginator -->
+        <div class="mt-6">
+            {% include 'control_plane/components/pagination.html' %}
+        </div>
+    </div>
+
+</div>
+{% endblock %}

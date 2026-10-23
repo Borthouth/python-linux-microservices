@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-slate-950">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}ReportHub Control Plane{% endblock %}</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="h-full font-sans antialiased text-slate-100 flex flex-col">
+
+    <!-- Include Reusable Navbar -->
+    {% include 'control_plane/components/navbar.html' %}
+
+    <!-- Include Reusable Flash Messages Component -->
+    {% include 'control_plane/components/messages.html' %}
+
+    <!-- Main Content Block -->
+    <main class="flex-1 max-w-7xl w-full mx-auto px-6 py-8">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Include Reusable Footer -->
+    {% include 'control_plane/components/footer.html' %}
+
+</body>
+</html>

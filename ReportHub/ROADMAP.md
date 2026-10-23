@@ -9,19 +9,25 @@ Track the development and implementation phases of `ReportHub`.
 - [x] Configure environment variables (`.env.example`) and verify local container startup.
 
 ## Phase 2: Django Control Plane & Security Engine
-- [ ] Initialize Django project and core apps (`control_plane`, `warehouse`, `etl`).
-- [ ] Set up user authentication and RBAC roles (*Viewer, Analyst/Builder, System Admin*).
-- [ ] Build models for **Source Profiles** and the **User-Source Access Matrix** (Layer 1 security).
-- [ ] Build models for **Report Sharing & Tokenized URLs**.
-- [ ] Configure automatic database migrations via container startup scripts.
+- [x] Initialize Django project and core apps (`control_plane`, `warehouse`, `etl`).
+- [x] Configure automatic database migrations via container startup scripts (`entrypoint.sh`).
+- [x] Implement **Security-First Hardening**: Content Security Policy (`django-csp`), strict `ALLOWED_HOSTS`, clickjacking/MIME defenses, HttpOnly session/CSRF cookies, and global 64-bit `BigAutoField`.
+- [x] Set up user authentication and RBAC roles (*Viewer, Analyst/Builder, System Admin*).
+- [x] Build models for **Source Profiles** and the **User-Source Access Matrix** (Layer 1 security).
+- [ ] Implement **Self-Service User Profile Management** (nav-bar linked account view for users to update their email and change their password).
 
 ## Phase 3: Schema Reflection & Configuration UI
-- [ ] Build the multi-source connection profile manager.
-- [ ] Write the **Information Schema Reader** to introspect remote MySQL databases (`information_schema.columns`).
-- [ ] Develop the sleek Bootstrap 5 **Configuration Web Page** (interactive field toggling, blob exclusion, and multi-metric selection).
+- [ ] Build the multi-source connection profile manager and control plane web views.
+- [ ] Write the **Information Schema Reader** to introspect remote MySQL/Postgres databases (`information_schema.columns`).
+- [ ] Develop the configuration web page (interactive field toggling, blob exclusion, and multi-metric selection).
 
 ## Phase 4: Multi-Source Ingestion & Dynamic ETL Pipeline (Celery + Redis)
 - [ ] Build idempotent batch ingestion Celery tasks with `source_id` stamping and JSON exclusion filtering.
 - [ ] Implement relational roll-up workers (Hot-to-Warm daily summaries leveraging preserved foreign key IDs).
 - [ ] Implement automated **Row-Level Security (RLS)** query filtering (`company_id` enforcement).
 - [ ] Build date-range chunking and `UPSERT` historical backfill engine.
+
+## Phase 5: Report Generation & Query Engine
+- [ ] Build the dynamic query builder and execution engine over ingested database tables.
+- [ ] Develop report templates, data visualization components, and export tools.
+- [ ] Implement **Authenticated Report & Dashboard Sharing** (role-based visibility restricting "View Only" users strictly to authorized dashboards and reports).

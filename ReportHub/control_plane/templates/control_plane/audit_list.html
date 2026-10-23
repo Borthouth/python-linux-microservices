@@ -1,0 +1,88 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}Audit Logs - ReportHub{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-8">
+    <div>
+        <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">Audit Trails</h1>
+        <p class="text-slate-400 text-sm">Track historical configuration changes and administrative actions across data sources.</p>
+    </div>
+</div>
+
+<!-- Search & Filter Bar -->
+<div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 mb-6 shadow-xl">
+    <form method="get" class="flex flex-col sm:flex-row items-center gap-4">
+        <div class="w-full sm:flex-1">
+            <input type="text" name="q" value="{{ search_query }}" placeholder="Search by source name or username..." class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 transition-all">
+        </div>
+        <div class="w-full sm:w-48">
+            <select name="action" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-300 focus:outline-none focus:border-indigo-500 transition-all">
+                <option value="">All Actions</option>
+                <option value="+" {% if selected_action == '+' %}selected{% endif %}>Created (+)</option>
+                <option value="~" {% if selected_action == '~' %}selected{% endif %}>Modified (~)</option>
+                <option value="-" {% if selected_action == '-' %}selected{% endif %}>Deleted (-)</option>
+            </select>
+        </div>
+        <div class="flex items-center space-x-2 w-full sm:w-auto">
+            <button type="submit" class="w-full sm:w-auto px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">
+                Filter Logs
+            </button>
+            {% if search_query or selected_action %}
+                <a href="{% url 'control_plane:audit_log' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all text-center">
+                    Reset
+                </a>
+            {% endif %}
+        </div>
+    </form>
+</div>
+
+<!-- Audit Table -->
+<div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+    <div class="overflow-x-auto">
+        <table class="w-full text-left border-collapse">
+            <thead>
+                <tr class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400">
+                    <th class="py-3 px-4">Timestamp</th>
+                    <th class="py-3 px-4">Action</th>
+                    <th class="py-3 px-4">Source Name</th>
+                    <th class="py-3 px-4">Database Type</th>
+                    <th class="py-3 px-4">User</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/60 text-sm">
+                {% for record in page_obj %}
+                    <tr class="hover:bg-slate-800/40 transition-all">
+                        <td class="py-3.5 px-4 text-slate-300 font-mono text-xs">{{ record.history_date|date:"Y-m-d H:i:s" }}</td>
+                        <td class="py-3.5 px-4">
+                            {% if record.history_type == '+' %}
+                                <span class="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full text-xs font-semibold">Created</span>
+                            {% elif record.history_type == '~' %}
+                                <span class="px-2.5 py-1 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-full text-xs font-semibold">Updated</span>
+                            {% else %}
+                                <span class="px-2.5 py-1 bg-red-500/10 border border-red-500/20 text-red-400 rounded-full text-xs font-semibold">Deleted</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3.5 px-4 font-medium text-white">{{ record.name }}</td>
+                        <td class="py-3.5 px-4 text-slate-300 uppercase text-xs font-bold tracking-wider">{{ record.db_type }}</td>
+                        <td class="py-3.5 px-4 text-slate-300">
+                            {% if record.history_user %}
+                                <span class="text-indigo-400 font-medium">{{ record.history_user.username }}</span>
+                            {% else %}
+                                <span class="text-slate-500 italic">System / API</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="5" class="py-12 text-center text-slate-500 text-sm">
+                            No audit log records found matching your criteria.
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% include 'control_plane/components/pagination.html' %}
+</div>
+{% endblock %}

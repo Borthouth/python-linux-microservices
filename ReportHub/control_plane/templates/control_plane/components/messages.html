@@ -1,0 +1,10 @@
+{% if messages %}
+    <div class="max-w-7xl mx-auto px-6 mt-4">
+        {% for message in messages %}
+            <div class="p-4 rounded-xl bg-slate-800 border border-slate-700 text-sm flex items-center justify-between {% if message.tags == 'success' %}text-emerald-400{% elif message.tags == 'error' %}text-red-400{% else %}text-slate-300{% endif %}">
+                <span>{{ message }}</span>
+                <button type="button" onclick="this.parentElement.remove()" class="text-slate-500 hover:text-slate-300">&times;</button>
+            </div>
+        {% endfor %}
+    </div>
+{% endif %}

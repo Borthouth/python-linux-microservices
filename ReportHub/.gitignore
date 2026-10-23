@@ -1,0 +1,24 @@
+# Python / Django
+*.pyc
+__pycache__/
+*.log
+local_settings.py
+db.sqlite3
+media/
+staticfiles/
+
+# Environment variables
+.env
+venv/
+env/
+ENV/
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker & Database Volumes (Crucial for your setup)
+docker/postgres_data/
+.DS_Store
