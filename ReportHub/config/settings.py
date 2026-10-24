@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     'control_plane',
     'warehouse',
     'etl',
+    'django_celery_beat', # Required for database-backed periodic task scheduling
 ]
 
 MIDDLEWARE = [
@@ -66,6 +67,17 @@ ROOT_URLCONF = 'config.urls'
 LOGIN_URL = '/control-plane/login/'
 LOGIN_REDIRECT_URL = '/control-plane/'
 LOGOUT_REDIRECT_URL = '/control-plane/login/'
+
+# Celery Configuration Settings
+CELERY_BROKER_URL = 'redis://redis:6379/0'
+CELERY_RESULT_BACKEND = 'redis://redis:6379/0'
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = 'UTC'
+
+# Tells Celery Beat to read schedules dynamically from the database
+CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 
 TEMPLATES = [
     {

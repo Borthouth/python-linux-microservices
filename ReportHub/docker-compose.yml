@@ -22,19 +22,57 @@ services:
     restart: unless-stopped
 
   app:
-      build: .
-      command: python manage.py runserver 0.0.0.0:8000
-      container_name: reporthub-app
-      environment:
-        - POSTGRES_DB=${POSTGRES_DB}
-        - POSTGRES_USER=${POSTGRES_USER}
-        - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-        - POSTGRES_HOST=postgres
-        - POSTGRES_PORT=5432
-        - REDIS_URL=${REDIS_URL}
-      ports:
-        - "8000:8000"
-      depends_on:
-        - postgres
-        - redis
-      restart: unless-stopped
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    container_name: reporthub-app
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=${REDIS_URL}
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  celery_worker:
+    build: .
+    container_name: reporthub_celery_worker
+    command: celery -A config worker --loglevel=info
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=${REDIS_URL}
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  celery_beat:
+    build: .
+    container_name: reporthub_celery_beat
+    command: celery -A config beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=${REDIS_URL}
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped

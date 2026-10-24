@@ -79,21 +79,7 @@
     </div>
 
     <!-- Pagination -->
-    {% if page_obj.has_other_pages %}
-    <div class="mt-6 flex justify-between items-center text-sm text-gray-400">
-        <div>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</div>
-        <div class="flex space-x-2">
-            {% if page_obj.has_previous %}
-                <a href="?page={{ page_obj.previous_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_action %}&action={{ selected_action }}{% endif %}" 
-                   class="bg-gray-800 px-3 py-1 rounded hover:bg-gray-700 text-white">Previous</a>
-            {% endif %}
-            {% if page_obj.has_next %}
-                <a href="?page={{ page_obj.next_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_action %}&action={{ selected_action }}{% endif %}" 
-                   class="bg-gray-800 px-3 py-1 rounded hover:bg-gray-700 text-white">Next</a>
-            {% endif %}
-        </div>
-    </div>
-    {% endif %}
+    {% include 'control_plane/components/pagination.html' %}
 </div>
 
 <!-- Modal Overlay -->

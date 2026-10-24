@@ -1,6 +1,12 @@
 from django.urls import path
 from django.contrib.auth import views as auth_views
-from .views import sources, dashboard, users, audit  # Import your view modules explicitly
+from .views import (
+    sources, 
+    dashboard, 
+    users, 
+    audit, 
+    schedules
+)
 
 app_name = 'control_plane'
 
@@ -28,4 +34,12 @@ urlpatterns = [
 
     # Audit log URL
     path('audit/', audit.audit_log_view, name='audit_log'),
+
+    # Schedule routes
+    path('schedules/', schedules.schedule_list_view, name='schedule_list'),
+    path('schedules/create/', schedules.create_schedule_view, name='create_schedule'),
+    path('schedules/<int:task_id>/edit/', schedules.schedule_edit_view, name='schedule_edit'),
+    path('schedules/<int:task_id>/toggle/', schedules.schedule_toggle_active_view, name='schedule_toggle_active'),
+    path('schedules/run/<int:task_id>/', schedules.run_task_manually_view, name='run_task_manually'),
+    path('schedules/delete/<int:task_id>/', schedules.delete_schedule_view, name='delete_schedule'),
 ]

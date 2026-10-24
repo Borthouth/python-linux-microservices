@@ -3,6 +3,7 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from encrypted_model_fields.fields import EncryptedCharField
 from simple_history.models import HistoricalRecords
+from django_celery_beat.models import PeriodicTask
 
 
 class TimeStampedAuditedModel(models.Model):
@@ -85,3 +86,34 @@ class TrackedUser(User):
         verbose_name = 'Tracked User'
         verbose_name_plural = 'Tracked Users'
 
+class ScheduleAuditLog(models.Model):
+    """Standalone audit log that mimics history records for scheduled tasks."""
+    name = models.CharField(max_length=200)
+    action_type = models.CharField(max_length=5)  # '+' for create, '~' for edit/toggle, '-' for delete
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    change_summary = models.CharField(max_length=255, blank=True)
+    changes_data = models.JSONField(default=dict, blank=True)  # Stores field-level diffs
+
+    @property
+    def history_date(self):
+        return self.timestamp
+            
+    @property
+    def history_user(self):
+        return self.user
+                
+    @property
+    def history_type(self):
+        return self.action_type
+                
+    @property
+    def prev_record(self):
+        return None
+
+    def get_history_type_display(self):
+        if self.action_type == '+':
+            return 'Created'
+        elif self.action_type == '~':
+            return 'Updated'
+        return 'Deleted'

@@ -1,20 +1,15 @@
-{% if page_obj.has_other_pages %}
-    <div class="flex items-center justify-between border-t border-slate-800 mt-6 pt-4 text-xs text-slate-400">
-        <div>
-            Showing page <span class="font-semibold text-white">{{ page_obj.number }}</span> of <span class="font-semibold text-white">{{ page_obj.paginator.num_pages }}</span>
-        </div>
-        <div class="flex items-center space-x-2">
+    {% if page_obj.has_other_pages %}
+    <div class="mt-6 flex justify-between items-center text-sm text-gray-400">
+        <div>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</div>
+        <div class="flex space-x-2">
             {% if page_obj.has_previous %}
-                <a href="?page={{ page_obj.previous_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_action %}&action={{ selected_action }}{% endif %}{% if selected_role %}&role={{ selected_role }}{% endif %}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium rounded-lg border border-slate-700 transition-all">
-                    Previous
-                </a>
+                <a href="?page={{ page_obj.previous_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_action %}&action={{ selected_action }}{% endif %}" 
+                   class="bg-gray-800 px-3 py-1 rounded hover:bg-gray-700 text-white">Previous</a>
             {% endif %}
-            
             {% if page_obj.has_next %}
-                <a href="?page={{ page_obj.next_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_action %}&action={{ selected_action }}{% endif %}{% if selected_role %}&role={{ selected_role }}{% endif %}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium rounded-lg border border-slate-700 transition-all">
-                    Next
-                </a>
+                <a href="?page={{ page_obj.next_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_action %}&action={{ selected_action }}{% endif %}" 
+                   class="bg-gray-800 px-3 py-1 rounded hover:bg-gray-700 text-white">Next</a>
             {% endif %}
         </div>
     </div>
-{% endif %}
+    {% endif %}

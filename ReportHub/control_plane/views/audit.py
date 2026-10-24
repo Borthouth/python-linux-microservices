@@ -5,6 +5,7 @@ from django.shortcuts import render
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import Paginator
 from django.contrib.auth import get_user_model
+from control_plane.models import ScheduleAuditLog
 
 @login_required
 def audit_log_view(request):
@@ -20,6 +21,9 @@ def audit_log_view(request):
     User = get_user_model()
     if hasattr(User, 'history'):
         all_history_entries.extend(list(User.history.all()))
+
+    # 3. Include standalone schedule audit logs
+    all_history_entries.extend(list(ScheduleAuditLog.objects.all()))
 
     # Sort all combined history entries globally by date descending
     audit_list = sorted(
@@ -51,9 +55,14 @@ def audit_log_view(request):
         prev = entry.prev_record
         changes = {}
         
-        # Normalize model name for User/TrackedUser
+        # Normalize model name
         raw_model_name = entry.instance.__class__.__name__ if hasattr(entry, 'instance') else entry._meta.model.__name__
-        model_name = 'User' if raw_model_name in ['User', 'Track5edUser', 'TrackedUser'] else raw_model_name
+        if raw_model_name in ['User', 'TrackedUser']:
+            model_name = 'User'
+        elif raw_model_name == 'ScheduleAuditLog':
+            model_name = 'PeriodicTask'
+        else:
+            model_name = raw_model_name
         
         if entry.history_type == '+':
             changes = {"action": {"from": "None", "to": f"Created new {model_name}"}}
@@ -69,7 +78,13 @@ def audit_log_view(request):
             else:
                 changes = {"status": {"from": "Existing", "to": "Saved with no field modifications"}}
         else:
-            changes = {"status": {"from": None, "to": "Historical entry"}}
+            # Handle ScheduleAuditLog changes_data or fall back to summary
+            if hasattr(entry, 'changes_data') and entry.changes_data:
+                changes = entry.changes_data
+            elif hasattr(entry, 'change_summary') and entry.change_summary:
+                changes = {"status": {"from": "Previous state", "to": entry.change_summary}}
+            else:
+                changes = {"status": {"from": None, "to": "Historical entry"}}
             
         # Separate primary record identifier from context details
         if model_name == 'UserSourceAccess':
@@ -83,6 +98,9 @@ def audit_log_view(request):
         elif model_name == 'User':
             record_name = getattr(entry, 'username', 'User')
             context_label = "PLATFORM USER"
+        elif model_name == 'PeriodicTask' or raw_model_name == 'ScheduleAuditLog':
+            record_name = getattr(entry, 'name', 'Scheduled Task')
+            context_label = "SCHEDULED TASK"
         else:
             if hasattr(entry, 'name'):
                 record_name = entry.name
