@@ -5,7 +5,7 @@ from .views import (
     dashboard, 
     users, 
     audit, 
-    schedules
+    pipeline_automations
 )
 
 app_name = 'control_plane'
@@ -31,15 +31,18 @@ urlpatterns = [
     path('sources/<int:pk>/edit/', sources.source_edit_view, name='source_edit'),
     path('sources/<int:pk>/delete/', sources.source_delete_view, name='source_delete'),
     path('sources/<int:pk>/toggle/', sources.source_toggle_active_view, name='source_toggle_active'),
+    path('sources/<int:pk>/sync/', sources.source_sync_view, name='source_sync'),
+    path('sources/<int:pk>/status/', sources.source_status_view, name='source_status'),
 
     # Audit log URL
     path('audit/', audit.audit_log_view, name='audit_log'),
 
-    # Schedule routes
-    path('schedules/', schedules.schedule_list_view, name='schedule_list'),
-    path('schedules/create/', schedules.create_schedule_view, name='create_schedule'),
-    path('schedules/<int:task_id>/edit/', schedules.schedule_edit_view, name='schedule_edit'),
-    path('schedules/<int:task_id>/toggle/', schedules.schedule_toggle_active_view, name='schedule_toggle_active'),
-    path('schedules/run/<int:task_id>/', schedules.run_task_manually_view, name='run_task_manually'),
-    path('schedules/delete/<int:task_id>/', schedules.delete_schedule_view, name='delete_schedule'),
+    # Pipeline Automation URLs
+    path('pipeline-automations/', pipeline_automations.pipeline_automation_list_view, name='pipeline_automation_list'),
+    path('pipeline-automations/create/', pipeline_automations.pipeline_automation_create_view, name='pipeline_automation_create'),
+    path('pipeline-automations/<int:task_id>/edit/', pipeline_automations.pipeline_automation_edit_view, name='pipeline_automation_edit'),
+    path('pipeline-automations/<int:task_id>/toggle/', pipeline_automations.pipeline_automation_toggle_active_view, name='pipeline_automation_toggle'),
+    path('pipeline-automations/<int:task_id>/run/', pipeline_automations.run_pipeline_automation_manually_view, name='pipeline_automation_run'),
+    path('pipeline-automations/<int:task_id>/delete/', pipeline_automations.delete_pipeline_automation_view, name='pipeline_automation_delete'),
 ]
+

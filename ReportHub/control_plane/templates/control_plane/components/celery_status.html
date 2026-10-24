@@ -1,0 +1,56 @@
+<div id="{{ component_id }}" class="flex flex-col" 
+     {% if status == 'RUNNING' and poll_url %}
+         hx-get="{{ poll_url }}" 
+         hx-trigger="every 2s" 
+         hx-swap="outerHTML"
+         hx-indicator="#{{ component_id }}-spinner"
+     {% endif %}>
+    
+    {% if timestamp %}
+        <span class="text-slate-200 text-xs">{{ timestamp|date:"Y-m-d H:i" }}</span>
+    {% else %}
+        <span class="text-slate-500 text-xs">
+            {% if status == 'RUNNING' %}In Progress...{% else %}Never{% endif %}
+        </span>
+    {% endif %}
+
+    {% if status == 'SUCCESS' %}
+        <!-- Fallback status indicator so state is clear even if scripts/toasts are blocked -->
+        <span class="text-emerald-400 text-[10px] font-medium mt-0.5">Ready</span>
+    {% elif status == 'RUNNING' %}
+        <span id="{{ component_id }}-spinner" class="text-sky-400 text-[10px] font-medium flex items-center space-x-1 mt-0.5 animate-pulse">
+            <span>⏳</span> <span>Running...</span>
+        </span>
+    {% elif status == 'FAILED' %}
+        <span class="text-red-400 text-[10px] font-medium flex items-center space-x-1 mt-0.5" {% if error_message %}title="{{ error_message }}"{% endif %}>
+            <span>⚠️</span> <span>Failed</span>
+        </span>
+    {% endif %}
+
+    <!-- CSP-compliant data attributes for toast handling instead of raw inline script blocks -->
+    {% if status == 'SUCCESS' or status == 'FAILED' %}
+        <div class="hidden toast-trigger" 
+             data-status="{{ status }}" 
+             data-id="{{ component_id }}"
+             data-message="{% if status == 'SUCCESS' %}Connection test complete! The background verification finished successfully.{% else %}Connection test failed. Check logs for details.{% endif %}"
+             data-type="{% if status == 'SUCCESS' %}success{% else %}error{% endif %}">
+        </div>
+    {% endif %}
+</div>
+
+<!-- Global event handler to process toasts cleanly without inline script violations -->
+<script>
+document.addEventListener('htmx:afterSwap', function(evt) {
+    const triggers = evt.detail.elt.querySelectorAll('.toast-trigger');
+    triggers.forEach(el => {
+        const id = el.dataset.id;
+        const storageKey = 'toast_shown_' + id;
+        
+        // Ensure toast triggers only once per unique task execution state
+        if (typeof showToast === 'function' && !window[storageKey]) {
+            window[storageKey] = true;
+            showToast(el.dataset.message, el.dataset.type);
+        }
+    });
+});
+</script>

@@ -4,4 +4,4 @@ from .users import (
     UserEditForm, 
     CustomPasswordChangeForm,
 )
-from .schedules import TaskScheduleForm
+from .pipeline_automations import PipelineAutomationForm

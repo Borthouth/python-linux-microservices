@@ -1,12 +1,14 @@
 {% extends 'control_plane/base.html' %}
 
-{% block title %}Register Data Source - ReportHub{% endblock %}
+{% block title %}{% if profile %}Edit Data Source{% else %}Register Data Source{% endif %} - ReportHub{% endblock %}
 
 {% block content %}
 <div class="max-w-2xl mx-auto">
     <div class="mb-6 flex items-center justify-between">
         <div>
-            <h1 class="text-2xl font-extrabold tracking-tight text-white">Register New Data Source</h1>
+            <h1 class="text-2xl font-extrabold tracking-tight text-white">
+                {% if profile %}Edit Data Source: {{ profile.name }}{% else %}Register New Data Source{% endif %}
+            </h1>
             <p class="text-slate-400 text-sm mt-1">Configure connection parameters for an external PostgreSQL or MySQL database.</p>
         </div>
         <a href="{% url 'control_plane:source_list' %}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium rounded-lg transition-all">
@@ -35,10 +37,15 @@
                 </div>
             {% endfor %}
 
-            <div class="pt-4 flex items-center justify-end space-x-3">
-                <a href="{% url 'control_plane:source_list' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl transition-all">
+            <div class="pt-6 flex items-center justify-end space-x-3 border-t border-slate-800">
+                <a href="{% url 'control_plane:source_list' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all">
                     Cancel
                 </a>
+                
+                <button type="submit" name="save_and_test" value="true" class="px-5 py-2.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 text-sm font-medium rounded-xl border border-sky-500/20 transition-all">
+                    Save & Test Connection
+                </button>
+
                 <button type="submit" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">
                     Save Data Source
                 </button>

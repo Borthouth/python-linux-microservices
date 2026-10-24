@@ -7,11 +7,18 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies (including netcat-openbsd for the DB readiness check)
+# Install system dependencies (including netcat-openbsd, curl, and Microsoft ODBC drivers for MSSQL)
 RUN apt-get update && apt-get install -y \
     netcat-openbsd \
     gcc \
     libpq-dev \
+    curl \
+    gnupg \
+    && curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /usr/share/keyrings/microsoft-prod.gpg \
+    && curl https://packages.microsoft.com/config/debian/12/prod.list > /etc/apt/sources.list.d/mssql-release.list \
+    && apt-get update && ACCEPT_EULA=Y apt-get install -y \
+        msodbcsql18 \
+        unixodbc-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

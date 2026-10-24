@@ -1,0 +1,93 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}{% if is_edit %}Edit Pipeline Automation: {{ task.name }}{% else %}Create Pipeline Automation{% endif %} - ReportHub{% endblock %}
+
+{% block content %}
+<div class="max-w-xl mx-auto">
+    <div class="flex items-center justify-between mb-8">
+        <div>
+            <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">
+                {% if is_edit %}Edit Pipeline Automation: <span class="text-indigo-400">{{ task.name }}</span>{% else %}Create Pipeline Automation{% endif %}
+            </h1>
+            <p class="text-slate-400 text-sm">
+                {% if is_edit %}Update timing intervals and configuration parameters for this pipeline automation.{% else %}Configure automated timing intervals for background execution tasks.{% endif %}
+            </p>
+        </div>
+        <a href="{% url 'control_plane:pipeline_automation_list' %}" class="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded-xl border border-slate-700 transition-all flex items-center space-x-1.5 shadow-md">
+            <span>←</span>
+            <span>Back to Pipeline Automations</span>
+        </a>
+    </div>
+
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+        <form method="post" class="space-y-6">
+            {% csrf_token %}
+            
+            {% if form.non_field_errors %}
+                <div class="p-4 bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl text-sm">
+                    {{ form.non_field_errors }}
+                </div>
+            {% endif %}
+
+            <!-- Task Name Field -->
+            <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                    {{ form.task_name.label }}
+                </label>
+                {{ form.task_name }}
+                {% if form.task_name.help_text %}
+                    <p class="mt-1.5 text-xs text-slate-500">{{ form.task_name.help_text }}</p>
+                {% endif %}
+                {% if form.task_name.errors %}
+                    <p class="mt-1.5 text-xs text-red-400">{{ form.task_name.errors.0 }}</p>
+                {% endif %}
+            </div>
+
+            <!-- Target Celery Task Field -->
+            <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                    {{ form.task_path.label }}
+                </label>
+                {{ form.task_path }}
+                {% if form.task_path.help_text %}
+                    <p class="mt-1.5 text-xs text-slate-500">{{ form.task_path.help_text }}</p>
+                {% endif %}
+                {% if form.task_path.errors %}
+                    <p class="mt-1.5 text-xs text-red-400">{{ form.task_path.errors.0 }}</p>
+                {% endif %}
+            </div>
+
+            <!-- Cron Expression Field -->
+            <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                    {{ form.cron_expression.label }}
+                </label>
+                {{ form.cron_expression }}
+                
+                {% if form.cron_expression.errors %}
+                    <p class="mt-1.5 text-xs text-red-400">{{ form.cron_expression.errors.0 }}</p>
+                {% else %}
+                    <div class="mt-2 text-xs text-slate-400 space-y-1 bg-slate-950/50 p-3 rounded-xl border border-slate-800/80">
+                        <p class="font-medium text-slate-300">Quick Reference Guide:</p>
+                        <div class="grid grid-cols-2 gap-2 font-mono text-[11px] text-indigo-300">
+                            <div><code>0 0 * * *</code> <span class="text-slate-500 font-sans">(Daily @ Midnight)</span></div>
+                            <div><code>0 * * * *</code> <span class="text-slate-500 font-sans">(Hourly)</span></div>
+                            <div><code>*/15 * * * *</code> <span class="text-slate-500 font-sans">(Every 15 mins)</span></div>
+                            <div><code>* * * * *</code> <span class="text-slate-500 font-sans">(Every minute)</span></div>
+                        </div>
+                    </div>
+                {% endif %}
+            </div>
+
+            <div class="flex items-center justify-end space-x-3 pt-4 border-t border-slate-800">
+                <a href="{% url 'control_plane:pipeline_automation_list' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all">
+                    Cancel
+                </a>
+                <button type="submit" class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">
+                    {% if is_edit %}Save Changes{% else %}Save Pipeline Automation{% endif %}
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

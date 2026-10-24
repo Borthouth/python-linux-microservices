@@ -1,4 +1,5 @@
 from django.db import models
+from django.urls import reverse
 from django.conf import settings
 from django.contrib.auth.models import User
 from encrypted_model_fields.fields import EncryptedCharField
@@ -39,13 +40,18 @@ class Role(models.TextChoices):
 class DbChoice(models.TextChoices):
     MYSQL = 'mysql', 'MySQL'
     POSTGRESQL = 'postgresql', 'PostgreSQL'
-    MSSQL = 'mssql', 'SQL Server'
+    MSSQL = 'mssql', 'Microsoft SQL Server'
+
+class SyncStatus(models.TextChoices):
+    PENDING = 'PENDING', 'Pending'
+    RUNNING = 'RUNNING', 'Running'
+    SUCCESS = 'SUCCESS', 'Success'
+    FAILED = 'FAILED', 'Failed'
 
 class SourceProfile(TimeStampedAuditedModel):
     """Represents a remote data source (e.g., client MySQL database) to be introspected."""
     name = models.CharField(max_length=100, unique=True)
 
-    # Update this field to use choices
     db_type = models.CharField(
         max_length=20, 
         choices=DbChoice.choices, 
@@ -59,8 +65,20 @@ class SourceProfile(TimeStampedAuditedModel):
     password = EncryptedCharField(max_length=255, blank=True, null=True)
     is_active = models.BooleanField(default=True)
 
+    # Schema Synchronization Tracking Fields
+    last_synced = models.DateTimeField(null=True, blank=True)
+    last_sync_status = models.CharField(
+        max_length=20,
+        choices=SyncStatus.choices,
+        default=SyncStatus.PENDING
+    )
+    last_sync_error = models.TextField(blank=True, null=True)
+
     def __str__(self):
         return f"{self.name} ({self.database_name})"
+
+    def get_status_url(self):
+        return reverse('control_plane:source_status', kwargs={'pk': self.pk})
 
 class UserSourceAccess(TimeStampedAuditedModel):
     """Layer 1 Security: Maps users to specific Source Profiles with assigned roles."""
@@ -86,8 +104,8 @@ class TrackedUser(User):
         verbose_name = 'Tracked User'
         verbose_name_plural = 'Tracked Users'
 
-class ScheduleAuditLog(models.Model):
-    """Standalone audit log that mimics history records for scheduled tasks."""
+class PipelineAutomationAuditLog(models.Model):
+    """Standalone audit log that mimics history records for pipeline automations."""
     name = models.CharField(max_length=200)
     action_type = models.CharField(max_length=5)  # '+' for create, '~' for edit/toggle, '-' for delete
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)

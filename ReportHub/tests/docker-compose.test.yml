@@ -1,0 +1,43 @@
+services:
+  postgres-test:
+    image: postgres:15-alpine
+    container_name: reporthub-postgres-test
+    environment:
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_password
+      POSTGRES_DB: chinook
+    ports:
+      - "5433:5432"  # Mapped to host port 5433 to avoid conflicts
+    volumes:
+      - pg_test_data:/var/lib/postgresql/data
+
+  mysql-test:
+    image: mysql:8.0
+    container_name: reporthub-mysql-test
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: northwind
+      MYSQL_USER: test_user
+      MYSQL_PASSWORD: test_password
+    ports:
+      - "3307:3306"  # Mapped to host port 3307 to avoid conflicts
+    volumes:
+      - mysql_test_data:/var/lib/mysql
+
+  mssql-test:
+      image: mcr.microsoft.com/mssql/server:2022-latest
+      container_name: reporthub-mssql-test
+      environment:
+        - ACCEPT_EULA=Y
+        - MSSQL_SA_PASSWORD=YourStrongPassword123!
+        - MSSQL_PID=Developer
+      ports:
+        - "1434:1433"  # Mapped to host port 1434 to avoid conflicts
+      volumes:
+        - mssql_test_data:/var/opt/mssql
+      restart: unless-stopped
+
+volumes:
+  pg_test_data:
+  mysql_test_data:
+  mssql_test_data:

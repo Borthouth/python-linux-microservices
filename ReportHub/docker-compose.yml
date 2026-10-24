@@ -34,8 +34,11 @@ services:
       - REDIS_URL=${REDIS_URL}
     ports:
       - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - .:/app
+      - ./logs:/app/logs
     depends_on:
       - postgres
       - redis
@@ -43,8 +46,8 @@ services:
 
   celery_worker:
     build: .
+    command: celery -A app.core.celery_app worker --loglevel=info
     container_name: reporthub_celery_worker
-    command: celery -A config worker --loglevel=info
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -52,8 +55,11 @@ services:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - .:/app
+      - ./logs:/app/logs
     depends_on:
       - postgres
       - redis
@@ -61,8 +67,8 @@ services:
 
   celery_beat:
     build: .
+    command: celery -A app.core.celery_app beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     container_name: reporthub_celery_beat
-    command: celery -A config beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -70,8 +76,11 @@ services:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - .:/app
+      - ./logs:/app/logs
     depends_on:
       - postgres
       - redis

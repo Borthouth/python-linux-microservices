@@ -13,7 +13,7 @@
                 <!-- Restricted to System Admin / Superuser only -->
                 {% if request.user.role == 'System Admin' or request.user.is_superuser %}
                     <a href="{% url 'control_plane:source_list' %}" class="text-slate-300 hover:text-white transition-all">Data Sources</a>
-                    <a href="{% url 'control_plane:schedule_list' %}" class="text-slate-300 hover:text-white transition-all">Schedules</a>
+                    <a href="{% url 'control_plane:pipeline_automation_list' %}" class="text-slate-300 hover:text-white transition-all">Pipeline Automations</a>
                     <a href="{% url 'control_plane:user_management' %}" class="text-slate-300 hover:text-white transition-all">Users & Access</a>
                     <a href="{% url 'control_plane:audit_log' %}" class="text-slate-300 hover:text-white transition-all">Audit Logs</a>
                 {% endif %}

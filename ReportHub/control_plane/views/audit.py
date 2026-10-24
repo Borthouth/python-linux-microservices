@@ -5,7 +5,7 @@ from django.shortcuts import render
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import Paginator
 from django.contrib.auth import get_user_model
-from control_plane.models import ScheduleAuditLog
+from control_plane.models import PipelineAutomationAuditLog
 
 @login_required
 def audit_log_view(request):
@@ -22,8 +22,8 @@ def audit_log_view(request):
     if hasattr(User, 'history'):
         all_history_entries.extend(list(User.history.all()))
 
-    # 3. Include standalone schedule audit logs
-    all_history_entries.extend(list(ScheduleAuditLog.objects.all()))
+    # 3. Include standalone pipeline automation audit logs
+    all_history_entries.extend(list(PipelineAutomationAuditLog.objects.all()))
 
     # Sort all combined history entries globally by date descending
     audit_list = sorted(
@@ -59,7 +59,7 @@ def audit_log_view(request):
         raw_model_name = entry.instance.__class__.__name__ if hasattr(entry, 'instance') else entry._meta.model.__name__
         if raw_model_name in ['User', 'TrackedUser']:
             model_name = 'User'
-        elif raw_model_name == 'ScheduleAuditLog':
+        elif raw_model_name == 'PipelineAutomationAuditLog':
             model_name = 'PeriodicTask'
         else:
             model_name = raw_model_name
@@ -78,7 +78,7 @@ def audit_log_view(request):
             else:
                 changes = {"status": {"from": "Existing", "to": "Saved with no field modifications"}}
         else:
-            # Handle ScheduleAuditLog changes_data or fall back to summary
+            # Handle AutomationAuditLog changes_data or fall back to summary
             if hasattr(entry, 'changes_data') and entry.changes_data:
                 changes = entry.changes_data
             elif hasattr(entry, 'change_summary') and entry.change_summary:
@@ -98,9 +98,9 @@ def audit_log_view(request):
         elif model_name == 'User':
             record_name = getattr(entry, 'username', 'User')
             context_label = "PLATFORM USER"
-        elif model_name == 'PeriodicTask' or raw_model_name == 'ScheduleAuditLog':
-            record_name = getattr(entry, 'name', 'Scheduled Task')
-            context_label = "SCHEDULED TASK"
+        elif model_name == 'PeriodicTask' or raw_model_name == 'AutomationAuditLog':
+            record_name = getattr(entry, 'name', 'Pipeline Automation')
+            context_label = "PIPELINE AUTOMATION"
         else:
             if hasattr(entry, 'name'):
                 record_name = entry.name
