@@ -1,15 +1,16 @@
 # ReportHub 🚀
 > Enterprise-grade, dynamic multi-source analytical warehouse and reporting control plane.
 
-`ReportHub` is a high-performance analytics platform designed to dynamically ingest, unify, and report on data from multiple distributed MySQL source databases into a centralized PostgreSQL warehouse—**without hardcoding database models**. Built with a Django control plane and a Celery-driven asynchronous ETL pipeline, ReportHub empowers organizations to manage schema reflection, multi-tenant row-level security, and complex metric aggregations through a sleek modern web interface.
+`ReportHub` is a high-performance analytics platform designed to dynamically ingest, unify, and report on data from multiple distributed MySQL source databases into a centralized PostgreSQL warehouse—**without hardcoding database models**. Built with a Django control plane and a Celery-driven asynchronous ETL pipeline, ReportHub empowers organizations to manage schema reflection, multi-tenant row-level security, scheduled task governance, and complex metric aggregations through a sleek modern web interface.
 
 ---
 
 ## 🏗️ Core Architecture & Design
 
 - **Decoupled Dual-Database Architecture:** Strict separation between the operational **Control Plane DB** (hardened Django database for configuration, user access matrix, and metadata) and the standalone **Analytical Warehouse DB** (driven via standalone Alembic migrations with `JSONB` flex-payload columns).
-- **Django Control Plane:** Synchronous control plane managing user authentication, role-based access control (RBAC), self-service user profile management, source database connection profiles, and report sharing rules.
-- **Unified Audit Governance:** Full history tracking across control plane infrastructure models and user accounts using `django-simple-history`, featuring an XSS-hardened unified audit log viewer (`/control-plane/audit/`) with field-level Old-to-New diff comparisons and full-text search.
+- **Django Control Plane:** Synchronous control plane managing user authentication, role-based access control (RBAC), self-service user profile management, source database connection profiles, scheduled ETL task management, and report sharing rules.
+- **Unified Audit Governance & Scheduled Task Tracking:** Full history tracking across control plane infrastructure models, `TrackedUser`, and standalone scheduled tasks via `ScheduleAuditLog` (utilizing custom JSON diff tracking). Features an XSS-hardened unified audit log viewer (`/control-plane/audit/`) with field-level Old-to-New diff comparison modal cards and full-text search.
+- **Scheduled ETL Task Governance:** Fully searchable and paginated management UI for `PeriodicTask` background jobs with integrated error-handling and uniqueness validation (`ValidationError` / `IntegrityError` safeguards for duplicate task names).
 - **Dynamic Warehouse Provisioning:** Rather than hardcoding models, ReportHub inspects source databases (`information_schema`), allows selective field mapping (excluding heavy files like binary blobs), and dynamically provisions PostgreSQL analytical tables complete with composite indexes, `source_id`, `company_id`, and logical foreign key references.
 - **Multi-Source Unification:** Every ingested row is stamped with a `source_id`, allowing independent ETL schedules per server while enabling seamless cross-server global reporting through simple query filters.
 - **Multi-Metric Engine:** Apply multiple aggregate calculations (`SUM`, `AVG`, `MAX`, conditional counts like `> £1,000`) to a single source field during nightly rollups.
@@ -36,12 +37,12 @@
 
 ## 📂 Project Structure
 
-
+```text
 reporthub/
 ├── app/                  # Django project configuration (settings, wsgi, celery)
-├── control_plane/        # Django app: Users, RBAC, Source Profiles, Audit Logs, Profile Management
+├── control_plane/        # Django app: Users, RBAC, Source Profiles, Audit Logs, Schedules
 ├── warehouse/            # Dynamic schema reflection & table provisioner utilities
-├── etl/                  # Celery tasks (Batch ingestion, roll-ups, backfilling)
+├── etl/                  # Celery tasks (Batch ingestion, roll-ups, backfilling, cleanup)
 ├── Dockerfile            # Container build instructions
 ├── docker-compose.yml    # Service orchestration (Web, Postgres, Redis, Celery)
 ├── requirements.txt      # Python dependencies

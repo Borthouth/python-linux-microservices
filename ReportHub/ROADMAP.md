@@ -22,11 +22,12 @@ Track the development and implementation phases of `ReportHub`.
 - [x] Set up user authentication and RBAC roles (*Viewer, Analyst/Builder, System Admin*).
 - [x] Build control plane models for **Target Connections (`TargetConnection`)**, **Source Tables (`SourceTable`)**, and **Source Columns (`SourceColumn`)** alongside the **User-Source Access Matrix** (Layer 1 security).
 - [x] Implement **Self-Service User Profile Management** (nav-bar linked account view for users to update their details, first/last name, email, and password).
-- [x] **Unified Audit Trail Engine (`django-simple-history`):**
-  - Integrated full history auditing across control plane infrastructure models and `TrackedUser` proxy model.
+- [x] **Unified Audit Trail Engine & Scheduled Task Governance:**
+  - Integrated full history auditing across control plane infrastructure models, `TrackedUser`, and custom standalone `ScheduleAuditLog` model (with `changes_data` JSON diff tracking).
   - Built unified audit log viewer (`/control-plane/audit/`) with global timestamp sorting, action code filtering (`+`, `~`, `-`), and full-text search across sources, names, and modifier users.
   - Developed field-level diff engine displaying precise *Old → New* value comparisons inside a responsive modal.
   - Hardened frontend against Stored XSS by removing `|safe` rendering, utilizing DOM `data-*` attributes, and escaping dynamic values.
+  - Implemented searchable, paginated management UI for `PeriodicTask` scheduled ETL jobs with robust uniqueness validation (`ValidationError` / `IntegrityError` handling for duplicate names).
 
 ---
 
