@@ -5,7 +5,8 @@ from .views import (
     dashboard, 
     users, 
     audit, 
-    pipeline_automations
+    pipeline_automations,
+    warehouse,
 )
 
 app_name = 'control_plane'
@@ -44,5 +45,9 @@ urlpatterns = [
     path('pipeline-automations/<int:task_id>/toggle/', pipeline_automations.pipeline_automation_toggle_active_view, name='pipeline_automation_toggle'),
     path('pipeline-automations/<int:task_id>/run/', pipeline_automations.run_pipeline_automation_manually_view, name='pipeline_automation_run'),
     path('pipeline-automations/<int:task_id>/delete/', pipeline_automations.delete_pipeline_automation_view, name='pipeline_automation_delete'),
+
+    # Warehouse Field Mapping Routes
+    path('warehouse/', warehouse.warehouse_list_view, name='warehouse_list'),
+    path('warehouse/<int:source_pk>/fields/', warehouse.warehouse_field_selection_view, name='warehouse_field_selection'),
 ]
 

@@ -21,4 +21,5 @@ ENV/
 
 # Docker & Database Volumes (Crucial for your setup)
 docker/postgres_data/
-.DS_Store
+.DS_Storedocker/clickhouse/data/
+docker/clickhouse/data/

@@ -7,9 +7,13 @@ services:
       POSTGRES_PASSWORD: test_password
       POSTGRES_DB: chinook
     ports:
-      - "5433:5432"  # Mapped to host port 5433 to avoid conflicts
+      - "5433:5432"
+    command: ["postgres", "-c", "listen_addresses=*"]
+    networks:
+      - shared_network
     volumes:
       - pg_test_data:/var/lib/postgresql/data
+      - ./init-db/postgres:/docker-entrypoint-initdb.d
 
   mysql-test:
     image: mysql:8.0
@@ -20,22 +24,31 @@ services:
       MYSQL_USER: test_user
       MYSQL_PASSWORD: test_password
     ports:
-      - "3307:3306"  # Mapped to host port 3307 to avoid conflicts
+      - "3307:3306"
+    networks:
+      - shared_network
     volumes:
       - mysql_test_data:/var/lib/mysql
+      - ./init-db/mysql:/docker-entrypoint-initdb.d
 
   mssql-test:
-      image: mcr.microsoft.com/mssql/server:2022-latest
-      container_name: reporthub-mssql-test
-      environment:
-        - ACCEPT_EULA=Y
-        - MSSQL_SA_PASSWORD=YourStrongPassword123!
-        - MSSQL_PID=Developer
-      ports:
-        - "1434:1433"  # Mapped to host port 1434 to avoid conflicts
-      volumes:
-        - mssql_test_data:/var/opt/mssql
-      restart: unless-stopped
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: reporthub-mssql-test
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=YourStrongPassword123!
+      - MSSQL_PID=Developer
+    ports:
+      - "1434:1433"
+    networks:
+      - shared_network
+    volumes:
+      - mssql_test_data:/var/opt/mssql
+    restart: unless-stopped
+
+networks:
+  shared_network:
+    name: reporthub_shared_network
 
 volumes:
   pg_test_data:

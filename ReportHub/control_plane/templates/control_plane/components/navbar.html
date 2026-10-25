@@ -6,13 +6,14 @@
         </div>
         
         <div class="flex items-center space-x-6">
-            <nav class="hidden md:flex space-x-4 text-sm">
+            <nav class="hidden md:flex space-x-4 text-sm items-center">
                 <!-- Dashboard is visible to all roles -->
                 <a href="{% url 'control_plane:dashboard' %}" class="text-slate-300 hover:text-white transition-all">Dashboard</a>
                 
                 <!-- Restricted to System Admin / Superuser only -->
                 {% if request.user.role == 'System Admin' or request.user.is_superuser %}
                     <a href="{% url 'control_plane:source_list' %}" class="text-slate-300 hover:text-white transition-all">Data Sources</a>
+                    <a href="{% url 'control_plane:warehouse_list' %}" class="text-slate-300 hover:text-white transition-all">Warehouse Mapping</a>
                     <a href="{% url 'control_plane:pipeline_automation_list' %}" class="text-slate-300 hover:text-white transition-all">Pipeline Automations</a>
                     <a href="{% url 'control_plane:user_management' %}" class="text-slate-300 hover:text-white transition-all">Users & Access</a>
                     <a href="{% url 'control_plane:audit_log' %}" class="text-slate-300 hover:text-white transition-all">Audit Logs</a>

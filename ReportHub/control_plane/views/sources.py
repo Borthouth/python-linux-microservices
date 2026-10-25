@@ -8,7 +8,7 @@ from django.contrib import messages
 from control_plane.models import SourceProfile, DbChoice, SyncStatus
 from control_plane.forms import SourceProfileForm
 
-from etl.tasks import test_source_connection_task
+from etl.tasks import test_source_connection_task, introspect_source_schema_task
 
 
 def is_admin(user):
@@ -37,8 +37,14 @@ def source_create_view(request):
             saved_profile = form.save()
             
             if 'save_and_test' in request.POST:
+                saved_profile.last_sync_status = SyncStatus.RUNNING
+                saved_profile.save(update_fields=['last_sync_status'])
                 test_source_connection_task.delay(saved_profile.pk)
-                messages.success(request, f"Data source '{saved_profile.name}' created. Connection test is running in the background.")
+                
+                # Mark in session that this profile is doing a connection test, not a sync
+                request.session[f'is_connection_test_{saved_profile.pk}'] = True
+                
+                messages.info(request, f"Data source '{saved_profile.name}' created. Connection test is running...")
             else:
                 messages.success(request, f"Data source '{saved_profile.name}' created successfully.")
                 
@@ -58,9 +64,13 @@ def source_edit_view(request, pk):
             
             if 'save_and_test' in request.POST:
                 saved_profile.last_sync_status = SyncStatus.RUNNING
-                saved_profile.save()
+                saved_profile.save(update_fields=['last_sync_status'])
                 test_source_connection_task.delay(saved_profile.pk)
-                messages.info(request, f"Data source '{saved_profile.name}' saved. Connection test is running in the background.")
+                
+                # Explicitly set the test flag so status view knows to use Blue/Info
+                request.session[f'is_connection_test_{saved_profile.pk}'] = True
+                
+                messages.info(request, f"Data source '{saved_profile.name}' saved. Connection test is running...")
             else:
                 messages.success(request, f"Data source '{saved_profile.name}' saved successfully.")
                 
@@ -72,27 +82,12 @@ def source_edit_view(request, pk):
 
 @login_required
 @user_passes_test(is_admin)
-def source_sync_view(request, pk):
-    profile = get_object_or_404(SourceProfile, pk=pk)
-    
-    if not profile.is_active:
-        messages.error(request, f"Cannot sync inactive data source: {profile.name}")
-        return redirect('control_plane:source_list')
-
-    profile.last_sync_status = SyncStatus.RUNNING
-    profile.save()
-    test_source_connection_task.delay(profile.pk)
-    messages.info(request, f"Connection test started in the background for '{profile.name}'.")
-
-    return redirect('control_plane:source_list')
-
-@login_required
-@user_passes_test(is_admin)
 def source_delete_view(request, pk):
     profile = get_object_or_404(SourceProfile, pk=pk)
     if request.method == 'POST':
+        profile_name = profile.name  # Fixed from saved_profile to profile
         profile.delete()
-        messages.success(request, f"Data source '{profile.name}' deleted successfully.")
+        messages.success(request, f"Data source '{profile_name}' deleted successfully.")
         return redirect('control_plane:source_list')
     
     return render(request, 'control_plane/source_confirm_delete.html', {'profile': profile})
@@ -116,9 +111,15 @@ def source_sync_view(request, pk):
         messages.error(request, f"Cannot sync inactive data source: {profile.name}")
         return redirect('control_plane:source_list')
 
-    # Trigger asynchronous connection test/sync via Celery
-    test_source_connection_task.delay(profile.pk)
-    messages.success(request, f"Connection test started in the background for '{profile.name}'.")
+    profile.last_sync_status = SyncStatus.RUNNING
+    profile.save(update_fields=['last_sync_status'])
+
+    request.session.pop(f'is_connection_test_{profile.pk}', None)
+
+    introspect_source_schema_task.apply_async(args=[profile.pk], queue='queue_ux')
+    
+    # Blue start for sync
+    messages.info(request, f"Schema synchronization started in the background (UX Queue) for '{profile.name}'.")
 
     return redirect('control_plane:source_list')
 
@@ -127,15 +128,18 @@ def source_sync_view(request, pk):
 def source_status_view(request, pk):
     source = get_object_or_404(SourceProfile, pk=pk)
     
-    # If the background task has completed successfully
+    is_conn_test = request.session.pop(f'is_connection_test_{source.pk}', False)
+    
+    # If the background task has completed successfully -> BOTH GREEN
     if source.last_sync_status == SyncStatus.SUCCESS:
-        # Check if we already added a message for this sync timestamp to prevent duplicates
         session_key = f'sync_msg_shown_{source.pk}_{source.last_synced}'
         if not request.session.get(session_key):
-            messages.success(request, f"Connection test complete for '{source.name}'! The background verification finished successfully.")
+            if is_conn_test:
+                messages.success(request, f"Connection test successful for '{source.name}'! Database is reachable and settings are verified.")
+            else:
+                messages.success(request, f"Sync complete for '{source.name}'! Schema introspection finished successfully.")
             request.session[session_key] = True
             
-        # Render the component and force an HTMX full page refresh so the message banner appears
         response = render(request, 'control_plane/components/celery_status.html', {
             'component_id': f'source-status-{source.pk}',
             'status': source.last_sync_status,
@@ -145,11 +149,14 @@ def source_status_view(request, pk):
         response['HX-Refresh'] = 'true'
         return response
 
-    # If it failed
+    # If it failed -> BOTH RED
     if source.last_sync_status == SyncStatus.FAILED:
         fail_key = f'sync_fail_shown_{source.pk}_{source.last_synced}'
         if not request.session.get(fail_key):
-            messages.error(request, f"Connection test failed for '{source.name}': {source.last_sync_error}")
+            if is_conn_test:
+                messages.error(request, f"Connection test failed for '{source.name}': {source.last_sync_error}")
+            else:
+                messages.error(request, f"Sync failed for '{source.name}': {source.last_sync_error}")
             request.session[fail_key] = True
             
         response = render(request, 'control_plane/components/celery_status.html', {

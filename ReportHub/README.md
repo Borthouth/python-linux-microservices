@@ -12,7 +12,7 @@
 - **Unified Audit Governance & Scheduled Task Tracking:** Full history tracking across control plane infrastructure models, `TrackedUser`, and standalone scheduled tasks via `ScheduleAuditLog` (utilizing custom JSON diff tracking). Features an XSS-hardened unified audit log viewer (`/control-plane/audit/`) with field-level Old-to-New diff comparison modal cards and full-text search.
 - **Scheduled ETL Task Governance:** Fully searchable and paginated management UI for `PeriodicTask` background jobs with integrated error-handling and uniqueness validation (`ValidationError` / `IntegrityError` safeguards for duplicate task names).
 - **Asynchronous UI Status & Toast Notification Architecture:** Real-time database connection testing driven by HTMX polling (`every 2s`), backed by CSP-compliant event-driven (`htmx:afterSwap`) floating toast notifications and robust fallback UI states ("Ready", "Running...", "Failed").
-- **Dynamic Warehouse Provisioning:** Rather than hardcoding models, ReportHub inspects source databases (`information_schema` / catalog views), allows selective field mapping, and dynamically provisions PostgreSQL analytical tables complete with composite indexes, `source_id`, `company_id`, and logical foreign key references.
+- **Dynamic Warehouse Provisioning:** Rather than hardcoding models, ReportHub inspects source databases (`information_schema` / catalog views), allows selective field mapping via an interactive master-detail UI, and dynamically provisions PostgreSQL analytical tables complete with composite indexes, `source_id`, `company_id`, and logical foreign key references.
 - **Multi-Source Unification:** Every ingested row is stamped with a `source_id`, allowing independent ETL schedules per server while enabling seamless cross-server global reporting through simple query filters.
 - **Multi-Metric Engine:** Apply multiple aggregate calculations (`SUM`, `AVG`, `MAX`, conditional counts) to a single source field during rollups.
 - **Enterprise Security Matrix:** 
@@ -21,6 +21,29 @@
   3. *Row-Level Security (RLS):* Automated tenant isolation via `company_id` injection on all queries.
   4. *Security Hardening:* Enforced via `django-csp` (Content Security Policy), HttpOnly session/CSRF cookies, and strict host configurations.
 - **Secure Report Sharing:** Save custom reports and generate time-expiring, tokenized public or team-shared URLs.
+
+---
+
+## 🧪 Polyglot Test Database Environment
+
+ReportHub includes an isolated multi-database test harness (`docker-compose.test.yml`) that spins up all supported target database engines simultaneously alongside persistent volumes, allowing you to test schema introspection and ETL synchronization against real instances locally.
+
+### Test Database Connection Matrix
+
+| Database Engine | Default Host | Port | Credentials (User / Password) | Target Database / Service Name |
+| :--- | :--- | :--- | :--- | :--- |
+| **PostgreSQL** | `localhost` | `5433` | `postgres` / `postgres_test_pwd` | `reporthub_test_pg` |
+| **MySQL** | `localhost` | `3307` | `root` / `mysql_test_pwd` | `reporthub_test_mysql` |
+| **Microsoft SQL Server** | `localhost` | `1434` | `sa` / `MssqlTestPassword123!` | `master` (or custom test db) |
+
+### Launching the Test Environment
+```bash
+# Spin up the polyglot test containers in the background
+docker compose -f docker-compose.test.yml up -d
+
+# Shut down and clean up test containers/volumes when finished
+docker compose -f docker-compose.test.yml down -v
+```
 
 ---
 
@@ -52,3 +75,4 @@ reporthub/
 ├── entrypoint.sh           # Container startup & auto-migration script
 ├── ROADMAP.md              # Project implementation tracker
 └── README.md               # Project documentation
+```

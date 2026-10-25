@@ -38,15 +38,21 @@ Track the development and implementation phases of `ReportHub`.
 
 ## Phase 3: Schema Reflection & Configuration UI
 - [x] Build the multi-source connection profile manager UI and control plane web views.
-- [ ] Implement **Celery Schema Introspection Task** (`information_schema` / MSSQL catalog views / SQLAlchemy inspector) to asynchronously discover tables/columns from target databases (PostgreSQL, MySQL, and Microsoft SQL Server) and populate Django control plane metadata.
-- [ ] Validate schema discovery against real-world target databases over local LAN and test containers.
-- [ ] Develop the configuration web page (interactive field toggling, blob exclusion, and multi-metric selection).
+- [x] **Celery Schema Introspection Task:**
+  - Implemented background `introspect_source_schema_task` using SQLAlchemy inspector (`information_schema`, MSSQL catalog views) to asynchronously discover tables and columns across PostgreSQL, MySQL, and Microsoft SQL Server.
+  - Automatically populates and updates relational control plane metadata models (`SourceTable` and `SourceField`).
+  - Added periodic Celery Beat wrapper (`trigger_all_active_source_introspection_task`) for automated recurring schema discovery.
+- [x] **High-Performance Master-Detail Schema Mapping UI:**
+  - Developed `WarehouseDatasetMapping` domain model for fine-grained table and field synchronization control.
+  - Built master-detail mapping interface (`/control-plane/warehouse/`) featuring a searchable, scrollable table navigator on the left and a column selection panel on the right.
+  - Implemented live table/column search filtering, quick "Select All / Deselect All" batch toggles, and data type badges optimized for high-density database schemas.
+- [x] Validate schema discovery and persistent field selection against target databases over local LAN and test containers.
 
 ---
 
 ## Phase 4: Multi-Source Ingestion & Dynamic ETL Pipeline (Celery + Redis)
 - [ ] Define SQLAlchemy analytical models featuring dynamic `JSONB` payload fields for variable record schemas.
-- [ ] Build idempotent batch ingestion Celery tasks with `source_id` stamping and JSON exclusion filtering.
+- [ ] Build idempotent batch ingestion Celery tasks reading from configured `WarehouseDatasetMapping` selections with `source_id` stamping.
 - [ ] Implement relational roll-up workers (Hot-to-Warm daily summaries leveraging preserved foreign key IDs).
 - [ ] Implement automated **Row-Level Security (RLS)** query filtering (`company_id` enforcement).
 - [ ] Build date-range chunking and `UPSERT` historical backfill engine.

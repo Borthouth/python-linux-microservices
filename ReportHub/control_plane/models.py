@@ -135,3 +135,70 @@ class PipelineAutomationAuditLog(models.Model):
         elif self.action_type == '~':
             return 'Updated'
         return 'Deleted'
+
+class SourceTable(TimeStampedAuditedModel):
+    """Stores introspected tables linked to a specific SourceProfile data source."""
+    
+    source = models.ForeignKey(
+        SourceProfile, 
+        on_delete=models.CASCADE, 
+        related_name='tables'
+    )
+    schema_name = models.CharField(max_length=100, default='public')
+    table_name = models.CharField(max_length=255)
+    
+    # Retention & Tiering Configuration
+    enable_tiering = models.BooleanField(default=False, help_text="Enable hot/warm/cold tiering rules based on partition dates.")
+    hot_retention_days = models.IntegerField(default=365, help_text="Number of days to keep data in the hot tier.")
+    date_partition_field_name = models.CharField(
+        max_length=255, 
+        blank=True, 
+        null=True, 
+        help_text="Column name used for time-based partitioning and tiering."
+    )
+    
+    last_synced_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        verbose_name = "Source Table"
+        verbose_name_plural = "Source Tables"
+        unique_together = ('source', 'schema_name', 'table_name')
+
+    def __str__(self):
+        return f"{self.source.name}.{self.schema_name}.{self.table_name}"
+
+    def get_audit_display_name(self):
+        return f"Table: {self.schema_name}.{self.table_name}"
+
+
+class SourceField(TimeStampedAuditedModel):
+    """Stores individual columns/fields for each source table, toggleable via UI."""
+    
+    table = models.ForeignKey(
+        SourceTable, 
+        on_delete=models.CASCADE, 
+        related_name='fields'
+    )
+    field_name = models.CharField(max_length=255)
+    data_type = models.CharField(max_length=100, help_text="Original data type from source database.")
+    is_selected = models.BooleanField(default=True, help_text="Toggled via HTMX UI to include/exclude field from ingestion.")
+    
+    class Meta:
+        verbose_name = "Source Field"
+        verbose_name_plural = "Source Fields"
+        unique_together = ('table', 'field_name')
+
+    def __str__(self):
+        status = "Included" if self.is_selected else "Excluded"
+        return f"{self.field_name} ({self.data_type}) - {status}"
+
+
+class WarehouseDatasetMapping(models.Model):
+    source_profile = models.ForeignKey('SourceProfile', on_delete=models.CASCADE, related_name='warehouse_mappings')
+    table_name = models.CharField(max_length=255)
+    field_name = models.CharField(max_length=255)
+    is_enabled = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('source_profile', 'table_name', 'field_name')

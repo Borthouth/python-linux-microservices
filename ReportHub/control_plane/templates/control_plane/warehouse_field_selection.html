@@ -1,0 +1,159 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}Configure Fields - {{ source.name }} - ReportHub{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto space-y-6">
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-extrabold tracking-tight text-white">Configure Warehouse Fields</h1>
+            <p class="text-slate-400 text-sm mt-1">Select tables and columns to synchronize for <strong class="text-white">{{ source.name }}</strong>.</p>
+        </div>
+        <a href="{% url 'control_plane:warehouse_list' %}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium rounded-lg transition-all">
+            &larr; Back to Warehouse Mapping
+        </a>
+    </div>
+
+    <form method="post">
+        {% csrf_token %}
+        
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            
+            <!-- LEFT PANEL: Searchable & Scrollable Tables List -->
+            <div class="lg:col-span-4 bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl space-y-4 sticky top-20">
+                <div>
+                    <h2 class="text-sm font-bold uppercase tracking-wider text-slate-300 mb-2">Tables</h2>
+                    <input type="text" id="tableSearch" placeholder="Search tables..." onkeyup="filterTableList()" 
+                           class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500">
+                </div>
+
+                <div class="space-y-1.5 max-h-[calc(100vh-300px)] overflow-y-auto pr-1" id="tableNavList">
+                    {% for source_table in tables_qs %}
+                    <button type="button" onclick="switchTable('{{ source_table.table_name }}')" id="nav-btn-{{ source_table.table_name }}"
+                            class="table-nav-item w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-sm font-medium transition-all {% if forloop.first %}bg-indigo-600 text-white shadow-lg shadow-indigo-600/20{% else %}text-slate-400 hover:bg-slate-800 hover:text-white{% endif %}"
+                            data-tablename="{{ source_table.table_name|lower }}">
+                        <span class="truncate font-mono">📦 {{ source_table.table_name }}</span>
+                        <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">{{ source_table.fields.count }}</span>
+                    </button>
+                    {% empty %}
+                    <p class="text-xs text-slate-500 text-center py-4">No tables found. Run "Sync Now" on this data source first.</p>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <!-- RIGHT PANEL: Field Selection Detail View for Active Table -->
+            <div class="lg:col-span-8 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
+                {% for source_table in tables_qs %}
+                <div id="table-panel-{{ source_table.table_name }}" class="table-panel space-y-4 {% if not forloop.first %}hidden{% endif %}">
+                    
+                    <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+                        <div>
+                            <h2 class="text-lg font-bold text-white font-mono uppercase">📦 {{ source_table.table_name }}</h2>
+                            <p class="text-xs text-slate-400 mt-0.5">Schema: <span class="text-slate-300">{{ source_table.schema_name }}</span></p>
+                        </div>
+                        <div class="flex space-x-2 text-xs">
+                            <button type="button" onclick="toggleTableFields('{{ source_table.table_name }}', true)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 transition-all">Select All</button>
+                            <button type="button" onclick="toggleTableFields('{{ source_table.table_name }}', false)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 transition-all">Deselect All</button>
+                        </div>
+                    </div>
+
+                    <!-- Column Search Filter -->
+                    <div>
+                        <input type="text" placeholder="Filter columns in {{ source_table.table_name }}..." onkeyup="filterColumns(this, '{{ source_table.table_name }}')"
+                               class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500">
+                    </div>
+
+                    <!-- Columns Grid -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[calc(100vh-380px)] overflow-y-auto pr-2">
+                        {% for field in source_table.fields.all %}
+                        {% with field_key=source_table.table_name|add:"."|add:field.field_name %}
+                        <div class="column-item flex items-center justify-between bg-slate-800/40 p-3 rounded-xl border border-slate-800 hover:border-slate-700 transition-all" data-colname="{{ field.field_name|lower }}">
+                            <div class="flex items-center space-x-3">
+                                <input type="checkbox" name="selected_fields" value="{{ field_key }}" id="field-{{ field_key }}"
+                                       class="table-field-{{ source_table.table_name }} rounded border-slate-700 bg-slate-800 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                                       {% if field_key in enabled_set or not enabled_set %}checked{% endif %}>
+                                <label for="field-{{ field_key }}" class="text-sm text-slate-300 font-mono cursor-pointer truncate" title="{{ field.field_name }}">{{ field.field_name }}</label>
+                            </div>
+                            <span class="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700/50" title="{{ field.data_type }}">{{ field.data_type }}</span>
+                        </div>
+                        {% endwith %}
+                        {% empty %}
+                        <p class="text-xs text-slate-500 py-4 col-span-2 text-center">No columns found for this table.</p>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% empty %}
+                <div class="text-center py-12 text-slate-500 space-y-2">
+                    <p class="text-base font-medium">No introspected tables found for this data source.</p>
+                    <p class="text-xs">Run "Sync Now" on the Data Sources page to populate tables and columns.</p>
+                </div>
+                {% endfor %}
+
+                {% if tables_qs %}
+                <div class="flex justify-end space-x-3 pt-4 border-t border-slate-800">
+                    <button type="submit" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">
+                        Save Warehouse Schema Selection
+                    </button>
+                </div>
+                {% endif %}
+            </div>
+
+        </div>
+    </form>
+</div>
+
+<script>
+function switchTable(tableName) {
+    document.querySelectorAll('.table-panel').forEach(panel => panel.classList.add('hidden'));
+    const targetPanel = document.getElementById('table-panel-' + tableName);
+    if (targetPanel) targetPanel.classList.remove('hidden');
+
+    document.querySelectorAll('.table-nav-item').forEach(btn => {
+        btn.classList.remove('bg-indigo-600', 'text-white', 'shadow-lg', 'shadow-indigo-600/20');
+        btn.classList.add('text-slate-400', 'hover:bg-slate-800', 'hover:text-white');
+    });
+    
+    const activeBtn = document.getElementById('nav-btn-' + tableName);
+    if (activeBtn) {
+        activeBtn.classList.add('bg-indigo-600', 'text-white', 'shadow-lg', 'shadow-indigo-600/20');
+        activeBtn.classList.remove('text-slate-400', 'hover:bg-slate-800', 'hover:text-white');
+    }
+}
+
+function toggleTableFields(tableName, state) {
+    document.querySelectorAll('.table-field-' + tableName).forEach(cb => {
+        const parentCard = cb.closest('.column-item');
+        if (parentCard && parentCard.style.display !== 'none') {
+            cb.checked = state;
+        }
+    });
+}
+
+function filterTableList() {
+    let query = document.getElementById('tableSearch').value.toLowerCase();
+    document.querySelectorAll('.table-nav-item').forEach(btn => {
+        let name = btn.getAttribute('data-tablename');
+        if (name.includes(query)) {
+            btn.style.display = "";
+        } else {
+            btn.style.display = "none";
+        }
+    });
+}
+
+function filterColumns(input, tableName) {
+    let query = input.value.toLowerCase();
+    let panel = document.getElementById('table-panel-' + tableName);
+    if (panel) {
+        panel.querySelectorAll('.column-item').forEach(item => {
+            let colName = item.getAttribute('data-colname');
+            if (colName.includes(query)) {
+                item.style.display = "";
+            } else {
+                item.style.display = "none";
+            }
+        });
+    }
+}
+</script>
+{% endblock %}

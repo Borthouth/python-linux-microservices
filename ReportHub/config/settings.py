@@ -79,6 +79,35 @@ CELERY_TIMEZONE = 'UTC'
 # Tells Celery Beat to read schedules dynamically from the database
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 
+# 7-Tier Queue Architecture Configuration
+CELERY_TASK_QUEUES = {
+    'queue_ux': {'exchange': 'queue_ux', 'routing_key': 'queue_ux'},
+    'queue_hot': {'exchange': 'queue_hot', 'routing_key': 'queue_hot'},
+    'queue_warm': {'exchange': 'queue_warm', 'routing_key': 'queue_warm'},
+    'queue_cold': {'exchange': 'queue_cold', 'routing_key': 'queue_cold'},
+    'queue_backfill': {
+        'exchange': 'queue_backfill',
+        'routing_key': 'queue_backfill',
+    },
+    'queue_periodic': {
+        'exchange': 'queue_periodic',
+        'routing_key': 'queue_periodic',
+    },
+    'queue_dlq': {'exchange': 'queue_dlq', 'routing_key': 'queue_dlq'},
+}
+
+CELERY_TASK_DEFAULT_QUEUE = 'queue_warm'
+CELERY_TASK_DEFAULT_EXCHANGE = 'queue_warm'
+CELERY_TASK_DEFAULT_ROUTING_KEY = 'queue_warm'
+
+# Explicit Task Routing Map
+CELERY_TASK_ROUTES = {
+    'control_plane.tasks.test_source_connection_task': {'queue': 'queue_ux'},
+    'control_plane.tasks.test_external_logging_task': {'queue': 'queue_ux'},
+    'control_plane.tasks.sync_data_source_task': {'queue': 'queue_hot'},
+    'etl.tasks.introspect_source_schema_task': {'queue': 'queue_periodic'},
+}
+
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
@@ -131,6 +160,12 @@ DATABASES = {
         'PORT': env('POSTGRES_PORT', default='5432'),
     }
 }
+
+# ClickHouse Settings
+CLICKHOUSE_HOST = env('CLICKHOUSE_HOST', default='clickhouse')
+CLICKHOUSE_PORT = env.int('CLICKHOUSE_PORT', default=8123)
+CLICKHOUSE_USER = env('CLICKHOUSE_USER', default='default')
+CLICKHOUSE_PASSWORD = env('CLICKHouse_PASSWORD', default='your_secure_password')
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators

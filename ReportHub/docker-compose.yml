@@ -10,16 +10,48 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - "5432:5432"
+    networks:
+      - default
+      - shared_network
     volumes:
       - ./docker/postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
-    container_name: reporthub-redis
+  # --- ClickHouse Data Warehouse ---
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: reporthub-clickhouse
     ports:
-      - "6379:6379"
+      - "8123:8123" # HTTP interface / Client connections
+      - "9000:9000" # Native TCP protocol
+    networks:
+      - default
+      - shared_network
+    volumes:
+      - ./docker/clickhouse/data:/var/lib/clickhouse
+      - ./docker/clickhouse/logs:/var/log/clickhouse-server
+    environment:
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-your_secure_password}
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
     restart: unless-stopped
+
+  redis:
+      image: redis:7-alpine
+      container_name: reporthub-redis
+      ports:
+        - "6379:6379"
+      networks:
+        - default
+        - shared_network
+      volumes:
+        - ./docker/redis_data:/data
+      command: redis-server --appendonly yes
+      restart: unless-stopped
 
   app:
     build: .
@@ -32,22 +64,27 @@ services:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
+      - CLICKHOUSE_HOST=clickhouse
     ports:
       - "8000:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - shared_network
     volumes:
       - .:/app
       - ./logs:/app/logs
     depends_on:
       - postgres
       - redis
+      - clickhouse
     restart: unless-stopped
 
-  celery_worker:
+  celery_ux_worker:
     build: .
-    command: celery -A app.core.celery_app worker --loglevel=info
-    container_name: reporthub_celery_worker
+    command: celery -A config worker -Q queue_ux,queue_hot --concurrency=2 --loglevel=info -n ux_worker@%h
+    container_name: reporthub_celery_ux_worker
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -55,19 +92,102 @@ services:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
+      - CLICKHOUSE_HOST=clickhouse
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - shared_network
     volumes:
       - .:/app
       - ./logs:/app/logs
     depends_on:
       - postgres
       - redis
+      - clickhouse
+    restart: unless-stopped
+
+  celery_warm_worker:
+    build: .
+    command: celery -A config worker -Q queue_warm,queue_backfill --concurrency=2 --loglevel=info -n warm_worker@%h
+    container_name: reporthub_celery_warm_worker
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=${REDIS_URL}
+      - CLICKHOUSE_HOST=clickhouse
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - shared_network
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+      - clickhouse
+    restart: unless-stopped
+
+  celery_cold_worker:
+    build: .
+    command: celery -A config worker -Q queue_cold,queue_dlq --concurrency=1 --loglevel=info -n cold_worker@%h
+    container_name: reporthub_celery_cold_worker
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=${REDIS_URL}
+      - CLICKHOUSE_HOST=clickhouse
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - shared_network
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+      - clickhouse
+    restart: unless-stopped
+
+  celery_periodic_worker:
+    build: .
+    command: celery -A config worker -Q queue_periodic --concurrency=1 --loglevel=info -n periodic_worker@%h
+    container_name: reporthub_celery_periodic_worker
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=${REDIS_URL}
+      - CLICKHOUSE_HOST=clickhouse
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - shared_network
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+      - clickhouse
     restart: unless-stopped
 
   celery_beat:
     build: .
-    command: celery -A app.core.celery_app beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    command: celery -A config beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     container_name: reporthub_celery_beat
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
@@ -76,12 +196,21 @@ services:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
+      - CLICKHOUSE_HOST=clickhouse
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - shared_network
     volumes:
       - .:/app
       - ./logs:/app/logs
     depends_on:
       - postgres
       - redis
+      - clickhouse
     restart: unless-stopped
+
+networks:
+  shared_network:
+    name: reporthub_shared_network
