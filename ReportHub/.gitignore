@@ -26,3 +26,8 @@ docker/clickhouse/data/
 docker/redis_data/
 docker/redis_data/
 docker/redis_data/
+docker/minio_data/
+docker/postgres_data/
+docker/clickhouse/data/
+docker/redis_data/
+docker/minio_data/
