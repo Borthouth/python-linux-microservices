@@ -13,13 +13,23 @@ Track the development and implementation phases of `ReportHub`.
   - **Control Plane (Operational DB):** Hardened Django database for configuration, user access matrix, and target metadata.
   - **Analytical Warehouse (Warehouse DB):** Standalone PostgreSQL database using SQLAlchemy models with `JSONB` flex-payload columns to handle dynamic payloads without rigid migrations.
 - [x] **Alembic Warehouse Migration Engine:** Fully configured standalone Alembic setup in virtual environment; validated transactional DDL execution (`alembic upgrade head`).
+- [x] **MinIO S3-Compatible Object Storage Architecture:**
+  - [x] Deploy MinIO container in `docker-compose.yml` bound to a dedicated persistent Docker volume (`minio_data`).
+  - [x] Configure `django-storages` and `boto3` pointing to internal Docker S3 endpoints (`AWS_S3_ENDPOINT_URL = 'http://minio:9000'`).
+  - [x] Externalize root credentials in `.env` and restrict public port exposure (keep database, Redis, and MinIO internal to Docker network).
+  - [ ] Configure pre-signed secure URLs for streaming report downloads directly from MinIO, bypassing Django web workers.
+  - [ ] Mount a dedicated Docker "scratch" volume for temporary local worker writes to eliminate RAM OOM errors and container disk bloat.
 
 ---
 
 ## Phase 2: Django Control Plane, User Management & Audit Engine
 - [x] Initialize Django project and core apps (`control_plane`, `warehouse`, `etl`).
 - [x] Configure automatic database migrations via container startup scripts (`entrypoint.sh`).
-- [x] Implement **Security-First Hardening**: Content Security Policy (`django-csp`), strict `ALLOWED_HOSTS`, clickjacking/MIME defenses, HttpOnly session/CSRF cookies, and global 64-bit `BigAutoField`.
+- [x] **Security-First Hardening & Session Security**: 
+  - [x] Content Security Policy (`django-csp`), strict `ALLOWED_HOSTS`, clickjacking/MIME defenses, HttpOnly session/CSRF cookies, and global 64-bit `BigAutoField`.
+  - [x] Enabled browser-close session expiration (`SESSION_EXPIRE_AT_BROWSER_CLOSE = True`).
+  - [x] Installed and configured `django-auto-logout` with environment-driven idle timeout management (`SESSION_IDLE_MINUTES` via `.env`) and flash notification integration.
+  - [x] Avoided combining auto-logout with `SESSION_SAVE_EVERY_REQUEST = True` to eliminate unnecessary session table writes.
 - [x] Set up user authentication and RBAC roles (*Viewer, Analyst/Builder, System Admin*).
 - [x] Build control plane models for **Target Connections (`SourceProfile` / `DbChoice`)** supporting MySQL, PostgreSQL, and Microsoft SQL Server, alongside the **User-Source Access Matrix** (Layer 1 security).
 - [x] Implement **Self-Service User Profile Management** (nav-bar linked account view for users to update their details, first/last name, email, and password).
@@ -50,16 +60,40 @@ Track the development and implementation phases of `ReportHub`.
 
 ---
 
-## Phase 4: Multi-Source Ingestion & Dynamic ETL Pipeline (Celery + Redis)
-- [ ] Define SQLAlchemy analytical models featuring dynamic `JSONB` payload fields for variable record schemas.
-- [ ] Build idempotent batch ingestion Celery tasks reading from configured `WarehouseDatasetMapping` selections with `source_id` stamping.
-- [ ] Implement relational roll-up workers (Hot-to-Warm daily summaries leveraging preserved foreign key IDs).
-- [ ] Implement automated **Row-Level Security (RLS)** query filtering (`company_id` enforcement).
-- [ ] Build date-range chunking and `UPSERT` historical backfill engine.
+## Phase 4: Analytical Data Warehouse (ClickHouse Integration & Optimization)
+- [x] **ClickHouse Container Deployment & Security:**
+  - [x] Deploy ClickHouse alongside PostgreSQL/Redis in Docker (internal network; ports `9000`/`8123` not exposed publicly).
+  - [x] Secure default user and configure connection parameters for Django & Celery.
+- [x] **Data Model & Performance Optimization:**
+  - [x] Establish isolated ClickHouse table namespacing (`source_{pk}__{schema}_{table}`) with `MergeTree` engines.
+  - [x] Implement robust type mapping (`map_to_clickhouse_type`) and ISO string casting for temporal/complex types to prevent driver struct-packing crashes.
+- [x] **Ingestion Engine & High-Volume Flushing:**
+  - [x] Build idempotent batch ingestion Celery tasks (`ingest_source_to_clickhouse_task`) reading selected fields with dialect-aware identifier quoting.
+  - [x] Implement active-source guard checks (`is_active=True`) and environment-driven batch sizing (`DEFAULT_ETL_BATCH_SIZE`).
+  - [x] Configure periodic dispatch tasks (`trigger_all_active_clickhouse_ingestion_task`) and dedicated worker queue routing (`queue_hot`, `queue_ux`, `queue_periodic`).
 
 ---
 
-## Phase 5: Report Generation & Query Engine
-- [ ] Build the dynamic query builder and execution engine over ingested database tables (`JSONB` query extraction).
-- [ ] Develop report templates, data visualization components, and export tools (CSV/Excel/PDF).
-- [ ] Implement **Authenticated Report & Dashboard Sharing** (role-based visibility restricting "View Only" users strictly to authorized dashboards and reports).
+## Phase 5: Asynchronous Reporting & Export Pipeline
+- [ ] **Multi-Tiered Storage & Lifecycle Indexing:**
+  - [ ] PostgreSQL handles lightweight report lifecycle metadata state tracking (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
+  - [ ] Completed binary report outputs uploaded directly to MinIO, updating PostgreSQL status with location keys in a single atomic update.
+- [ ] **Chunked Conveyor-Belt Execution:**
+  - [ ] Break long-running report jobs into sequential Celery task chains (e.g., 50,000 rows per chunk).
+  - [ ] Use primary-key/timestamp cursor pagination (`WHERE id > last_seen_id`) instead of `OFFSET` to prevent shifting-window data drift mid-report.
+- [ ] **Queue Isolation & Queue Hygiene:**
+  - [ ] Segregate Celery workers into dedicated queues (`default` for fast web application operations vs `reports` for heavy analytical extractions).
+- [ ] **Schema Evolution Safety Guards:**
+  - [ ] Implement pre-migration checks against active PostgreSQL report states (`PROCESSING`) to pause destructive ClickHouse DDL schema migrations until active jobs complete.
+
+---
+
+## Phase 6: Report Generation & Query Engine
+- [ ] **Dynamic Query Builder & Join Engine:**
+  - [ ] Design `ReportDefinition` model and report configuration interface.
+  - [ ] Implement automated query generation leveraging stored `SourceRelationship` foreign key metadata to construct multi-table SQL `JOIN` statements dynamically.
+- [ ] **Execution & Visualization:**
+  - [ ] Execute parameterized queries against ClickHouse analytical tables.
+  - [ ] Develop report templates, data visualization components, and export formats (CSV/Excel/PDF).
+- [ ] **Authenticated Sharing & RBAC:**
+  - [ ] Implement role-based visibility restricting "View Only" users strictly to authorized dashboards and reports.

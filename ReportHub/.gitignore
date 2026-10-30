@@ -23,3 +23,6 @@ ENV/
 docker/postgres_data/
 .DS_Storedocker/clickhouse/data/
 docker/clickhouse/data/
+docker/redis_data/
+docker/redis_data/
+docker/redis_data/

@@ -19,8 +19,8 @@ class PipelineAutomationForm(forms.Form):
     task_path = forms.ChoiceField(
         choices=[
             ('etl.tasks.cleanup_postgres_warehouse_task', 'Cleanup PostgreSQL Warehouse'),
-            ('etl.tasks.run_batch_ingestion_task', 'Run Batch Ingestion Task'),
-            ('etl.tasks.sync_datasource_schemas_mock_task', 'Sync Data Source Schemas (Mock)'),
+            ('etl.tasks.trigger_all_active_source_introspection_task', 'Introspect All Active Sources & Foreign Keys'),
+            ('etl.tasks.trigger_all_active_clickhouse_ingestion_task', 'Ingest All Active Sources to ClickHouse'),
         ],
         widget=forms.Select(attrs={
             'class': 'w-full bg-slate-900 border border-slate-800 text-white px-4 py-2 rounded-xl focus:outline-none focus:border-indigo-500 text-sm'

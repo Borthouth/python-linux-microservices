@@ -5,21 +5,48 @@
             <span class="font-bold text-lg tracking-tight text-white">ReportHub <span class="text-xs px-2 py-0.5 bg-indigo-500/20 text-indigo-400 rounded-full font-medium ms-1">Control Plane</span></span>
         </div>
         
-        <div class="flex items-center space-x-6">
-            <nav class="hidden md:flex space-x-4 text-sm items-center">
-                <!-- Dashboard is visible to all roles -->
-                <a href="{% url 'control_plane:dashboard' %}" class="text-slate-300 hover:text-white transition-all">Dashboard</a>
+        <div class="flex items-center space-x-5">
+            <nav class="hidden md:flex space-x-5 text-xs font-medium items-center h-full">
+                <!-- Dashboard -->
+                <a href="{% url 'control_plane:dashboard' %}" 
+                   class="h-full flex items-center border-b-2 transition-all {% if request.resolver_match.url_name == 'dashboard' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                   Dashboard
+                </a>
                 
                 <!-- Restricted to System Admin / Superuser only -->
                 {% if request.user.role == 'System Admin' or request.user.is_superuser %}
-                    <a href="{% url 'control_plane:source_list' %}" class="text-slate-300 hover:text-white transition-all">Data Sources</a>
-                    <a href="{% url 'control_plane:warehouse_list' %}" class="text-slate-300 hover:text-white transition-all">Warehouse Mapping</a>
-                    <a href="{% url 'control_plane:pipeline_automation_list' %}" class="text-slate-300 hover:text-white transition-all">Pipeline Automations</a>
-                    <a href="{% url 'control_plane:user_management' %}" class="text-slate-300 hover:text-white transition-all">Users & Access</a>
-                    <a href="{% url 'control_plane:audit_log' %}" class="text-slate-300 hover:text-white transition-all">Audit Logs</a>
+                    <a href="{% url 'reports:report_list' %}" 
+                       class="h-full flex items-center border-b-2 transition-all {% if request.resolver_match.namespace == 'reports' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                       Reports
+                    </a>                
+                    
+                    <a href="{% url 'control_plane:source_list' %}" 
+                       class="h-full flex items-center border-b-2 transition-all {% if request.resolver_match.url_name == 'source_list' or request.resolver_match.url_name == 'source_create' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                       Data Sources
+                    </a>
+                    
+                    <a href="{% url 'control_plane:warehouse_list' %}" 
+                       class="h-full flex items-center border-b-2 transition-all {% if request.resolver_match.url_name == 'warehouse_list' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                       Warehouse Mapping
+                    </a>
+                    
+                    <a href="{% url 'control_plane:pipeline_automation_list' %}" 
+                       class="h-full flex items-center border-b-2 transition-all {% if request.resolver_match.url_name == 'pipeline_automation_list' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                       Pipeline Automations
+                    </a>
+                    
+                    <a href="{% url 'control_plane:user_management' %}" 
+                       class="h-full flex items-center border-b-2 transition-all {% if request.resolver_match.url_name == 'user_management' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                       Users & Access
+                    </a>
+                    
+                    <a href="{% url 'control_plane:audit_log' %}" 
+                       class="h-full flex items-center border-b-2 transition-all {% if request.resolver_match.url_name == 'audit_log' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                       Audit Logs
+                    </a>
                 {% endif %}
             </nav>
-            <div class="flex items-center space-x-4 border-l border-slate-800 pl-6">
+            <div class="flex items-center space-x-4 border-l border-slate-800 pl-5">
                 <div class="text-right hidden sm:block">
                     <a href="{% url 'control_plane:user_profile' %}" class="group inline-flex items-center space-x-1.5 text-xs font-semibold text-white hover:text-indigo-400 transition-colors" title="Edit Profile">
                         <span>{{ request.user.username }}</span>

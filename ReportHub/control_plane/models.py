@@ -193,6 +193,31 @@ class SourceField(TimeStampedAuditedModel):
         return f"{self.field_name} ({self.data_type}) - {status}"
 
 
+class SourceRelationship(TimeStampedAuditedModel):
+    """Tracks foreign key relationships discovered during introspection for report joining."""
+    source = models.ForeignKey(SourceProfile, on_delete=models.CASCADE, related_name='relationships')
+    
+    # Origin of the relationship (e.g., orders.customer_id)
+    from_schema = models.CharField(max_length=100, default='public')
+    from_table = models.CharField(max_length=255)
+    from_field = models.CharField(max_length=255)
+    
+    # Destination of the relationship (e.g., customers.id)
+    to_schema = models.CharField(max_length=100, default='public')
+    to_table = models.CharField(max_length=255)
+    to_field = models.CharField(max_length=255)
+    
+    constraint_name = models.CharField(max_length=255, blank=True, null=True)
+
+    class Meta:
+        verbose_name = "Source Relationship"
+        verbose_name_plural = "Source Relationships"
+        unique_together = ('source', 'from_table', 'from_field', 'to_table', 'to_field')
+
+    def __str__(self):
+        return f"{self.from_table}.{self.from_field} -> {self.to_table}.{self.to_field}"
+
+
 class WarehouseDatasetMapping(models.Model):
     source_profile = models.ForeignKey('SourceProfile', on_delete=models.CASCADE, related_name='warehouse_mappings')
     table_name = models.CharField(max_length=255)

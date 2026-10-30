@@ -1,0 +1,66 @@
+{% extends 'control_plane/base.html' %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="flex justify-between items-center mb-6">
+        <div>
+            <div class="flex items-center space-x-3">
+                <a href="{% url 'reports:report_list' %}" class="text-gray-400 hover:text-white text-sm font-medium">&larr; Back to Reports</a>
+            </div>
+            <h1 class="text-2xl font-bold text-white mt-2">Execution History: {{ report.name }}</h1>
+            <p class="text-sm text-gray-400 mt-1">Review past execution runs, logs, statuses, and download generated artifacts.</p>
+        </div>
+    </div>
+
+    <div class="bg-[#111827] border border-gray-800 shadow sm:rounded-lg overflow-hidden">
+        <table class="min-w-full divide-y divide-gray-800">
+            <thead class="bg-gray-900/50">
+                <tr>
+                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Execution ID</th>
+                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Status</th>
+                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Triggered At</th>
+                    <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Artifact Path</th>
+                    <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">Actions</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-800 text-sm">
+                {% for execution in executions %}
+                <tr class="hover:bg-gray-800/30">
+                    <td class="px-6 py-4 whitespace-nowrap font-mono text-xs text-gray-300">
+                        {{ execution.id }}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        {% if execution.status == 'completed' %}
+                            <span class="px-2.5 py-0.5 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-900/60 text-green-300 border border-green-800">Completed</span>
+                        {% elif execution.status == 'running' %}
+                            <span class="px-2.5 py-0.5 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-900/60 text-yellow-300 border border-yellow-800">Running</span>
+                        {% elif execution.status == 'failed' %}
+                            <span class="px-2.5 py-0.5 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-900/60 text-red-300 border border-red-800">Failed</span>
+                        {% else %}
+                            <span class="px-2.5 py-0.5 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-800 text-gray-300 border border-gray-700">Pending</span>
+                        {% endif %}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-400">
+                        {{ execution.created_at|date:"Y-m-d H:i:s" }}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-xs font-mono text-gray-400 truncate max-w-xs">
+                        {{ execution.file_path|default:"--" }}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-1">
+                        {% if execution.status == 'completed' and execution.file_path %}
+                            <a href="{% url 'reports:report_download' execution.pk %}" class="inline-flex items-center px-3 py-1.5 rounded-lg border border-green-700/60 bg-green-950/40 text-green-400 hover:bg-green-900/60 transition-colors text-xs font-semibold">Download</a>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="5" class="px-6 py-12 text-center text-gray-500 italic">
+                        No execution history found for this report yet. Click "Run" on the reports list to trigger an execution.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

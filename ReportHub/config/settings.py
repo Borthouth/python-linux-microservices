@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 import environ
+from datetime import timedelta
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -44,8 +45,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'simple_history',
     'control_plane',
-    'warehouse',
     'etl',
+    'reports',
     'django_celery_beat', # Required for database-backed periodic task scheduling
 ]
 
@@ -56,6 +57,7 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',  # Prevents Cross-Site Request Forgery
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
+    'django_auto_logout.middleware.auto_logout',    
     'django.middleware.clickjacking.XFrameOptionsMiddleware', # Prevents Clickjacking (UI redressing)
     'csp.middleware.CSPMiddleware', # Enables Content Security Policy headers
     'simple_history.middleware.HistoryRequestMiddleware',
@@ -99,6 +101,8 @@ CELERY_TASK_QUEUES = {
 CELERY_TASK_DEFAULT_QUEUE = 'queue_warm'
 CELERY_TASK_DEFAULT_EXCHANGE = 'queue_warm'
 CELERY_TASK_DEFAULT_ROUTING_KEY = 'queue_warm'
+
+DEFAULT_ETL_BATCH_SIZE = env.int('DEFAULT_ETL_BATCH_SIZE', default=10000)
 
 # Explicit Task Routing Map
 CELERY_TASK_ROUTES = {
@@ -146,6 +150,18 @@ CSRF_COOKIE_HTTPONLY = True    # Prevents JS access to CSRF tokens
 # Environment-driven secure cookies (False for local HTTP, True for production HTTPS)
 SESSION_COOKIE_SECURE = env.bool('SESSION_COOKIE_SECURE', default=False)
 CSRF_COOKIE_SECURE = env.bool('CSRF_COOKIE_SECURE', default=False)
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True
+SESSION_SAVE_EVERY_REQUEST = False # We are using auto-logout via middleware, so we don't need to save the session on every request.
+
+# Read from environment, default to 15 minutes if not set
+SESSION_IDLE_MINUTES = int(os.environ.get('SESSION_IDLE_MINUTES', 15))
+
+AUTO_LOGOUT = {
+    'IDLE_TIME': timedelta(minutes=SESSION_IDLE_MINUTES),
+    'REDIRECT_URL': '/control-plane/login/',
+    'MESSAGE': 'Your session has expired due to inactivity. Please log in again.',
+    'WARNING_MESSAGE': 'Your session is about to expire.',
+}
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
@@ -166,6 +182,13 @@ CLICKHOUSE_HOST = env('CLICKHOUSE_HOST', default='clickhouse')
 CLICKHOUSE_PORT = env.int('CLICKHOUSE_PORT', default=8123)
 CLICKHOUSE_USER = env('CLICKHOUSE_USER', default='default')
 CLICKHOUSE_PASSWORD = env('CLICKHouse_PASSWORD', default='your_secure_password')
+
+# MinIO Storage Settings
+MINIO_STORAGE_ENDPOINT = env.str('MINIO_STORAGE_ENDPOINT', default='minio:9000')
+MINIO_STORAGE_ACCESS_KEY = env.str('MINIO_STORAGE_ACCESS_KEY', default='minioadmin')
+MINIO_STORAGE_SECRET_KEY = env.str('MINIO_STORAGE_SECRET_KEY', default='minioadmin')
+MINIO_STORAGE_USE_HTTPS = env.bool('MINIO_STORAGE_USE_HTTPS', default=False)
+MINIO_STORAGE_BUCKET_NAME = env.str('MINIO_STORAGE_BUCKET_NAME', default='reporthub-artifacts')
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators

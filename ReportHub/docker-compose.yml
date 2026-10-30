@@ -40,6 +40,23 @@ services:
         hard: 262144
     restart: unless-stopped
 
+  # --- MinIO Object Storage Service ---
+  minio:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    container_name: reporthub-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9001:9001"
+    networks:
+      - default
+      - shared_network
+    volumes:
+      - ./docker/minio_data:/data
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadminpassword}
+    restart: unless-stopped
+
   redis:
       image: redis:7-alpine
       container_name: reporthub-redis
@@ -65,6 +82,11 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadminpassword}
+      - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-reporthub-reports}
+      - AWS_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_S3_REGION_NAME=${AWS_S3_REGION_NAME:-us-east-1}
     ports:
       - "8000:8000"
     extra_hosts:
@@ -79,6 +101,7 @@ services:
       - postgres
       - redis
       - clickhouse
+      - minio
     restart: unless-stopped
 
   celery_ux_worker:
@@ -93,6 +116,11 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadminpassword}
+      - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-reporthub-reports}
+      - AWS_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_S3_REGION_NAME=${AWS_S3_REGION_NAME:-us-east-1}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -105,6 +133,7 @@ services:
       - postgres
       - redis
       - clickhouse
+      - minio
     restart: unless-stopped
 
   celery_warm_worker:
@@ -119,6 +148,11 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadminpassword}
+      - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-reporthub-reports}
+      - AWS_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_S3_REGION_NAME=${AWS_S3_REGION_NAME:-us-east-1}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -131,6 +165,7 @@ services:
       - postgres
       - redis
       - clickhouse
+      - minio
     restart: unless-stopped
 
   celery_cold_worker:
@@ -145,6 +180,11 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadminpassword}
+      - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-reporthub-reports}
+      - AWS_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_S3_REGION_NAME=${AWS_S3_REGION_NAME:-us-east-1}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -157,6 +197,7 @@ services:
       - postgres
       - redis
       - clickhouse
+      - minio
     restart: unless-stopped
 
   celery_periodic_worker:
@@ -171,6 +212,11 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadminpassword}
+      - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-reporthub-reports}
+      - AWS_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_S3_REGION_NAME=${AWS_S3_REGION_NAME:-us-east-1}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -183,6 +229,7 @@ services:
       - postgres
       - redis
       - clickhouse
+      - minio
     restart: unless-stopped
 
   celery_beat:
@@ -197,6 +244,11 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadminpassword}
+      - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-reporthub-reports}
+      - AWS_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_S3_REGION_NAME=${AWS_S3_REGION_NAME:-us-east-1}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -209,6 +261,7 @@ services:
       - postgres
       - redis
       - clickhouse
+      - minio
     restart: unless-stopped
 
 networks:

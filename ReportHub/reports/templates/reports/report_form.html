@@ -1,0 +1,249 @@
+{% extends 'control_plane/base.html' %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div class="mb-6">
+        <h1 class="text-2xl font-bold text-white">{{ title }}</h1>
+        <p class="text-sm text-gray-400 mt-1">Configure your analytical query definition, selected fields, filters, and target export format.</p>
+    </div>
+
+    <div class="bg-[#111827] border border-gray-800 shadow sm:rounded-lg p-6">
+        <form method="POST" class="space-y-6" id="report-form">
+            {% csrf_token %}
+            
+            {% if form.non_field_errors %}
+                <div class="rounded-md bg-red-900/50 border border-red-800 p-4 text-sm text-red-200">
+                    {{ form.non_field_errors }}
+                </div>
+            {% endif %}
+
+            <!-- Basic Details -->
+            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
+                <div class="sm:col-span-2">
+                    <label class="block text-sm font-medium text-gray-300 mb-1">Report Name</label>
+                    {{ form.name }}
+                    {% for error in form.name.errors %}<p class="mt-1 text-xs text-red-400">{{ error }}</p>{% endfor %}
+                </div>
+
+                <div class="sm:col-span-2">
+                    <label class="block text-sm font-medium text-gray-300 mb-1">Description</label>
+                    {{ form.description }}
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-1">Data Source</label>
+                    {{ form.source }}
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-1">Base Table</label>
+                    {{ form.base_table }}
+                </div>
+            </div>
+
+            <hr class="border-gray-800 my-6">
+
+            <!-- Query Builder & Formatting Configuration -->
+            <div class="space-y-4">
+                <h3 class="text-lg font-medium text-white">Query Builder & Export Settings</h3>
+                
+                <!-- Interactive Column Selector -->
+                <div>
+                    <div class="flex justify-between items-center mb-1">
+                        <label class="block text-sm font-medium text-gray-300">Select Fields to Include</label>
+                        <button type="button" id="select-all-cols" class="text-xs text-indigo-400 hover:text-indigo-300">Select All</button>
+                    </div>
+                    <div id="column-checkbox-container" class="bg-gray-900 border border-gray-700 rounded-md p-4 max-h-52 overflow-y-auto grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        <span class="text-sm text-gray-500 italic col-span-full">Select a base table first to load available columns...</span>
+                    </div>
+                    
+                    <!-- Securely output selected_fields JSON script payload -->
+                    {{ form.instance.selected_fields|json_script:"initial-selected-fields" }}
+                    {{ form.selected_fields_json }}
+                </div>
+
+                <!-- Filter Rules with Helper & Quick Fill -->
+                <div>
+                    <div class="flex justify-between items-center mb-1">
+                        <label class="block text-sm font-medium text-gray-300">Filter Rules (JSON)</label>
+                        <span class="text-xs text-gray-500">Optional</span>
+                    </div>
+                    {{ form.filter_config_input }}
+                    
+                    <div class="mt-2 text-xs text-gray-400 bg-gray-900/60 border border-gray-800 rounded-md p-3 space-y-1.5">
+                        <p class="font-medium text-gray-300">How to write filter rules:</p>
+                        <p>Define column matching criteria to narrow down rows. Leave empty to retrieve all records.</p>
+                        <div class="pt-1 flex flex-wrap items-center gap-2">
+                            <span class="text-gray-500">Quick Fill:</span>
+                            <button type="button" id="exact-match-filter" class="text-indigo-400 hover:text-indigo-300 bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded border border-gray-700 font-mono">Exact Match</button>
+                            <button type="button" id="date-greater-than-filter" class="text-indigo-400 hover:text-indigo-300 bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded border border-gray-700 font-mono">Date Greater Than</button>
+                            <button type="button" id="clear-filter" class="text-gray-400 hover:text-gray-300 bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded border border-gray-700">Clear</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-1">Export Format</label>
+                    {{ form.export_format }}
+                    <p class="mt-1 text-xs text-gray-500">Choose the file format generated when the report runs.</p>
+                </div>
+
+                <div class="flex items-center pt-2">
+                    {{ form.is_active }}
+                    <label class="ml-2 block text-sm text-gray-300">Active (scheduled tasks enabled)</label>
+                </div>
+            </div>
+
+            <div class="flex justify-end space-x-3 pt-4 border-t border-gray-800">
+                <a href="{% url 'reports:report_list' %}" class="px-4 py-2 border border-gray-700 rounded-md shadow-sm text-sm font-medium text-gray-300 bg-gray-800 hover:bg-gray-700">
+                    Cancel
+                </a>
+                <button type="submit" class="inline-flex justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none">
+                    {{ button_text }}
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Dynamic AJAX Table & Column Loading Script -->
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const sourceSelect = document.getElementById('id_source');
+        const tableSelect = document.getElementById('id_base_table');
+        const columnContainer = document.getElementById('column-checkbox-container');
+        const hiddenFieldsInput = document.getElementById('id_selected_fields_json');
+        const selectAllBtn = document.getElementById('select-all-cols');
+        const filterInput = document.getElementById('id_filter_config_input');
+
+        document.getElementById('exact-match-filter').addEventListener('click', function() {
+            filterInput.value = JSON.stringify({status: 'active'}, null, 2);
+        });
+        document.getElementById('date-greater-than-filter').addEventListener('click', function() {
+            filterInput.value = JSON.stringify({created_at__gte: '2026-01-01'}, null, 2);
+        });
+        document.getElementById('clear-filter').addEventListener('click', function() {
+            filterInput.value = '{}';
+        });
+
+        // Safely parse pre-selected fields from the json_script tag
+        let initialFields = [];
+        try {
+            const scriptTag = document.getElementById('initial-selected-fields');
+            if (scriptTag) {
+                initialFields = JSON.parse(scriptTag.textContent || '[]');
+            }
+        } catch(e) {
+            console.error('Failed to parse initial selected fields:', e);
+        }
+
+        // Check if this is a brand new report (no PK / empty initial fields) vs editing
+        const isEditing = initialFields.length > 0;
+
+        // 1. Load tables when Source changes
+        if (sourceSelect && tableSelect) {
+            sourceSelect.addEventListener('change', function() {
+                const sourceId = this.value;
+                tableSelect.innerHTML = '<option value="">Loading tables...</option>';
+                columnContainer.innerHTML = '<span class="text-sm text-gray-500 italic col-span-full">Select a base table first...</span>';
+                hiddenFieldsInput.value = '[]';
+                
+                if (sourceId) {
+                    fetch("{% url 'reports:ajax_load_tables' %}?source_id=" + sourceId)
+                        .then(response => response.json())
+                        .then(data => {
+                            tableSelect.innerHTML = '<option value="">---------</option>';
+                            data.forEach(function(table) {
+                                const option = document.createElement('option');
+                                option.value = table.id;
+                                option.textContent = table.table_name || table.name;
+                                tableSelect.appendChild(option);
+                            });
+                        })
+                        .catch(error => {
+                            console.error('Error loading tables:', error);
+                            tableSelect.innerHTML = '<option value="">Error loading tables</option>';
+                        });
+                } else {
+                    tableSelect.innerHTML = '<option value="">---------</option>';
+                }
+            });
+        }
+
+        // 2. Load columns when Base Table changes (or on page load if editing)
+        function loadColumnsForTable(tableId, preselectedFields = []) {
+            if (!tableId) {
+                columnContainer.innerHTML = '<span class="text-sm text-gray-500 italic col-span-full">Select a base table first...</span>';
+                return;
+            }
+
+            columnContainer.innerHTML = '<span class="text-sm text-gray-400 italic col-span-full">Loading available columns...</span>';
+
+            fetch("{% url 'reports:ajax_load_columns' %}?table_id=" + tableId)
+                .then(response => response.json())
+                .then(columns => {
+                    columnContainer.innerHTML = '';
+                    if (!columns || columns.length === 0) {
+                        columnContainer.innerHTML = '<span class="text-sm text-gray-500 italic col-span-full">No columns found or schema inspection unavailable.</span>';
+                        return;
+                    }
+
+                    // If it's a brand new report, check all by default. If editing, ONLY check preselected fields.
+                    const shouldCheckAll = !isEditing && hiddenFieldsInput.value === '';
+
+                    columns.forEach(col => {
+                        const label = document.createElement('label');
+                        label.className = 'flex items-center space-x-2 text-sm text-gray-300 cursor-pointer hover:text-white bg-gray-800/40 px-2 py-1.5 rounded border border-gray-800';
+                        
+                        const checkbox = document.createElement('input');
+                        checkbox.type = 'checkbox';
+                        checkbox.value = col;
+                        checkbox.className = 'rounded bg-gray-900 border-gray-700 text-indigo-600 focus:ring-indigo-500 h-4 w-4';
+                        
+                        if (preselectedFields.includes(col) || shouldCheckAll) {
+                            checkbox.checked = true;
+                        }
+
+                        checkbox.addEventListener('change', updateSelectedFieldsJSON);
+
+                        label.appendChild(checkbox);
+                        label.appendChild(document.createTextNode(col));
+                        columnContainer.appendChild(label);
+                    });
+                    updateSelectedFieldsJSON();
+                })
+                .catch(err => {
+                    console.error('Failed to load columns:', err);
+                    columnContainer.innerHTML = '<span class="text-sm text-red-400 italic col-span-full">Error loading columns from schema.</span>';
+                });
+        }
+
+        function updateSelectedFieldsJSON() {
+            const checked = Array.from(columnContainer.querySelectorAll('input[type="checkbox"]:checked'))
+                                 .map(cb => cb.value);
+            hiddenFieldsInput.value = JSON.stringify(checked);
+        }
+
+        if (tableSelect) {
+            tableSelect.addEventListener('change', function() {
+                // When changing tables on an existing report, reset to checking all
+                loadColumnsForTable(this.value, []);
+            });
+
+            // If editing an existing report with a table already selected:
+            if (tableSelect.value) {
+                loadColumnsForTable(tableSelect.value, initialFields);
+            }
+        }
+
+        if (selectAllBtn) {
+            selectAllBtn.addEventListener('click', function() {
+                const checkboxes = columnContainer.querySelectorAll('input[type="checkbox"]');
+                const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+                checkboxes.forEach(cb => cb.checked = !allChecked);
+                updateSelectedFieldsJSON();
+            });
+        }
+    });
+</script>
+{% endblock %}
