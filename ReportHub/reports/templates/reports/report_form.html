@@ -1,104 +1,224 @@
 {% extends 'control_plane/base.html' %}
 
+{% block title %}{% if form.instance.pk %}Edit Report: {{ form.instance.name }}{% else %}Create Report{% endif %} - ReportHub{% endblock %}
+
 {% block content %}
-<div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-    <div class="mb-6">
-        <h1 class="text-2xl font-bold text-white">{{ title }}</h1>
-        <p class="text-sm text-gray-400 mt-1">Configure your analytical query definition, selected fields, filters, and target export format.</p>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+{% if report.config %}
+    {{ report.config|json_script:"report-config-data" }}
+{% endif %}
+
+<div class="max-w-4xl mx-auto">
+    <div class="flex items-center justify-between mb-8">
+        <div>
+            <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">
+                {% if form.instance.pk %}Edit Report: <span class="text-indigo-400">{{ form.instance.name }}</span>{% else %}Create Report{% endif %}
+            </h1>
+            <p class="text-slate-400 text-sm">Configure your analytical query definition, selected fields, aggregates, and export formats.</p>
+        </div>
+        <a href="{% url 'reports:report_list' %}" class="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded-xl border border-slate-700 transition-all flex items-center space-x-1.5 shadow-md">
+            <span>←</span>
+            <span>Back to Reports</span>
+        </a>
     </div>
 
-    <div class="bg-[#111827] border border-gray-800 shadow sm:rounded-lg p-6">
-        <form method="POST" class="space-y-6" id="report-form">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+        <form method="post" class="space-y-6">
             {% csrf_token %}
-            
+            <input type="hidden" name="is_active" value="{{ form.instance.is_active|yesno:'true,false' }}">
+
             {% if form.non_field_errors %}
-                <div class="rounded-md bg-red-900/50 border border-red-800 p-4 text-sm text-red-200">
+                <div class="p-4 bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl text-sm">
                     {{ form.non_field_errors }}
                 </div>
             {% endif %}
 
-            <!-- Basic Details -->
-            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
-                <div class="sm:col-span-2">
-                    <label class="block text-sm font-medium text-gray-300 mb-1">Report Name</label>
-                    {{ form.name }}
-                    {% for error in form.name.errors %}<p class="mt-1 text-xs text-red-400">{{ error }}</p>{% endfor %}
-                </div>
+            <!-- Report Name -->
+            <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                    {{ form.name.label }}
+                </label>
+                {{ form.name }}
+                {% if form.name.errors %}
+                    <p class="mt-1.5 text-xs text-red-400">{{ form.name.errors.0 }}</p>
+                {% endif %}
+            </div>
 
-                <div class="sm:col-span-2">
-                    <label class="block text-sm font-medium text-gray-300 mb-1">Description</label>
-                    {{ form.description }}
-                </div>
+            <!-- Description -->
+            <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                    {{ form.description.label }}
+                </label>
+                {{ form.description }}
+                {% if form.description.errors %}
+                    <p class="mt-1.5 text-xs text-red-400">{{ form.description.errors.0 }}</p>
+                {% endif %}
+            </div>
 
+            <!-- Data Source & Base Table Row -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4" x-data="reportFormSync()">
                 <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-1">Data Source</label>
-                    {{ form.source }}
+                    <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Data Source</label>
+                    <select name="source" id="id_source" x-model="selectedSource" @change="loadTables(selectedSource)" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500">
+                        <option value="">-- Select Data Source --</option>
+                        {% for source in form.fields.source.queryset %}
+                            <option value="{{ source.pk }}" {% if form.instance.source_id == source.pk %}selected{% endif %}>{{ source.name }}</option>
+                        {% endfor %}
+                    </select>
                 </div>
-
                 <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-1">Base Table</label>
-                    {{ form.base_table }}
+                    <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Base Table</label>
+                    <select name="base_table" id="id_base_table" x-model="selectedTable" @change="triggerTableChange(selectedTable)" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500">
+                        <option value="">-- Select Table --</option>
+                        <template x-for="table in availableTables" :key="table.id">
+                            <option :value="table.id" x-text="table.table_name" :selected="table.id == selectedTable"></option>
+                        </template>
+                    </select>
                 </div>
             </div>
 
-            <hr class="border-gray-800 my-6">
-
-            <!-- Query Builder & Formatting Configuration -->
-            <div class="space-y-4">
-                <h3 class="text-lg font-medium text-white">Query Builder & Export Settings</h3>
+            <!-- Visual Report Builder & Aggregations Workspace -->
+            <div class="bg-slate-950 border border-slate-800 rounded-xl p-5 space-y-5" x-data="reportBuilder()">
                 
-                <!-- Interactive Column Selector -->
-                <div>
-                    <div class="flex justify-between items-center mb-1">
-                        <label class="block text-sm font-medium text-gray-300">Select Fields to Include</label>
-                        <button type="button" id="select-all-cols" class="text-xs text-indigo-400 hover:text-indigo-300">Select All</button>
+                <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 pb-4 border-b border-slate-800">
+                    <div>
+                        <h2 class="text-sm font-bold text-slate-200 uppercase tracking-wider">Visual Columns & Aggregation Builder</h2>
+                        <p class="text-xs text-slate-400 mt-0.5">Select columns, assign aliases, and choose specific calculation functions (SUM, COUNT, AVG, etc.).</p>
                     </div>
-                    <div id="column-checkbox-container" class="bg-gray-900 border border-gray-700 rounded-md p-4 max-h-52 overflow-y-auto grid grid-cols-2 sm:grid-cols-3 gap-2">
-                        <span class="text-sm text-gray-500 italic col-span-full">Select a base table first to load available columns...</span>
+
+                    <div class="bg-slate-900 p-1 rounded-xl border border-slate-800 flex gap-1">
+                        <button type="button" @click="setReportType('tabular')" 
+                                :class="reportType === 'tabular' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
+                                class="px-3 py-1.5 rounded-lg text-xs font-semibold transition">
+                            📋 Tabular Detail
+                        </button>
+                        <button type="button" @click="setReportType('grouped_summary')" 
+                                :class="reportType === 'grouped_summary' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'"
+                                class="px-3 py-1.5 rounded-lg text-xs font-semibold transition">
+                            📂 Grouped Summary
+                        </button>
                     </div>
-                    
-                    <!-- Securely output selected_fields JSON script payload -->
-                    {{ form.instance.selected_fields|json_script:"initial-selected-fields" }}
-                    {{ form.selected_fields_json }}
                 </div>
 
-                <!-- Filter Rules with Helper & Quick Fill -->
-                <div>
-                    <div class="flex justify-between items-center mb-1">
-                        <label class="block text-sm font-medium text-gray-300">Filter Rules (JSON)</label>
-                        <span class="text-xs text-gray-500">Optional</span>
-                    </div>
-                    {{ form.filter_config_input }}
-                    
-                    <div class="mt-2 text-xs text-gray-400 bg-gray-900/60 border border-gray-800 rounded-md p-3 space-y-1.5">
-                        <p class="font-medium text-gray-300">How to write filter rules:</p>
-                        <p>Define column matching criteria to narrow down rows. Leave empty to retrieve all records.</p>
-                        <div class="pt-1 flex flex-wrap items-center gap-2">
-                            <span class="text-gray-500">Quick Fill:</span>
-                            <button type="button" id="exact-match-filter" class="text-indigo-400 hover:text-indigo-300 bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded border border-gray-700 font-mono">Exact Match</button>
-                            <button type="button" id="date-greater-than-filter" class="text-indigo-400 hover:text-indigo-300 bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded border border-gray-700 font-mono">Date Greater Than</button>
-                            <button type="button" id="clear-filter" class="text-gray-400 hover:text-gray-300 bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded border border-gray-700">Clear</button>
+                <template x-if="hasInvalidColumns">
+                    <div class="bg-red-500/10 border border-red-500/30 rounded-xl p-3.5 flex items-start gap-3 text-red-300 text-xs">
+                        <span class="text-base leading-none">🚫</span>
+                        <div>
+                            <strong class="font-semibold">Schema Mismatch:</strong> Active columns (<span x-text="invalidColumnNames"></span>) do not exist in this table. Remove them before saving.
                         </div>
                     </div>
+                </template>
+
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    
+                    <!-- Available Fields Palette -->
+                    <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-3.5 flex flex-col h-[380px]">
+                        <div class="flex justify-between items-center mb-2 pb-2 border-b border-slate-800 shrink-0">
+                            <span class="text-xs font-bold text-slate-300 uppercase">Available Fields</span>
+                            <span class="text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded-full" x-text="availableFields.length + ' fields'"></span>
+                        </div>
+                        <div class="min-h-[280px] flex-1 overflow-y-auto space-y-1.5 pr-2">
+                            <template x-for="field in availableFields" :key="field">
+                                <div @click="addField(field)" 
+                                     class="bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-indigo-500/50 p-2.5 rounded-xl cursor-pointer transition flex justify-between items-center">
+                                    <span class="text-xs font-mono text-slate-200" x-text="field"></span>
+                                    <span class="text-[10px] text-indigo-400">+ Add</span>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <!-- Active Columns & Aggregates Workspace -->
+                    <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-3.5 lg:col-span-2 flex flex-col h-[380px]">
+                        <div class="flex justify-between items-center mb-2 pb-2 border-b border-slate-800 shrink-0">
+                            <span class="text-xs font-bold text-slate-300 uppercase">Active Columns & Aggregate Functions</span>
+                            <span class="text-xs font-mono text-indigo-400" x-text="selectedColumns.length + ' active'"></span>
+                        </div>
+
+                        <div class="min-h-0 flex-1 overflow-y-auto space-y-2 pr-2">
+                            <template x-for="(col, index) in selectedColumns" :key="index">
+                                <div class="border p-2.5 rounded-xl flex items-center gap-2"
+                                     :class="isFieldValid(col.field) ? 'bg-slate-950 border-slate-800' : 'bg-red-950/20 border-red-500/50'">
+                                    <div class="flex flex-col text-slate-500 text-[10px]">
+                                        <button type="button" @click="moveUp(index)" :disabled="index === 0" class="hover:text-white disabled:opacity-20">▲</button>
+                                        <button type="button" @click="moveDown(index)" :disabled="index === selectedColumns.length - 1" class="hover:text-white disabled:opacity-20">▼</button>
+                                    </div>
+                                    <div class="w-24 truncate text-xs font-mono text-indigo-300" x-text="col.field"></div>
+                                    <div class="flex-1">
+                                        <input type="text" x-model="col.label" placeholder="Display Alias" class="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500">
+                                    </div>
+                                    <div class="w-32">
+                                        <select x-model="col.aggregate" class="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500">
+                                            <option value="">No Aggregate</option>
+                                            <option value="SUM">SUM</option>
+                                            <option value="COUNT">COUNT</option>
+                                            <option value="AVG">AVG</option>
+                                            <option value="MIN">MIN</option>
+                                            <option value="MAX">MAX</option>
+                                        </select>
+                                    </div>
+                                    <button type="button" @click="removeField(index)" class="text-slate-500 hover:text-red-400 text-xs px-1">✕</button>
+                                </div>
+                            </template>
+                            <div x-show="selectedColumns.length === 0" class="text-center py-16 text-slate-500 text-xs italic">
+                                Click fields from the left panel to configure columns and aggregates.
+                            </div>
+                        </div>
+
+                        <!-- Summary Display Location Options -->
+                        <div class="border-t border-slate-800 pt-3 mt-2 shrink-0 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                            <label class="flex items-center gap-2 cursor-pointer select-none">
+                                <input type="checkbox" x-model="showTotals" class="rounded bg-slate-900 border-slate-800 text-indigo-600 focus:ring-0">
+                                <span class="text-xs text-slate-300 font-medium">Enable Summary Aggregates</span>
+                            </label>
+                            
+                            <div class="flex items-center gap-3" x-show="showTotals">
+                                <label class="text-[11px] text-slate-400 font-mono">Layout Placement:</label>
+                                <select x-model="summaryPosition" class="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500">
+                                    <option value="bottom">Bottom Footer Row</option>
+                                    <option value="top">Top Summary Page / KPI Section</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
                 </div>
 
-                <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-1">Export Format</label>
-                    {{ form.export_format }}
-                    <p class="mt-1 text-xs text-gray-500">Choose the file format generated when the report runs.</p>
-                </div>
-
-                <div class="flex items-center pt-2">
-                    {{ form.is_active }}
-                    <label class="ml-2 block text-sm text-gray-300">Active (scheduled tasks enabled)</label>
-                </div>
+                <input type="hidden" name="config_json" :value="JSON.stringify({reportType, selectedColumns, showTotals, summaryPosition})">
             </div>
 
-            <div class="flex justify-end space-x-3 pt-4 border-t border-gray-800">
-                <a href="{% url 'reports:report_list' %}" class="px-4 py-2 border border-gray-700 rounded-md shadow-sm text-sm font-medium text-gray-300 bg-gray-800 hover:bg-gray-700">
+            <!-- Filter Rules -->
+            <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                    {{ form.filter_config.label }}
+                </label>
+                {{ form.filter_config }}
+                {% if form.filter_config.errors %}
+                    <p class="mt-1.5 text-xs text-red-400">{{ form.filter_config.errors.0 }}</p>
+                {% endif %}
+            </div>
+
+            <!-- Export Format -->
+            <div>
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                    {{ form.export_format.label }}
+                </label>
+                {{ form.export_format }}
+                {% if form.export_format.errors %}
+                    <p class="mt-1.5 text-xs text-red-400">{{ form.export_format.errors.0 }}</p>
+                {% endif %}
+            </div>
+
+            <!-- Form Action Buttons -->
+            <div class="flex items-center justify-end space-x-3 pt-6 border-t border-slate-800">
+                <a href="{% url 'reports:report_list' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all">
                     Cancel
                 </a>
-                <button type="submit" class="inline-flex justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none">
+                <button type="submit" 
+                        :disabled="hasInvalidColumns"
+                        :opacity="hasInvalidColumns ? '0.5' : '1'"
+                        class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">
                     {{ button_text }}
                 </button>
             </div>
@@ -106,144 +226,108 @@
     </div>
 </div>
 
-<!-- Dynamic AJAX Table & Column Loading Script -->
 <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        const sourceSelect = document.getElementById('id_source');
-        const tableSelect = document.getElementById('id_base_table');
-        const columnContainer = document.getElementById('column-checkbox-container');
-        const hiddenFieldsInput = document.getElementById('id_selected_fields_json');
-        const selectAllBtn = document.getElementById('select-all-cols');
-        const filterInput = document.getElementById('id_filter_config_input');
-
-        document.getElementById('exact-match-filter').addEventListener('click', function() {
-            filterInput.value = JSON.stringify({status: 'active'}, null, 2);
-        });
-        document.getElementById('date-greater-than-filter').addEventListener('click', function() {
-            filterInput.value = JSON.stringify({created_at__gte: '2026-01-01'}, null, 2);
-        });
-        document.getElementById('clear-filter').addEventListener('click', function() {
-            filterInput.value = '{}';
-        });
-
-        // Safely parse pre-selected fields from the json_script tag
-        let initialFields = [];
-        try {
-            const scriptTag = document.getElementById('initial-selected-fields');
-            if (scriptTag) {
-                initialFields = JSON.parse(scriptTag.textContent || '[]');
+function reportFormSync() {
+    return {
+        selectedSource: '{{ form.instance.source_id|default:"" }}',
+        selectedTable: '{{ form.instance.base_table_id|default:"" }}',
+        availableTables: [],
+        init() {
+            if (this.selectedSource) {
+                this.loadTables(this.selectedSource, true);
             }
-        } catch(e) {
-            console.error('Failed to parse initial selected fields:', e);
-        }
-
-        // Check if this is a brand new report (no PK / empty initial fields) vs editing
-        const isEditing = initialFields.length > 0;
-
-        // 1. Load tables when Source changes
-        if (sourceSelect && tableSelect) {
-            sourceSelect.addEventListener('change', function() {
-                const sourceId = this.value;
-                tableSelect.innerHTML = '<option value="">Loading tables...</option>';
-                columnContainer.innerHTML = '<span class="text-sm text-gray-500 italic col-span-full">Select a base table first...</span>';
-                hiddenFieldsInput.value = '[]';
-                
-                if (sourceId) {
-                    fetch("{% url 'reports:ajax_load_tables' %}?source_id=" + sourceId)
-                        .then(response => response.json())
-                        .then(data => {
-                            tableSelect.innerHTML = '<option value="">---------</option>';
-                            data.forEach(function(table) {
-                                const option = document.createElement('option');
-                                option.value = table.id;
-                                option.textContent = table.table_name || table.name;
-                                tableSelect.appendChild(option);
-                            });
-                        })
-                        .catch(error => {
-                            console.error('Error loading tables:', error);
-                            tableSelect.innerHTML = '<option value="">Error loading tables</option>';
-                        });
-                } else {
-                    tableSelect.innerHTML = '<option value="">---------</option>';
-                }
-            });
-        }
-
-        // 2. Load columns when Base Table changes (or on page load if editing)
-        function loadColumnsForTable(tableId, preselectedFields = []) {
-            if (!tableId) {
-                columnContainer.innerHTML = '<span class="text-sm text-gray-500 italic col-span-full">Select a base table first...</span>';
+        },
+        loadTables(sourceId, preserveSelected = false) {
+            if (!sourceId) {
+                this.availableTables = [];
+                this.selectedTable = '';
                 return;
             }
-
-            columnContainer.innerHTML = '<span class="text-sm text-gray-400 italic col-span-full">Loading available columns...</span>';
-
-            fetch("{% url 'reports:ajax_load_columns' %}?table_id=" + tableId)
-                .then(response => response.json())
-                .then(columns => {
-                    columnContainer.innerHTML = '';
-                    if (!columns || columns.length === 0) {
-                        columnContainer.innerHTML = '<span class="text-sm text-gray-500 italic col-span-full">No columns found or schema inspection unavailable.</span>';
-                        return;
+            fetch("{% url 'reports:ajax_load_tables' %}?source_id=" + sourceId)
+                .then(res => res.json())
+                .then(data => {
+                    this.availableTables = data;
+                    if (!preserveSelected) {
+                        this.selectedTable = '';
+                        window.dispatchEvent(new CustomEvent('table-changed', { detail: '' }));
                     }
-
-                    // If it's a brand new report, check all by default. If editing, ONLY check preselected fields.
-                    const shouldCheckAll = !isEditing && hiddenFieldsInput.value === '';
-
-                    columns.forEach(col => {
-                        const label = document.createElement('label');
-                        label.className = 'flex items-center space-x-2 text-sm text-gray-300 cursor-pointer hover:text-white bg-gray-800/40 px-2 py-1.5 rounded border border-gray-800';
-                        
-                        const checkbox = document.createElement('input');
-                        checkbox.type = 'checkbox';
-                        checkbox.value = col;
-                        checkbox.className = 'rounded bg-gray-900 border-gray-700 text-indigo-600 focus:ring-indigo-500 h-4 w-4';
-                        
-                        if (preselectedFields.includes(col) || shouldCheckAll) {
-                            checkbox.checked = true;
-                        }
-
-                        checkbox.addEventListener('change', updateSelectedFieldsJSON);
-
-                        label.appendChild(checkbox);
-                        label.appendChild(document.createTextNode(col));
-                        columnContainer.appendChild(label);
-                    });
-                    updateSelectedFieldsJSON();
                 })
-                .catch(err => {
-                    console.error('Failed to load columns:', err);
-                    columnContainer.innerHTML = '<span class="text-sm text-red-400 italic col-span-full">Error loading columns from schema.</span>';
+                .catch(err => console.error("Failed to load tables:", err));
+        },
+        triggerTableChange(tableId) {
+            window.dispatchEvent(new CustomEvent('table-changed', { detail: tableId }));
+        }
+    }
+}
+
+document.addEventListener('alpine:init', () => {
+    Alpine.data('reportBuilder', () => {
+        let initialConfig = null;
+        const configElement = document.getElementById('report-config-data');
+        if (configElement) {
+            try { initialConfig = JSON.parse(configElement.textContent); } catch (e) {}
+        }
+
+        return {
+            reportType: initialConfig?.reportType || 'tabular',
+            availableFields: [],
+            selectedColumns: initialConfig?.selectedColumns || [],
+            showTotals: initialConfig?.showTotals ?? true,
+            summaryPosition: initialConfig?.summaryPosition || 'bottom',
+            init() {
+                window.addEventListener('table-changed', (e) => {
+                    if (e.detail) this.loadColumns(e.detail);
+                    else this.availableFields = [];
                 });
-        }
 
-        function updateSelectedFieldsJSON() {
-            const checked = Array.from(columnContainer.querySelectorAll('input[type="checkbox"]:checked'))
-                                 .map(cb => cb.value);
-            hiddenFieldsInput.value = JSON.stringify(checked);
-        }
-
-        if (tableSelect) {
-            tableSelect.addEventListener('change', function() {
-                // When changing tables on an existing report, reset to checking all
-                loadColumnsForTable(this.value, []);
-            });
-
-            // If editing an existing report with a table already selected:
-            if (tableSelect.value) {
-                loadColumnsForTable(tableSelect.value, initialFields);
+                const initialTableId = '{{ form.instance.base_table_id|default:"" }}';
+                if (initialTableId) {
+                    this.loadColumns(initialTableId);
+                } else {
+                    const baseTableSelect = document.querySelector('#id_base_table');
+                    if (baseTableSelect && baseTableSelect.value) {
+                        this.loadColumns(baseTableSelect.value);
+                    }
+                }
+            },
+            loadColumns(tableId) {
+                fetch("{% url 'reports:ajax_load_table_columns' %}?table_id=" + tableId)
+                    .then(res => res.json())
+                    .then(data => {
+                        this.availableFields = data ? data.map(item => typeof item === 'string' ? item : (item.field_name || item.name)) : [];
+                    });
+            },
+            isFieldValid(fieldName) {
+                if (this.availableFields.length === 0) return true;
+                return this.availableFields.includes(fieldName);
+            },
+            get invalidColumns() {
+                if (this.availableFields.length === 0) return [];
+                return this.selectedColumns.filter(col => !this.availableFields.includes(col.field));
+            },
+            get hasInvalidColumns() { return this.invalidColumns.length > 0; },
+            get invalidColumnNames() { return this.invalidColumns.map(col => col.field).join(', '); },
+            setReportType(type) { this.reportType = type; },
+            addField(field) {
+                this.selectedColumns.push({ field: field, label: field, aggregate: '' });
+            },
+            removeField(index) { this.selectedColumns.splice(index, 1); },
+            moveUp(index) {
+                if (index > 0) {
+                    let temp = this.selectedColumns[index];
+                    this.selectedColumns[index] = this.selectedColumns[index - 1];
+                    this.selectedColumns[index - 1] = temp;
+                }
+            },
+            moveDown(index) {
+                if (index < this.selectedColumns.length - 1) {
+                    let temp = this.selectedColumns[index];
+                    this.selectedColumns[index] = this.selectedColumns[index + 1];
+                    this.selectedColumns[index + 1] = temp;
+                }
             }
-        }
-
-        if (selectAllBtn) {
-            selectAllBtn.addEventListener('click', function() {
-                const checkboxes = columnContainer.querySelectorAll('input[type="checkbox"]');
-                const allChecked = Array.from(checkboxes).every(cb => cb.checked);
-                checkboxes.forEach(cb => cb.checked = !allChecked);
-                updateSelectedFieldsJSON();
-            });
-        }
+        };
     });
+});
 </script>
 {% endblock %}

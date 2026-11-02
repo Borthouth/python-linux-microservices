@@ -3,7 +3,7 @@ from django.db import models
 from django.conf import settings
 from django_celery_beat.models import PeriodicTask
 from simple_history.models import HistoricalRecords
-from control_plane.models import SourceProfile, SourceTable
+from control_plane.models import SourceProfile, SourceTable, SourceField
 
 class TimeStampedAuditedModel(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
@@ -42,6 +42,7 @@ class ReportDefinition(TimeStampedAuditedModel):
     selected_fields = models.JSONField(default=list)
     join_config = models.JSONField(default=list, blank=True)
     filter_config = models.JSONField(default=dict, blank=True)
+    config = models.JSONField(default=dict, blank=True)
     
     # Export format selection
     export_format = models.CharField(
@@ -50,6 +51,7 @@ class ReportDefinition(TimeStampedAuditedModel):
             ('csv', 'CSV'),
             ('xlsx', 'Excel (XLSX)'),
             ('json', 'JSON'),
+            ('pdf', 'PDF'),
         ],
         default='csv'
     )
@@ -90,4 +92,4 @@ class ReportExecution(models.Model):
     completed_at = models.DateTimeField(blank=True, null=True)
 
     def __str__(self):
-            return f"{self.report.name} - {self.status} ({self.created_at.strftime('%Y-%m-%d %H:%M')})"
+        return f"{self.report.name} - {self.status} ({self.created_at.strftime('%Y-%m-%d %H:%M')})"
