@@ -11,7 +11,7 @@
 - **ClickHouse Analytical Warehouse:** Columnar database engine optimized for real-time analytical queries, high-performance aggregations, primary key optimization, and automated TTL data retention.
 - **MinIO S3-Compatible Object Storage:** Dedicated sidecar container bound to persistent volumes (`minio_data`) for bulky binary report storage. Utilizes `django-storages` and `boto3` with pre-signed secure URLs to stream report downloads directly to users while bypassing Django web workers.
 - **Session Security & Idle Timeout:** Hardened session management utilizing browser-close expiration (`SESSION_EXPIRE_AT_BROWSER_CLOSE = True`) and `django-auto-logout` with dynamic environment-driven idle timeout control (`SESSION_IDLE_MINUTES`).
-- **Asynchronous Reporting & Conveyor-Belt Pipelines:** Long-running reports are broken down into sequential Celery task chains (e.g., 50,000 rows per chunk) using primary-key/timestamp cursor pagination (`WHERE id > last_seen_id`) to prevent shifting-window data drift. Features queue isolation (`default` for fast app tasks vs. `reports` for heavy extractions) and schema migration safety guards.
+- **Asynchronous Reporting & Conveyor-Belt Pipelines:** Long-running reports are broken down into sequential Celery task chains (e.g., 50,000 rows per chunk) using primary-key/timestamp cursor pagination (`WHERE id > last_seen_id`) to prevent shifting-window data drift. Features queue isolation (`queue_ux`, `queue_warm`, `queue_cold`, `queue_periodic`) and schema migration safety guards.
 - **Django Control Plane:** Synchronous control plane managing user authentication, role-based access control (RBAC), self-service user profile management, source database connection profiles, scheduled ETL task management, and report sharing rules.
 - **Unified Audit Governance & Scheduled Task Tracking:** Full history tracking across control plane infrastructure models, `TrackedUser`, and standalone scheduled tasks via `ScheduleAuditLog` (utilizing custom JSON diff tracking). Features an XSS-hardened unified audit log viewer (`/control-plane/audit/`) with field-level Old-to-New diff comparison modal cards and full-text search.
 - **Scheduled ETL Task Governance:** Fully searchable and paginated management UI for `PeriodicTask` background jobs with integrated error-handling and uniqueness validation (`ValidationError` / `IntegrityError` safeguards for duplicate task names).
@@ -66,15 +66,19 @@ docker compose -f docker-compose.test.yml down -v
 
 ```text
 reporthub/
-├── app/                  # Django project configuration (settings, wsgi, celery)
-├── control_plane/          # Django app: Users, RBAC, Source Profiles, Audit Logs, Schedules
-├── warehouse/              # Dynamic schema reflection & table provisioner utilities
-├── etl/                    # Celery tasks (Batch ingestion, roll-ups, backfilling, cleanup)
-├── test/                   # Polyglot test database environments & sandbox configs
-├── Dockerfile              # Container build instructions (including MS ODBC drivers)
-├── docker-compose.yml      # Service orchestration (Web, Postgres, Redis, ClickHouse, MinIO, Celery)
+├── app/                  # Core application configuration & database sessions
+├── config/               # Django project settings, URLs, WSGI/ASGI, and Celery setup
+├── control_plane/        # Django app: Users, RBAC, Source Profiles, Audit Logs, Schedules
+├── warehouse/            # Dynamic schema reflection & table provisioner utilities
+├── etl/                  # Celery tasks (Batch ingestion, roll-ups, backfilling, cleanup)
+├── reports/              # Report generation engine, templates, and MinIO storage pipelines
+├── alembic/              # Standalone Alembic migrations for analytical database state
+├── tests/                # Polyglot test database environments & sandbox configs
+├── Dockerfile            # Container build instructions (including MS ODBC drivers)
+├── docker-compose.yml    # Service orchestration (Web, Postgres, Redis, ClickHouse, MinIO, Celery)
 ├── docker-compose.test.yml # Polyglot test databases (Postgres, MySQL, MSSQL)
-├── requirements.txt        # Python dependencies (includes pyodbc, boto3, django-storages)
-├── entrypoint.sh           # Container startup & auto-migration script
-├── ROADMAP.md              # Project implementation tracker
-└── README.md               # Project documentation
+├── requirements.txt      # Python dependencies
+├── entrypoint.sh         # Container startup & auto-migration script
+├── ROADMAP.md            # Project implementation tracker & audit cleanup checklist
+└── README.md             # Project documentation
+```

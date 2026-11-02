@@ -1,6 +1,6 @@
 # ReportHub Project Roadmap 🗺️
 
-Track the development and implementation phases of `ReportHub`.
+Track the development phases, architectural milestones, and codebase optimization tasks for `ReportHub`.
 
 ## Phase 1: Infrastructure, Networking & Decoupled Architecture
 - [x] Initialize repository structure (`README.md`, `ROADMAP.md`, `.gitignore`).
@@ -11,19 +11,17 @@ Track the development and implementation phases of `ReportHub`.
 - [x] **Hyper-V LAN Network Bridging:** Configured Hyper-V External Switch bridging development VM directly to local subnet (`HomeLAN_Bridge`) for direct connectivity to network targets (QNAP NAS & RHEL 9 work environment).
 - [x] **Decoupled Architecture & Warehouse Engine:** Established dual-database design:
   - **Control Plane (Operational DB):** Hardened Django database for configuration, user access matrix, and target metadata.
-  - **Analytical Warehouse (Warehouse DB):** Standalone PostgreSQL database using SQLAlchemy models with `JSONB` flex-payload columns to handle dynamic payloads without rigid migrations.
+  - **Analytical Warehouse (Warehouse DB):** Standalone PostgreSQL / ClickHouse database setup using dynamic schema reflection.
 - [x] **Alembic Warehouse Migration Engine:** Fully configured standalone Alembic setup in virtual environment; validated transactional DDL execution (`alembic upgrade head`).
 - [x] **MinIO S3-Compatible Object Storage Architecture:**
   - [x] Deploy MinIO container in `docker-compose.yml` bound to a dedicated persistent Docker volume (`minio_data`).
   - [x] Configure `django-storages` and `boto3` pointing to internal Docker S3 endpoints (`AWS_S3_ENDPOINT_URL = 'http://minio:9000'`).
   - [x] Externalize root credentials in `.env` and restrict public port exposure (keep database, Redis, and MinIO internal to Docker network).
-  - [ ] Configure pre-signed secure URLs for streaming report downloads directly from MinIO, bypassing Django web workers.
-  - [ ] Mount a dedicated Docker "scratch" volume for temporary local worker writes to eliminate RAM OOM errors and container disk bloat.
 
 ---
 
 ## Phase 2: Django Control Plane, User Management & Audit Engine
-- [x] Initialize Django project and core apps (`control_plane`, `warehouse`, `etl`).
+- [x] Initialize Django project and core apps (`control_plane`, `warehouse`, `etl`, `reports`).
 - [x] Configure automatic database migrations via container startup scripts (`entrypoint.sh`).
 - [x] **Security-First Hardening & Session Security**: 
   - [x] Content Security Policy (`django-csp`), strict `ALLOWED_HOSTS`, clickjacking/MIME defenses, HttpOnly session/CSRF cookies, and global 64-bit `BigAutoField`.
@@ -60,7 +58,7 @@ Track the development and implementation phases of `ReportHub`.
 
 ---
 
-## Phase 4: Analytical Data Warehouse (ClickHouse Integration & Optimization)
+## Phase 4: Analytical Data Warehouse (ClickHouse Integration & Ingestion Engine)
 - [x] **ClickHouse Container Deployment & Security:**
   - [x] Deploy ClickHouse alongside PostgreSQL/Redis in Docker (internal network; ports `9000`/`8123` not exposed publicly).
   - [x] Secure default user and configure connection parameters for Django & Celery.
@@ -70,30 +68,34 @@ Track the development and implementation phases of `ReportHub`.
 - [x] **Ingestion Engine & High-Volume Flushing:**
   - [x] Build idempotent batch ingestion Celery tasks (`ingest_source_to_clickhouse_task`) reading selected fields with dialect-aware identifier quoting.
   - [x] Implement active-source guard checks (`is_active=True`) and environment-driven batch sizing (`DEFAULT_ETL_BATCH_SIZE`).
-  - [x] Configure periodic dispatch tasks (`trigger_all_active_clickhouse_ingestion_task`) and dedicated worker queue routing (`queue_hot`, `queue_ux`, `queue_periodic`).
+  - [x] Configure periodic dispatch tasks (`trigger_all_active_clickhouse_ingestion_task`) and dedicated worker queue routing (`queue_cold`, `queue_warm`, `queue_ux`, `queue_periodic`).
 
 ---
 
-## Phase 5: Asynchronous Reporting & Export Pipeline
+## Phase 5: Codebase Audit, Cleanup & Optimization (Active Phase 🎯)
+
+- [ ] **Dependency & Configuration Pruning:**
+  - [ ] Consolidate duplicate package declarations in `requirements.txt` (`celery`, `pymysql`, `psycopg2-binary`).
+  - [ ] Evaluate unused stack dependencies (FastAPI, Uvicorn, AsyncPG) to trim container build overhead if not servicing separate microservice endpoints.
+  - [ ] Refactor `docker-compose.yml` to extract the repeated 12-line environment variable block across `app` and Celery worker services into an `env_file: .env` configuration.
+- [ ] **Audit Trail & Encryption Hardening:**
+  - [ ] Audit `changes_data` JSON serialization in `control_plane/models.py` / `admin.py` to ensure encrypted credential fields are explicitly masked before historical snapshots are persisted.
+- [ ] **Task & Memory Safety Safeguards:**
+  - [ ] Audit all Celery tasks in `etl/tasks.py` and `reports/tasks.py` to verify strict primary-key cursor pagination (`WHERE id > last_seen_id`) over raw `OFFSET` queries.
+  - [ ] Ensure dynamic SQLAlchemy engine calls strictly utilize context managers to prevent connection pool leaks against polyglot target databases.
+- [ ] **Frontend & HTMX Polish:**
+  - [ ] Audit template event bindings to guarantee 100% CSP compliance via `htmx:afterSwap` delegated listeners.
+  - [ ] Verify clean termination on HTMX polling triggers (`hx-trigger="every 2s"`) upon reaching terminal execution states.
+
+---
+
+## Phase 6: Asynchronous Reporting, Query Generation & Export Pipelines
 - [ ] **Multi-Tiered Storage & Lifecycle Indexing:**
-  - [ ] PostgreSQL handles lightweight report lifecycle metadata state tracking (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
-  - [ ] Completed binary report outputs uploaded directly to MinIO, updating PostgreSQL status with location keys in a single atomic update.
-- [ ] **Chunked Conveyor-Belt Execution:**
-  - [ ] Break long-running report jobs into sequential Celery task chains (e.g., 50,000 rows per chunk).
-  - [ ] Use primary-key/timestamp cursor pagination (`WHERE id > last_seen_id`) instead of `OFFSET` to prevent shifting-window data drift mid-report.
-- [ ] **Queue Isolation & Queue Hygiene:**
-  - [ ] Segregate Celery workers into dedicated queues (`default` for fast web application operations vs `reports` for heavy analytical extractions).
-- [ ] **Schema Evolution Safety Guards:**
-  - [ ] Implement pre-migration checks against active PostgreSQL report states (`PROCESSING`) to pause destructive ClickHouse DDL schema migrations until active jobs complete.
-
----
-
-## Phase 6: Report Generation & Query Engine
+  - [ ] Manage report lifecycle metadata in PostgreSQL (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
+  - [ ] Upload completed binary outputs directly to MinIO, updating PostgreSQL status with pre-signed retrieval keys in an atomic transaction.
 - [ ] **Dynamic Query Builder & Join Engine:**
-  - [ ] Design `ReportDefinition` model and report configuration interface.
-  - [ ] Implement automated query generation leveraging stored `SourceRelationship` foreign key metadata to construct multi-table SQL `JOIN` statements dynamically.
-- [ ] **Execution & Visualization:**
-  - [ ] Execute parameterized queries against ClickHouse analytical tables.
-  - [ ] Develop report templates, data visualization components, and export formats (CSV/Excel/PDF).
-- [ ] **Authenticated Sharing & RBAC:**
-  - [ ] Implement role-based visibility restricting "View Only" users strictly to authorized dashboards and reports.
+  - [ ] Build `ReportDefinition` model and config interface.
+  - [ ] Generate parameterized SQL `JOIN` queries against ClickHouse analytical tables utilizing stored `SourceRelationship` foreign keys.
+- [ ] **Streaming Exports & Share Control:**
+  - [ ] Implement chunked streaming exports (CSV, Excel/pandas, ReportLab PDF) to keep Celery memory utilization low.
+  - [ ] Secure report downloads via tokenized, time-expiring URLs bound to user tenant scopes.
