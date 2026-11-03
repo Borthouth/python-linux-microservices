@@ -17,6 +17,12 @@ urlpatterns = [
     
     # dashboard URL
     path('', dashboard.dashboard_view, name='dashboard'),
+    path('api/widgets/update/', dashboard.update_widget_preferences, name='update_widget_preferences'),
+    path('pipelines/history/', dashboard.pipeline_history_view, name='pipeline_history'),
+    path('sources/<int:source_pk>/cancel/', dashboard.cancel_pipeline_view, name='cancel_pipeline'),
+    path('reports/<int:report_pk>/cancel/', dashboard.cancel_report_view, name='cancel_report'),
+    path('reports/history/', dashboard.report_history_view, name='report_history'),
+    path('reports/<uuid:report_pk>/download/', dashboard.download_report_view, name='download_report'),
 
     # User management URLs
     path('users/', users.user_management_view, name='user_management'),

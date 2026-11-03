@@ -19,12 +19,24 @@ def execute_report_task(self, report_id, execution_id=None):
         if execution_id:
             execution = ReportExecution.objects.get(pk=execution_id)
             execution.status = 'running'
-            execution.save()
+            execution.progress_percentage = 10
+            execution.is_cancelled = False
+            execution.save(update_fields=['status', 'progress_percentage', 'is_cancelled'])
         else:
-            execution = ReportExecution.objects.create(report=report, status='running')
+            execution = ReportExecution.objects.create(
+                report=report, 
+                status='running', 
+                progress_percentage=10
+            )
+
+        # Check cancellation early
+        execution.refresh_from_db()
+        if execution.is_cancelled:
+            execution.status = 'cancelled'
+            execution.save(update_fields=['status'])
+            return "Execution cancelled before query."
 
         table_name = report.base_table.table_name if hasattr(report.base_table, 'table_name') else str(report.base_table)
-        
         config = report.config or {}
         selected_columns = config.get('selectedColumns', [])
         show_totals = config.get('showTotals', True)
@@ -43,22 +55,18 @@ def execute_report_task(self, report_id, execution_id=None):
         row_count = 0
         rows = []
         
+        # --- Stage 1: Database Query Execution (Progress: 30%) ---
+        execution.progress_percentage = 30
+        execution.save(update_fields=['progress_percentage'])
+
         if fields_to_query and table_name and report.source:
             source = report.source
             query = f"SELECT {', '.join(fields_to_query)} FROM {table_name}"
-            
             db_type = str(source.db_type).lower()
             source_name = str(source.name).lower()
             
             if any(k in db_type or k in source_name for k in ['mssql', 'sql server', 'microsoft']):
-                conn_str = (
-                    f"DRIVER={{ODBC Driver 18 for SQL Server}};"
-                    f"SERVER={source.host},{source.port};"
-                    f"DATABASE={source.database_name};"
-                    f"UID={source.username};"
-                    f"PWD={source.password};"
-                    f"TrustServerCertificate=yes;"
-                )
+                conn_str = f"DRIVER={{ODBC Driver 18 for SQL Server}};SERVER={source.host},{source.port};DATABASE={source.database_name};UID={source.username};PWD={source.password};TrustServerCertificate=yes;"
                 conn = pyodbc.connect(conn_str)
                 cursor = conn.cursor()
                 cursor.execute(query)
@@ -83,13 +91,21 @@ def execute_report_task(self, report_id, execution_id=None):
                     row_count += 1
                 conn.close()
 
-        # Compute granular column aggregations in `field (agg): value` format
+        # Check cancellation after heavy query
+        execution.refresh_from_db()
+        if execution.is_cancelled:
+            execution.status = 'cancelled'
+            execution.save(update_fields=['status'])
+            return "Execution cancelled after database query."
+
+        # --- Stage 2: Summary Aggregates & File Build (Progress: 60%) ---
+        execution.progress_percentage = 60
+        execution.save(update_fields=['progress_percentage'])
+
         summary_lines = []
         if show_totals and rows and len(rows) > 0:
             for col_idx, agg_type in enumerate(aggregates):
-                if not agg_type:
-                    continue  # Only include columns where an aggregate was explicitly chosen
-                
+                if not agg_type: continue 
                 col_name = fields_to_query[col_idx]
                 col_values = [r[col_idx] for r in rows if r[col_idx] is not None]
                 computed_val = ""
@@ -107,18 +123,15 @@ def execute_report_task(self, report_id, execution_id=None):
                             computed_val = int(res) if isinstance(numeric_vals[0], int) and agg_type != 'AVG' else round(res, 2)
                     except Exception:
                         pass
-                
                 summary_lines.append(f"{col_name} ({agg_type.lower()}): {computed_val}")
 
-        # File Export Generation
         file_bytes = b''
         content_type = 'text/csv'
 
         if export_format == 'json':
             structured_data = [dict(zip(headers, row)) for row in rows]
             output_payload = {"data": structured_data}
-            if show_totals and summary_lines:
-                output_payload["summaries"] = summary_lines
+            if show_totals and summary_lines: output_payload["summaries"] = summary_lines
             file_bytes = json.dumps(output_payload, default=str, indent=2).encode('utf-8')
             content_type = 'application/json'
 
@@ -139,15 +152,13 @@ def execute_report_task(self, report_id, execution_id=None):
 
             def build_summary_paragraph():
                 if not summary_lines: return None
-                text = "<b>Summary Aggregates:</b><br/>" + "<br/>".join(summary_lines)
-                return Paragraph(text, styles['Normal'])
+                return Paragraph("<b>Summary Aggregates:</b><br/>" + "<br/>".join(summary_lines), styles['Normal'])
 
-            # Render Summary at TOP if selected
             if show_totals and summary_lines and summary_position == 'top':
                 sum_para = build_summary_paragraph()
                 if sum_para:
                     story.append(sum_para)
-                    story.append(Spacer(1, 20)) # Space to separate from table
+                    story.append(Spacer(1, 20))
 
             story.append(Paragraph("<b>Detailed Records</b>", styles['Heading2']))
             table_data = [headers]
@@ -168,12 +179,10 @@ def execute_report_task(self, report_id, execution_id=None):
             ]))
             story.append(t)
 
-            # Render Summary at BOTTOM if selected
             if show_totals and summary_lines and summary_position == 'bottom':
                 story.append(Spacer(1, 15))
                 sum_para = build_summary_paragraph()
-                if sum_para:
-                    story.append(sum_para)
+                if sum_para: story.append(sum_para)
 
             doc.build(story)
             file_bytes = buffer.getvalue()
@@ -184,29 +193,26 @@ def execute_report_task(self, report_id, execution_id=None):
             output = io.StringIO()
             writer = csv.writer(output)
             if show_totals and summary_lines and summary_position == 'top':
-                for line in summary_lines:
-                    writer.writerow([line])
+                for line in summary_lines: writer.writerow([line])
                 writer.writerow([])
-
             writer.writerow(headers)
-            for row in rows:
-                writer.writerow(row)
-
+            for row in rows: writer.writerow(row)
             if show_totals and summary_lines and summary_position == 'bottom':
                 writer.writerow([])
-                for line in summary_lines:
-                    writer.writerow([line])
-
+                for line in summary_lines: writer.writerow([line])
             file_bytes = output.getvalue().encode('utf-8')
             content_type = 'text/csv'
 
-        # MinIO Upload
+        # --- Stage 3: MinIO Storage Upload (Progress: 85%) ---
+        execution.progress_percentage = 85
+        execution.save(update_fields=['progress_percentage'])
+
         endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://minio:9000')
         if endpoint.startswith('http://'): endpoint = endpoint[7:]
         elif endpoint.startswith('https://'): endpoint = endpoint[8:]
 
         minio_client = Minio(endpoint, access_key=getattr(settings, 'AWS_ACCESS_KEY_ID', 'minioadmin'), secret_key=getattr(settings, 'AWS_SECRET_ACCESS_KEY', 'minioadminpassword'), secure=False)
-        bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'reporthub-reports')
+        bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'reporthub-artifacts')
         if not minio_client.bucket_exists(bucket_name): minio_client.make_bucket(bucket_name)
 
         file_extension = export_format if export_format in ['csv', 'json', 'pdf'] else 'csv'
@@ -214,6 +220,7 @@ def execute_report_task(self, report_id, execution_id=None):
         minio_client.put_object(bucket_name, file_name, io.BytesIO(file_bytes), len(file_bytes), content_type=content_type)
 
         execution.status = 'completed'
+        execution.progress_percentage = 100
         execution.file_path = file_name
         execution.row_count = row_count
         execution.completed_at = timezone.now()

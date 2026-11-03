@@ -227,3 +227,31 @@ class WarehouseDatasetMapping(models.Model):
 
     class Meta:
         unique_together = ('source_profile', 'table_name', 'field_name')
+
+
+class BackgroundJob(models.Model):
+    class Status(models.TextChoices):
+        PENDING = 'PENDING', 'Pending'
+        RUNNING = 'RUNNING', 'Running'
+        COMPLETED = 'COMPLETED', 'Completed'
+        FAILED = 'FAILED', 'Failed'
+        CANCELLED = 'CANCELLED', 'Cancelled'
+
+    task_id = models.CharField(max_length=255, unique=True)
+    name = models.CharField(max_length=255)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    progress_percentage = models.PositiveIntegerField(default=0)  # 0 to 100
+    is_cancelled = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class UserWidgetPreference(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='widget_preferences')
+    show_stats = models.BooleanField(default=True)
+    show_pipelines = models.BooleanField(default=True)
+    show_reports = models.BooleanField(default=True)
+    show_history = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"Widget Preferences for {self.user.username}"

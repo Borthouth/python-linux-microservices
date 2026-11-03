@@ -1,15 +1,30 @@
-    {% if page_obj.has_other_pages %}
-    <div class="mt-6 flex justify-between items-center text-sm text-gray-400">
-        <div>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</div>
-        <div class="flex space-x-2">
-            {% if page_obj.has_previous %}
-                <a href="?page={{ page_obj.previous_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_action %}&action={{ selected_action }}{% endif %}" 
-                   class="bg-gray-800 px-3 py-1 rounded hover:bg-gray-700 text-white">Previous</a>
-            {% endif %}
-            {% if page_obj.has_next %}
-                <a href="?page={{ page_obj.next_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_action %}&action={{ selected_action }}{% endif %}" 
-                   class="bg-gray-800 px-3 py-1 rounded hover:bg-gray-700 text-white">Next</a>
-            {% endif %}
-        </div>
+{% if page_obj.has_other_pages %}
+<div class="mt-6 flex items-center justify-between bg-gray-900 border border-gray-800 rounded-2xl px-6 py-4 shadow-xl">
+    <div class="text-xs text-gray-400">
+        Showing page <span class="font-semibold text-white">{{ page_obj.number }}</span> of <span class="font-semibold text-white">{{ page_obj.paginator.num_pages }}</span>
     </div>
-    {% endif %}
+    <div class="flex items-center space-x-2">
+        {% if page_obj.has_previous %}
+            <a href="?page={{ page_obj.previous_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_action %}&action={{ selected_action }}{% endif %}{% if status_filter %}&status={{ status_filter }}{% endif %}"
+               class="px-3.5 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white text-xs font-medium rounded-xl border border-gray-700 transition">
+                &larr; Previous
+            </a>
+        {% else %}
+            <span class="px-3.5 py-2 bg-gray-950/40 text-gray-600 text-xs font-medium rounded-xl border border-gray-800 cursor-not-allowed">
+                &larr; Previous
+            </span>
+        {% endif %}
+
+        {% if page_obj.has_next %}
+            <a href="?page={{ page_obj.next_page_number }}{% if search_query %}&q={{ search_query }}{% endif %}{% if selected_action %}&action={{ selected_action }}{% endif %}{% if status_filter %}&status={{ status_filter }}{% endif %}"
+               class="px-3.5 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white text-xs font-medium rounded-xl border border-gray-700 transition">
+                Next &rarr;
+            </a>
+        {% else %}
+            <span class="px-3.5 py-2 bg-gray-950/40 text-gray-600 text-xs font-medium rounded-xl border border-gray-800 cursor-not-allowed">
+                Next &rarr;
+            </span>
+        {% endif %}
+    </div>
+</div>
+{% endif %}

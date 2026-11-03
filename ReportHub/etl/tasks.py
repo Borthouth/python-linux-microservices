@@ -59,7 +59,9 @@ def sync_data_source_task(self, source_pk):
 
     profile.last_sync_status = SyncStatus.RUNNING
     profile.last_sync_error = ''
-    profile.save(update_fields=['last_sync_status', 'last_sync_error'])
+    profile.progress_percentage = 0
+    profile.is_cancelled = False
+    profile.save(update_fields=['last_sync_status', 'last_sync_error', 'progress_percentage', 'is_cancelled'])
 
     try:
         if profile.db_type == DbChoice.MYSQL:
@@ -102,6 +104,7 @@ def sync_data_source_task(self, source_pk):
         profile.last_synced = timezone.now()
         profile.last_sync_status = SyncStatus.SUCCESS
         profile.last_sync_error = ''
+        profile.progress_percentage = 100
         profile.save()
         
         logger.info(f"ETL sync successfully completed for data source: '{profile.name}'")
@@ -275,7 +278,7 @@ def trigger_all_active_source_introspection_task(self):
 def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
     """
     Ingests selected tables and fields from a specific SourceProfile 
-    into ClickHouse, maintaining strict source/table separation and chunk time-bounding.
+    into ClickHouse, maintaining strict source/table separation, progress tracking, and cancellation checks.
     """
     logger = get_etl_logger()
     
@@ -294,6 +297,12 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
         return f"Ingestion skipped for deactivated source: {profile.name}"
 
     logger.info(f"Starting ClickHouse data ingestion for source: '{profile.name}' (Batch Size: {batch_size})")
+
+    # Initialize running state & progress
+    profile.last_sync_status = SyncStatus.RUNNING
+    profile.progress_percentage = 0
+    profile.is_cancelled = False
+    profile.save(update_fields=['last_sync_status', 'progress_percentage', 'is_cancelled'])
 
     # 1. Connect to ClickHouse
     ch_client = clickhouse_connect.get_client(
@@ -325,12 +334,37 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
         source_engine = sa.create_engine(engine_url)
     except Exception as e:
         logger.error(f"Failed to create source engine for {profile.name}: {e}")
+        profile.last_sync_status = SyncStatus.FAILED
+        profile.last_sync_error = str(e)
+        profile.save()
         return f"Engine creation failed: {e}"
 
     # 3. Iterate through tables and ONLY selected fields for active sources
-    source_tables = SourceTable.objects.filter(source=profile, source__is_active=True)
+    source_tables = list(SourceTable.objects.filter(source=profile, source__is_active=True))
+    total_tables = len(source_tables)
 
-    for table in source_tables:
+    if total_tables == 0:
+        profile.last_sync_status = SyncStatus.SUCCESS
+        profile.progress_percentage = 100
+        profile.save()
+        return f"No active tables to ingest for {profile.name}"
+
+    preparer = source_engine.dialect.identifier_preparer
+
+    for index, table in enumerate(source_tables, start=1):
+        # Check for cancellation before processing each table
+        profile.refresh_from_db()
+        if not profile.is_active or profile.is_cancelled:
+            profile.last_sync_status = SyncStatus.CANCELLED
+            profile.save(update_fields=['last_sync_status'])
+            logger.warning(f"ETL ingestion for '{profile.name}' was cancelled.")
+            return f"Ingestion cancelled for {profile.name}"
+
+        # Update Progress Percentage based on table completion
+        progress = int((index / total_tables) * 100)
+        profile.progress_percentage = progress
+        profile.save(update_fields=['progress_percentage'])
+
         selected_fields = table.fields.filter(is_selected=True)
         if not selected_fields.exists():
             continue  
@@ -340,8 +374,6 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
         # Construct isolated ClickHouse table identifier
         ch_table_name = f"source_{profile.pk}__{table.schema_name}_{table.table_name}".lower()
 
-        # Safely quote column names using SQLAlchemy's identifier preparer
-        preparer = source_engine.dialect.identifier_preparer
         quoted_col_names = [preparer.quote(f.field_name) for f in selected_fields]
         select_cols_sql = ", ".join(quoted_col_names)
 
@@ -378,6 +410,13 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
                 max_chunks_per_burst = 50  # Yields execution control after 50 chunks to prevent worker hogging
                 
                 for chunk in pd.read_sql(source_query, con=conn, chunksize=batch_size):
+                    # Check cancellation mid-stream during heavy chunks
+                    profile.refresh_from_db()
+                    if not profile.is_active or profile.is_cancelled:
+                        profile.last_sync_status = SyncStatus.CANCELLED
+                        profile.save(update_fields=['last_sync_status'])
+                        return f"Ingestion aborted mid-stream for {profile.name}"
+
                     chunk = chunk.where(pd.notnull(chunk), None)
                     
                     # Safely sanitize strings and dates/times to avoid struct packing and encoding errors
@@ -402,6 +441,10 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
         except Exception as e:
             logger.error(f"Error streaming data for table {table.table_name}: {e}")
 
+    profile.last_synced = timezone.now()
+    profile.last_sync_status = SyncStatus.SUCCESS
+    profile.progress_percentage = 100
+    profile.save()
     return f"ClickHouse ingestion completed for {profile.name}"
 
 

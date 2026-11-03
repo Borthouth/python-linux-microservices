@@ -80,6 +80,7 @@ class ReportExecution(models.Model):
         ('running', 'Running'),
         ('completed', 'Completed'),
         ('failed', 'Failed'),
+        ('cancelled', 'Cancelled'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -90,6 +91,8 @@ class ReportExecution(models.Model):
     row_count = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(blank=True, null=True)
+    progress_percentage = models.PositiveIntegerField(default=0)
+    is_cancelled = models.BooleanField(default=False)
 
     def __str__(self):
         return f"{self.report.name} - {self.status} ({self.created_at.strftime('%Y-%m-%d %H:%M')})"
