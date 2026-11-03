@@ -12,18 +12,18 @@
 - **MinIO S3-Compatible Object Storage:** Dedicated sidecar container bound to persistent volumes (`minio_data`) for bulky binary report storage. Utilizes `django-storages` and `boto3` with pre-signed secure URLs to stream report downloads directly to users while bypassing Django web workers.
 - **Session Security & Idle Timeout:** Hardened session management utilizing browser-close expiration (`SESSION_EXPIRE_AT_BROWSER_CLOSE = True`) and `django-auto-logout` with dynamic environment-driven idle timeout control (`SESSION_IDLE_MINUTES`).
 - **Asynchronous Reporting & Conveyor-Belt Pipelines:** Long-running reports are broken down into sequential Celery task chains (e.g., 50,000 rows per chunk) using primary-key/timestamp cursor pagination (`WHERE id > last_seen_id`) to prevent shifting-window data drift. Features queue isolation (`queue_ux`, `queue_warm`, `queue_cold`, `queue_periodic`) and schema migration safety guards.
-- **Django Control Plane:** Synchronous control plane managing user authentication, role-based access control (RBAC), self-service user profile management, source database connection profiles, scheduled ETL task management, and report sharing rules.
+- **Django Control Plane:** Synchronous control plane managing user authentication, role-based access control (RBAC), self-service user profile management, source database connection profiles, scheduled ETL task management, user widget display customization, and report sharing rules.
 - **Unified Audit Governance & Scheduled Task Tracking:** Full history tracking across control plane infrastructure models, `TrackedUser`, and standalone scheduled tasks via `ScheduleAuditLog` (utilizing custom JSON diff tracking). Features an XSS-hardened unified audit log viewer (`/control-plane/audit/`) with field-level Old-to-New diff comparison modal cards and full-text search.
-- **Scheduled ETL Task Governance:** Fully searchable and paginated management UI for `PeriodicTask` background jobs with integrated error-handling and uniqueness validation (`ValidationError` / `IntegrityError` safeguards for duplicate task names).
+- **Scheduled ETL Task Governance:** Fully searchable and paginated management UI for `BackgroundJob` / `PeriodicTask` background jobs with integrated error-handling and uniqueness validation (`ValidationError` / `IntegrityError` safeguards for duplicate task names).
 - **Asynchronous UI Status & Toast Notification Architecture:** Real-time database connection testing driven by HTMX polling (`every 2s`), backed by CSP-compliant event-driven (`htmx:afterSwap`) floating toast notifications and robust fallback UI states ("Ready", "Running...", "Failed").
 - **Dynamic Warehouse Provisioning:** Rather than hardcoding models, ReportHub inspects source databases (`information_schema` / catalog views), allows selective field mapping via an interactive master-detail UI, and dynamically provisions analytical tables complete with composite indexes, `source_id`, `company_id`, and logical foreign key references.
 - **Multi-Source Unification:** Every ingested row is stamped with a `source_id`, allowing independent ETL schedules per server while enabling seamless cross-server global reporting through simple query filters.
 - **Enterprise Security Matrix:** 
   1. *Source-Level Access:* Restrict users to specific source database instances.
-  2. *Role-Based Access Control (RBAC):* Viewer, Analyst/Builder, and System Admin roles.
+  2. *Role-Based Access Control (RBAC):* Viewer, Analyst/Builder, and System Admin roles (`is_admin`).
   3. *Row-Level Security (RLS):* Automated tenant isolation via `company_id` injection on all queries.
   4. *Security Hardening:* Enforced via `django-csp` (Content Security Policy), HttpOnly session/CSRF cookies, strict host configurations, and internal-only Docker networking for databases, Redis, and MinIO.
-- **Secure Report Sharing:** Save custom reports and generate time-expiring, tokenized public or team-shared URLs.
+- **Secure Report Sharing & Artifact Downloads:** Save custom reports, track historical executions (`ReportExecution`), execute secure direct downloads, and generate time-expiring, tokenized public or team-shared URLs.
 
 ---
 
@@ -57,7 +57,7 @@ docker compose -f docker-compose.test.yml down -v
 - **Analytical & Object Storage:** ClickHouse (Columnar Data Warehouse), MinIO (S3-Compatible Object Storage via `django-storages` and `boto3`), PostgreSQL 15 (Operational & Warm Storage)
 - **Source Integration & Drivers:** PostgreSQL (`psycopg2`), MySQL (`pymysql`), Microsoft SQL Server (`pyodbc` with Microsoft ODBC Driver 18 for Debian/Linux)
 - **Testing & Quality:** Pytest, Playwright (for automated web application testing & debugging)
-- **Frontend:** HTMX, Tailwind CSS, Custom Components, Modern Vanilla JavaScript (Event-Driven DOM handlers)
+- **Frontend:** HTMX, Tailwind CSS, Alpine.js, Custom Components, Modern Vanilla JavaScript (Event-Driven DOM handlers)
 - **Infrastructure:** Docker, Docker Compose, RHEL 9 compatible deployment targets
 
 ---
@@ -68,10 +68,10 @@ docker compose -f docker-compose.test.yml down -v
 reporthub/
 ├── app/                  # Core application configuration & database sessions
 ├── config/               # Django project settings, URLs, WSGI/ASGI, and Celery setup
-├── control_plane/        # Django app: Users, RBAC, Source Profiles, Audit Logs, Schedules
+├── control_plane/        # Django app: Users, RBAC, Source Profiles, Audit Logs, Schedules, Preferences
 ├── warehouse/            # Dynamic schema reflection & table provisioner utilities
 ├── etl/                  # Celery tasks (Batch ingestion, roll-ups, backfilling, cleanup)
-├── reports/              # Report generation engine, templates, and MinIO storage pipelines
+├── reports/              # Report generation engine, templates, execution logs, and MinIO storage pipelines
 ├── alembic/              # Standalone Alembic migrations for analytical database state
 ├── tests/                # Polyglot test database environments & sandbox configs
 ├── Dockerfile            # Container build instructions (including MS ODBC drivers)
