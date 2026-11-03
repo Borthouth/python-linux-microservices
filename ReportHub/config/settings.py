@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'storages',  # Required for django-storages (MinIO S3 backend)
     'simple_history',
     'control_plane',
     'etl',
@@ -181,14 +182,34 @@ DATABASES = {
 CLICKHOUSE_HOST = env('CLICKHOUSE_HOST', default='clickhouse')
 CLICKHOUSE_PORT = env.int('CLICKHOUSE_PORT', default=8123)
 CLICKHOUSE_USER = env('CLICKHOUSE_USER', default='default')
-CLICKHOUSE_PASSWORD = env('CLICKHouse_PASSWORD', default='your_secure_password')
+CLICKHOUSE_PASSWORD = env('CLICKHOUSE_PASSWORD', default='your_secure_password')
 
-# MinIO Storage Settings
+# --- MinIO / S3 Storage Configuration (django-storages) ---
+STORAGES = {
+    "default": {
+        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
+}
+
 MINIO_STORAGE_ENDPOINT = env.str('MINIO_STORAGE_ENDPOINT', default='minio:9000')
 MINIO_STORAGE_ACCESS_KEY = env.str('MINIO_STORAGE_ACCESS_KEY', default='minioadmin')
-MINIO_STORAGE_SECRET_KEY = env.str('MINIO_STORAGE_SECRET_KEY', default='minioadmin')
+MINIO_STORAGE_SECRET_KEY = env.str('MINIO_STORAGE_SECRET_KEY', default='minioadminpassword')
 MINIO_STORAGE_USE_HTTPS = env.bool('MINIO_STORAGE_USE_HTTPS', default=False)
-MINIO_STORAGE_BUCKET_NAME = env.str('MINIO_STORAGE_BUCKET_NAME', default='reporthub-artifacts')
+MINIO_STORAGE_BUCKET_NAME = env.str('MINIO_STORAGE_BUCKET_NAME', default='reporthub-reports')
+
+# Map MinIO configuration to s3boto3 expectations
+AWS_ACCESS_KEY_ID = MINIO_STORAGE_ACCESS_KEY
+AWS_SECRET_ACCESS_KEY = MINIO_STORAGE_SECRET_KEY
+AWS_STORAGE_BUCKET_NAME = MINIO_STORAGE_BUCKET_NAME
+AWS_S3_ENDPOINT_URL = f"{'https' if MINIO_STORAGE_USE_HTTPS else 'http'}://{MINIO_STORAGE_ENDPOINT}"
+AWS_S3_REGION_NAME = env.str('AWS_S3_REGION_NAME', default='us-east-1')
+AWS_S3_SIGNATURE_VERSION = 's3v4'
+AWS_S3_FILE_OVERWRITE = False
+AWS_DEFAULT_ACL = None
+AWS_QUERYSTRING_AUTH = True  # Enable pre-signed expiring secure URLs for downloads
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
