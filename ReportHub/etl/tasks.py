@@ -18,6 +18,7 @@ from control_plane.models import (
     SyncStatus, 
     DbChoice
 )
+from control_plane.utils import set_task_progress
 
 
 def get_etl_logger():
@@ -34,12 +35,14 @@ def get_etl_logger():
         logger.addHandler(file_handler)
     return logger
 
+
 @shared_task(bind=True, queue='queue_ux')
 def test_external_logging_task(self):
     """A test task to verify host-mounted file logging from inside Docker."""
     logger = get_etl_logger()
     logger.info("TEST_LOG_EVENT: Celery worker successfully wrote to host-mounted log directory!")
     return "Test log entry written to /app/logs/etl_execution.log"
+
 
 @shared_task(bind=True, queue='queue_hot')
 def sync_data_source_task(self, source_pk):
@@ -48,20 +51,21 @@ def sync_data_source_task(self, source_pk):
     recording detailed execution logs to the host-mounted volume.
     """
     logger = get_etl_logger()
+    task_id = self.request.id
+    set_task_progress(task_id, percentage=10, status="RUNNING", current_table="Connecting to source...")
     
     try:
         profile = SourceProfile.objects.get(pk=source_pk)
     except SourceProfile.DoesNotExist:
         logger.error(f"ETL Error: SourceProfile with ID {source_pk} not found.")
+        set_task_progress(task_id, percentage=0, status="FAILED", error="SourceProfile not found")
         return f"SourceProfile {source_pk} not found."
 
     logger.info(f"Starting ETL sync pipeline for data source: '{profile.name}' ({profile.db_type}) at {profile.host}:{profile.port}")
 
     profile.last_sync_status = SyncStatus.RUNNING
     profile.last_sync_error = ''
-    profile.progress_percentage = 0
-    profile.is_cancelled = False
-    profile.save(update_fields=['last_sync_status', 'last_sync_error', 'progress_percentage', 'is_cancelled'])
+    profile.save(update_fields=['last_sync_status', 'last_sync_error'])
 
     try:
         if profile.db_type == DbChoice.MYSQL:
@@ -104,9 +108,9 @@ def sync_data_source_task(self, source_pk):
         profile.last_synced = timezone.now()
         profile.last_sync_status = SyncStatus.SUCCESS
         profile.last_sync_error = ''
-        profile.progress_percentage = 100
-        profile.save()
+        profile.save(update_fields=['last_synced', 'last_sync_status', 'last_sync_error'])
         
+        set_task_progress(task_id, percentage=100, status="SUCCESS", current_table="Connection Verified")
         logger.info(f"ETL sync successfully completed for data source: '{profile.name}'")
         return f"ETL pipeline successfully synced {profile.name}"
 
@@ -115,10 +119,12 @@ def sync_data_source_task(self, source_pk):
         profile.last_synced = timezone.now()
         profile.last_sync_status = SyncStatus.FAILED
         profile.last_sync_error = error_message
-        profile.save()
+        profile.save(update_fields=['last_synced', 'last_sync_status', 'last_sync_error'])
         
+        set_task_progress(task_id, percentage=100, status="FAILED", error=error_message)
         logger.error(f"ETL sync failed for data source '{profile.name}': {error_message}")
         return f"ETL pipeline failed for {profile.name}: {error_message}"
+
 
 @shared_task(bind=True, queue='queue_ux')
 def test_source_connection_task(self, source_pk):
@@ -133,11 +139,14 @@ def introspect_source_schema_task(self, source_pk):
     updating SourceTable, SourceField, and SourceRelationship control plane models automatically.
     """
     logger = get_etl_logger()
+    task_id = self.request.id
+    set_task_progress(task_id, percentage=5, status="RUNNING", current_table="Introspecting Schema...")
     
     try:
         profile = SourceProfile.objects.get(pk=source_pk)
     except SourceProfile.DoesNotExist:
         logger.error(f"Introspection Error: SourceProfile with ID {source_pk} not found.")
+        set_task_progress(task_id, percentage=0, status="FAILED", error="SourceProfile not found")
         return f"SourceProfile {source_pk} not found."
 
     logger.info(f"Starting schema introspection for data source: '{profile.name}' ({profile.db_type})")
@@ -175,15 +184,23 @@ def introspect_source_schema_task(self, source_pk):
         else:
             target_schemas = [profile.database_name]
 
-        for schema_name in target_schemas:
+        for schema_index, schema_name in enumerate(target_schemas, start=1):
             try:
                 tables = inspector.get_table_names(schema=schema_name if profile.db_type != DbChoice.MYSQL else None)
             except Exception as e:
                 logger.warning(f"Could not fetch tables for schema {schema_name}: {e}")
                 continue
 
-            for table_name in tables:
+            for table_index, table_name in enumerate(tables, start=1):
                 current_schema = schema_name if profile.db_type != DbChoice.MYSQL else profile.database_name
+                
+                # Update Redis with granular schema inspection progress
+                set_task_progress(
+                    task_id,
+                    percentage=int((schema_index / len(target_schemas)) * 50),
+                    status="RUNNING",
+                    current_table=f"{current_schema}.{table_name}"
+                )
                 
                 source_table, created = SourceTable.objects.get_or_create(
                     source=profile,
@@ -237,8 +254,9 @@ def introspect_source_schema_task(self, source_pk):
         profile.last_synced = timezone.now()
         profile.last_sync_status = SyncStatus.SUCCESS
         profile.last_sync_error = ''
-        profile.save()
+        profile.save(update_fields=['last_synced', 'last_sync_status', 'last_sync_error'])
 
+        set_task_progress(task_id, percentage=100, status="SUCCESS", current_table="Introspection Complete")
         logger.info(f"Schema introspection successfully completed for data source: '{profile.name}'")
         return f"Schema introspection successfully completed for {profile.name}"
 
@@ -247,15 +265,18 @@ def introspect_source_schema_task(self, source_pk):
         profile.last_synced = timezone.now()
         profile.last_sync_status = SyncStatus.FAILED
         profile.last_sync_error = error_message
-        profile.save()
+        profile.save(update_fields=['last_synced', 'last_sync_status', 'last_sync_error'])
 
+        set_task_progress(task_id, percentage=100, status="FAILED", error=error_message)
         logger.error(f"Schema introspection failed for data source '{profile.name}': {error_message}")
         return f"Schema introspection failed for {profile.name}: {error_message}"
+
 
 @shared_task(bind=True, queue='queue_cold')
 def cleanup_postgres_warehouse_task(self):
     """Cleans up stale warehouse data."""
     pass
+
 
 @shared_task(bind=True, queue='queue_periodic')
 def trigger_all_active_source_introspection_task(self):
@@ -278,9 +299,11 @@ def trigger_all_active_source_introspection_task(self):
 def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
     """
     Ingests selected tables and fields from a specific SourceProfile 
-    into ClickHouse, maintaining strict source/table separation, progress tracking, and cancellation checks.
+    into ClickHouse, maintaining strict source/table separation and Redis progress tracking.
     """
     logger = get_etl_logger()
+    task_id = self.request.id
+    set_task_progress(task_id, percentage=0, status="RUNNING", current_table="Initializing Ingestion...")
     
     if batch_size is None:
         batch_size = getattr(settings, 'DEFAULT_ETL_BATCH_SIZE', 10000)
@@ -289,20 +312,21 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
         profile = SourceProfile.objects.get(pk=source_pk)
     except SourceProfile.DoesNotExist:
         logger.error(f"Ingestion Error: SourceProfile {source_pk} not found.")
+        set_task_progress(task_id, percentage=0, status="FAILED", error="SourceProfile not found")
         return f"SourceProfile {source_pk} not found."
 
     # Guard check: Ignore deactivated sources even if mappings exist
     if not profile.is_active:
         logger.warning(f"Ingestion skipped: Data source '{profile.name}' is currently deactivated.")
+        set_task_progress(task_id, percentage=0, status="SKIPPED", error="Source deactivated")
         return f"Ingestion skipped for deactivated source: {profile.name}"
 
     logger.info(f"Starting ClickHouse data ingestion for source: '{profile.name}' (Batch Size: {batch_size})")
 
-    # Initialize running state & progress
+    # Initialize running state
     profile.last_sync_status = SyncStatus.RUNNING
-    profile.progress_percentage = 0
-    profile.is_cancelled = False
-    profile.save(update_fields=['last_sync_status', 'progress_percentage', 'is_cancelled'])
+    profile.last_sync_error = ''
+    profile.save(update_fields=['last_sync_status', 'last_sync_error'])
 
     # 1. Connect to ClickHouse
     ch_client = clickhouse_connect.get_client(
@@ -336,7 +360,8 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
         logger.error(f"Failed to create source engine for {profile.name}: {e}")
         profile.last_sync_status = SyncStatus.FAILED
         profile.last_sync_error = str(e)
-        profile.save()
+        profile.save(update_fields=['last_sync_status', 'last_sync_error'])
+        set_task_progress(task_id, percentage=0, status="FAILED", error=str(e))
         return f"Engine creation failed: {e}"
 
     # 3. Iterate through tables and ONLY selected fields for active sources
@@ -344,26 +369,34 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
     total_tables = len(source_tables)
 
     if total_tables == 0:
+        profile.last_synced = timezone.now()
         profile.last_sync_status = SyncStatus.SUCCESS
-        profile.progress_percentage = 100
-        profile.save()
+        profile.last_sync_error = ''
+        profile.save(update_fields=['last_synced', 'last_sync_status', 'last_sync_error'])
+        set_task_progress(task_id, percentage=100, status="SUCCESS", current_table="No active tables")
         return f"No active tables to ingest for {profile.name}"
 
     preparer = source_engine.dialect.identifier_preparer
 
     for index, table in enumerate(source_tables, start=1):
-        # Check for cancellation before processing each table
+        # Refresh profile to check if source was deactivated mid-run
         profile.refresh_from_db()
-        if not profile.is_active or profile.is_cancelled:
+        if not profile.is_active:
             profile.last_sync_status = SyncStatus.CANCELLED
             profile.save(update_fields=['last_sync_status'])
-            logger.warning(f"ETL ingestion for '{profile.name}' was cancelled.")
+            set_task_progress(task_id, percentage=int((index / total_tables) * 100), status="CANCELLED")
+            logger.warning(f"ETL ingestion for '{profile.name}' was cancelled/deactivated.")
             return f"Ingestion cancelled for {profile.name}"
 
-        # Update Progress Percentage based on table completion
-        progress = int((index / total_tables) * 100)
-        profile.progress_percentage = progress
-        profile.save(update_fields=['progress_percentage'])
+        # Update Redis Progress dynamically per table
+        current_percentage = int((index / total_tables) * 100)
+        set_task_progress(
+            task_id,
+            percentage=current_percentage,
+            status="RUNNING",
+            current_table=table.table_name,
+            source_name=profile.name
+        )
 
         selected_fields = table.fields.filter(is_selected=True)
         if not selected_fields.exists():
@@ -410,13 +443,6 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
                 max_chunks_per_burst = 50  # Yields execution control after 50 chunks to prevent worker hogging
                 
                 for chunk in pd.read_sql(source_query, con=conn, chunksize=batch_size):
-                    # Check cancellation mid-stream during heavy chunks
-                    profile.refresh_from_db()
-                    if not profile.is_active or profile.is_cancelled:
-                        profile.last_sync_status = SyncStatus.CANCELLED
-                        profile.save(update_fields=['last_sync_status'])
-                        return f"Ingestion aborted mid-stream for {profile.name}"
-
                     chunk = chunk.where(pd.notnull(chunk), None)
                     
                     # Safely sanitize strings and dates/times to avoid struct packing and encoding errors
@@ -443,8 +469,10 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
 
     profile.last_synced = timezone.now()
     profile.last_sync_status = SyncStatus.SUCCESS
-    profile.progress_percentage = 100
-    profile.save()
+    profile.last_sync_error = ''
+    profile.save(update_fields=['last_synced', 'last_sync_status', 'last_sync_error'])
+    
+    set_task_progress(task_id, percentage=100, status="SUCCESS", current_table="Completed")
     return f"ClickHouse ingestion completed for {profile.name}"
 
 

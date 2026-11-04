@@ -1,0 +1,29 @@
+<div class="max-w-7xl mx-auto px-4 py-8">
+    <!-- Welcome Hero Banner -->
+    {% include 'control_plane/dashboard/components/welcome_banner.html' %}
+
+    <!-- Quick Stats Grid Component -->
+    <div class="{% if not widget_prefs.show_stats %}hidden{% endif %} mb-8" id="widget-stats-wrapper">
+        {% include 'control_plane/dashboard/components/stats_grid.html' %}
+    </div>
+
+    <!-- ETL & Report Operations Section (HTMX Pollers) -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        <div class="{% if not widget_prefs.show_pipelines %}hidden{% endif %}" id="widget-pipelines-wrapper">
+            {% include 'control_plane/dashboard/components/active_pipelines.html' %}
+        </div>
+        <div class="{% if not widget_prefs.show_reports %}hidden{% endif %}" id="widget-reports-wrapper">
+            {% include 'control_plane/dashboard/components/active_reports.html' %}
+        </div>
+    </div>
+
+    <!-- Dead Letter Queue Widget Component -->
+    <div class="{% if not widget_prefs.show_dlq %}hidden{% endif %} mb-6" id="widget-dlq-wrapper">
+        {% include 'control_plane/dashboard/components/dlq_widget.html' %}
+    </div>
+
+    <!-- Recent Report Status History Component -->
+    <div class="{% if not widget_prefs.show_history %}hidden{% endif %} mb-6" id="widget-history-wrapper">
+        {% include 'control_plane/dashboard/components/history_table.html' %}
+    </div>
+</div>

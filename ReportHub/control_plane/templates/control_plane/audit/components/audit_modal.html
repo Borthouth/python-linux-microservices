@@ -1,0 +1,24 @@
+{% load static %}
+<script src="{% static 'js/audit.js' %}" defer></script>
+
+<!-- Modal Overlay -->
+<div id="auditModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+    <div class="bg-gray-900 border border-gray-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl relative">
+        <div class="flex justify-between items-start mb-4 border-b border-gray-800 pb-3">
+            <div>
+                <h3 id="modalTitle" class="text-lg font-bold text-white">Changes for Record</h3>
+                <p id="modalTimestamp" class="text-xs text-gray-400 mt-0.5"></p>
+            </div>
+            <button onclick="closeAuditModal()" class="text-gray-400 hover:text-white text-xl font-bold">&times;</button>
+        </div>
+        
+        <!-- Changes Container -->
+        <div id="modalChangesBody" class="space-y-3 max-h-96 overflow-y-auto pr-1">
+            <!-- Populated dynamically via JS -->
+        </div>
+
+        <div class="mt-6 text-right">
+            <button onclick="closeAuditModal()" class="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded-lg text-sm transition">Close</button>
+        </div>
+    </div>
+</div>

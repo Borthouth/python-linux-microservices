@@ -23,6 +23,9 @@ Track the development phases, architectural milestones, and codebase optimizatio
 ## Phase 2: Django Control Plane, User Management & Audit Engine
 - [x] Initialize Django project and core apps (`control_plane`, `warehouse`, `etl`, `reports`).
 - [x] Configure automatic database migrations via container startup scripts (`entrypoint.sh`).
+- [x] **Control Plane Shell & Layout Standardization**:
+  - [x] Centralized layout shell in `base.html` and converted `dashboard/dashboard.html` into a pure content fragment to eliminate recursive navbar rendering bugs.
+  - [x] Enforced strict container width alignment (`max-w-7xl mx-auto px-6 py-8`) across the Dashboard, Audit Logs, and Dead Letter Queue (DLQ) sub-pages for visual consistency.
 - [x] **Security-First Hardening & Session Security**: 
   - [x] Content Security Policy (`django-csp`), strict `ALLOWED_HOSTS`, clickjacking/MIME defenses, HttpOnly session/CSRF cookies, and global 64-bit `BigAutoField`.
   - [x] Enabled browser-close session expiration (`SESSION_EXPIRE_AT_BROWSER_CLOSE = True`).
@@ -37,6 +40,10 @@ Track the development phases, architectural milestones, and codebase optimizatio
   - Developed field-level diff engine displaying precise *Old → New* value comparisons inside a responsive modal.
   - Hardened frontend against Stored XSS by removing `|safe` rendering, utilizing DOM `data-*` attributes, and escaping dynamic values.
   - Implemented searchable, paginated management UI for `PeriodicTask` scheduled ETL jobs with robust uniqueness validation (`ValidationError` / `IntegrityError` handling for duplicate names).
+- [x] **Dead Letter Queue (DLQ) & Background Task Governance:**
+  - [x] Implemented Redis-backed storage scanning (`dlq:task:*`) with JSON decoding and attribute normalization (`id`, `display_name`, `error_message`, `failed_timestamp`).
+  - [x] Integrated robust timestamp parsing via `django.utils.dateparse.parse_datetime` to eliminate template rendering crashes and support formatted date displays.
+  - [x] Refactored the dashboard DLQ widget into a grid-based layout matching the "Recent Pipeline" component, complete with failure counts, stack trace previews, and search/pagination controls on `/control-plane/dlq/`.
 - [x] **Asynchronous UI Status & Toast Notification Architecture:**
   - Configured HTMX polling integration (`hx-get`, `hx-trigger="every 2s"`, `hx-swap="outerHTML"`) for asynchronous database connection tests across MySQL, PostgreSQL, and MSSQL.
   - Developed CSP-compliant global toast event listeners (`htmx:afterSwap` decoupled handling) avoiding inline script violations.

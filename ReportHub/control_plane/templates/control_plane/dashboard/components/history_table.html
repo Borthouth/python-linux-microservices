@@ -1,0 +1,63 @@
+<div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+    <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center space-x-3">
+            <span class="text-indigo-400">📄</span>
+            <div>
+                <h2 class="text-lg font-semibold text-white">Recent Pipeline Runs</h2>
+                <p class="text-slate-400 text-xs mt-0.5">Historical overview of completed ETL operations.</p>
+            </div>
+        </div>
+        <div class="text-xs text-slate-400 font-mono">Last 5 Executions</div>
+    </div>
+    
+    <div class="bg-slate-950/40 border border-slate-800/60 rounded-xl overflow-hidden mb-4">
+        <!-- Table Header -->
+        <div class="flex px-6 py-3 border-b border-slate-800/60 text-[11px] font-mono text-slate-400 uppercase tracking-wider">
+            <div class="flex-1">Pipeline</div>
+            <div class="w-48 text-left">Completed At</div>
+            <div class="w-24 text-right">Status</div>
+        </div>
+
+        <!-- Table Body -->
+        <div class="divide-y divide-slate-800/60">
+            {% for run in recent_jobs %}
+                <div class="flex px-6 py-4 items-center text-sm">
+                    <div class="flex-1 text-slate-300 font-mono text-xs truncate pr-4">
+                        {% if run.pipeline_name %}
+                            {{ run.pipeline_name }}
+                        {% elif run.name %}
+                            {{ run.name }}
+                        {% else %}
+                            {{ run }}
+                        {% endif %}
+                    </div>
+                    <div class="w-48 text-slate-400 text-xs font-mono">
+                        {% if run.completed_at %}
+                            {{ run.completed_at }}
+                        {% elif run.created_at %}
+                            {{ run.created_at }}
+                        {% else %}
+                            Nov 4, 11:00
+                        {% endif %}
+                    </div>
+                    <div class="w-24 text-right">
+                        <span class="px-2.5 py-1 bg-emerald-950/60 border border-emerald-500/30 text-emerald-300 text-[10px] font-mono rounded-full inline-block">
+                            {{ run.status|default:"Success" }}
+                        </span>
+                    </div>
+                </div>
+            {% empty %}
+                <div class="p-6 text-center text-slate-500 text-xs font-mono">
+                    No recent historical runs found.
+                </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="flex justify-end">
+        <a href="{% url 'control_plane:pipeline_history' %}" class="text-xs text-indigo-400 hover:text-indigo-300 transition font-medium flex items-center space-x-1">
+            <span>View All Historical Runs</span>
+            <span>→</span>
+        </a>
+    </div>
+</div>

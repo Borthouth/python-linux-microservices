@@ -74,7 +74,7 @@ class ReportDefinition(TimeStampedAuditedModel):
     def __str__(self):
         return self.name
 
-class ReportExecution(models.Model):
+class ReportExecution(TimeStampedAuditedModel):
     STATUS_CHOICES = [
         ('pending', 'Pending'),
         ('running', 'Running'),
@@ -89,10 +89,10 @@ class ReportExecution(models.Model):
     file_path = models.CharField(max_length=512, blank=True, null=True)  # MinIO object path/URL
     error_message = models.TextField(blank=True, null=True)
     row_count = models.IntegerField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(blank=True, null=True)
     progress_percentage = models.PositiveIntegerField(default=0)
     is_cancelled = models.BooleanField(default=False)
 
     def __str__(self):
-        return f"{self.report.name} - {self.status} ({self.created_at.strftime('%Y-%m-%d %H:%M')})"
+        date_str = self.created_at.strftime('%Y-%m-%d %H:%M') if self.created_at else 'Unknown date'
+        return f"{self.report.name} - {self.status} ({date_str})"

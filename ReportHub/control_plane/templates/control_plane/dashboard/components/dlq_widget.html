@@ -1,0 +1,49 @@
+<div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+    <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center space-x-3">
+            <span class="text-amber-400">⚠️</span>
+            <div>
+                <h2 class="text-lg font-semibold text-white">Dead Letter Queue (DLQ)</h2>
+                <p class="text-slate-400 text-xs mt-0.5">Monitor and re-queue failed background tasks across your 7-tier Celery infrastructure.</p>
+            </div>
+        </div>
+        <div class="text-xs text-slate-400 font-mono">
+            {{ dlq_count|default:0 }} Unresolved Failures
+        </div>
+    </div>
+
+    <div class="bg-slate-950/40 border border-slate-800/60 rounded-xl overflow-hidden mb-4">
+        <div class="grid grid-cols-12 px-4 py-2.5 bg-slate-900/40 border-b border-slate-800/60 text-[10px] font-mono uppercase tracking-wider text-slate-400">
+            <div class="col-span-4">Task</div>
+            <div class="col-span-5">Error Summary</div>
+            <div class="col-span-3 text-right">Failed At</div>
+        </div>
+        
+        <div class="divide-y divide-slate-800/60">
+            {% for task in dlq_tasks %}
+                <div class="grid grid-cols-12 px-4 py-3 items-center text-xs">
+                    <div class="col-span-4 text-white font-mono truncate pr-2" title="{{ task.display_name }}">
+                        {{ task.display_name }}
+                    </div>
+                    <div class="col-span-5 text-slate-400 font-mono text-[11px] truncate pr-2" title="{{ task.error_message }}">
+                        {{ task.error_message }}
+                    </div>
+                    <div class="col-span-3 text-right text-slate-400 font-mono text-[11px]">
+                        {{ task.failed_timestamp|date:"M j, Y, H:i"|default:task.failed_timestamp|default:"Recent" }}
+                    </div>
+                </div>
+            {% empty %}
+                <div class="p-4 text-center text-slate-500 text-xs font-mono">
+                    No unresolved background task failures.
+                </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="flex justify-end">
+        <a href="{% url 'control_plane:dlq_list' %}" class="text-xs text-indigo-400 hover:text-indigo-300 transition font-medium flex items-center space-x-1">
+            <span>View All DLQ Tasks</span>
+            <span>→</span>
+        </a>
+    </div>
+</div>

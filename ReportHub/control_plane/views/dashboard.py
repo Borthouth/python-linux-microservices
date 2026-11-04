@@ -1,6 +1,7 @@
 import json
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.shortcuts import render, get_object_or_404, redirect
+from django.utils.dateparse import parse_datetime
 from django.core.paginator import Paginator
 from django.db.models import Q
 from django.http import Http404, FileResponse, JsonResponse
@@ -10,11 +11,13 @@ from control_plane.models import (
     SyncStatus,
     UserWidgetPreference
 )
+from control_plane.utils import get_redis_client, get_task_progress
 from reports.models import ReportExecution
 
 
 def is_admin(user):
     return user.is_staff or user.is_superuser
+
 
 @login_required
 def dashboard_view(request):
@@ -22,12 +25,49 @@ def dashboard_view(request):
     total_sources = SourceProfile.objects.count()
     user_access_count = UserSourceAccess.objects.filter(user=request.user).count()
     
-    # Pipelines
-    active_running_sources = SourceProfile.objects.filter(last_sync_status=SyncStatus.RUNNING)
+    # Pipelines: Scan Redis DB for active running tasks
+    r = get_redis_client()
+    keys = r.keys("task:progress:*")
+    active_running_sources = []
+    
+    for key in keys:
+        task_id = key.decode('utf-8').split(":")[-1]
+        data = get_task_progress(task_id)
+        if data.get("status") == "RUNNING":
+            active_running_sources.append({
+                "task_id": task_id,
+                "percentage": int(data.get("percentage", 0)),
+                "current_table": data.get("current_table", "Processing..."),
+                "name": data.get("source_name", "Running Pipeline"),
+                "db_type": data.get("db_type", "ETL")
+            })
+
     recent_jobs = SourceProfile.objects.exclude(last_sync_status=SyncStatus.RUNNING).order_by('-updated_at')[:5]
 
     # Active Report Generations
-    active_running_reports = ReportExecution.objects.filter(status='RUNNING')
+    active_running_reports = ReportExecution.objects.filter(status='running')
+
+    # Dead Letter Queue Tasks & Count
+    dlq_keys = r.keys("dlq:task:*")
+    dlq_tasks = []
+    for key in dlq_keys:
+        data = r.get(key)
+        if data:
+            try:
+                task_dict = json.loads(data.decode('utf-8') if isinstance(data, bytes) else data)
+                task_dict['id'] = task_dict.get('id') or task_dict.get('task_id') or key.decode('utf-8').split(':')[-1]
+                task_dict['display_name'] = task_dict.get('task_name') or task_dict.get('name') or task_dict['id']
+                task_dict['error_message'] = task_dict.get('error_summary') or task_dict.get('traceback') or 'Exception raised during execution'
+                
+                raw_time = task_dict.get('failed_at') or task_dict.get('timestamp')
+                task_dict['failed_timestamp'] = parse_datetime(raw_time) if raw_time else None
+                
+                dlq_tasks.append(task_dict)
+            except Exception:
+                pass
+
+    # Sort newest failures first
+    dlq_tasks.sort(key=lambda x: x.get('failed_timestamp') or '', reverse=True)
 
     context = {
         'total_sources': total_sources,
@@ -36,8 +76,42 @@ def dashboard_view(request):
         'active_running_reports': active_running_reports,
         'recent_jobs': recent_jobs,
         'widget_prefs': prefs,
+        'dlq_count': len(dlq_tasks),
+        'dlq_tasks': dlq_tasks[:5],  # Pass recent failed tasks to the dashboard widget
     }
     return render(request, 'control_plane/dashboard.html', context)
+
+
+@login_required
+def active_pipelines_fragment(request):
+    """HTMX polling fragment for active pipelines widget."""
+    r = get_redis_client()
+    keys = r.keys("task:progress:*")
+    active_running_sources = []
+    
+    for key in keys:
+        task_id = key.decode('utf-8').split(":")[-1]
+        data = get_task_progress(task_id)
+        if data.get("status") == "RUNNING":
+            active_running_sources.append({
+                "task_id": task_id,
+                "percentage": int(data.get("percentage", 0)),
+                "current_table": data.get("current_table", "Processing..."),
+                "name": data.get("source_name", "Running Pipeline"),
+            })
+            
+    context = {"active_running_sources": active_running_sources}
+    # Updated path to match your dashboard/components/ structure
+    return render(request, 'control_plane/dashboard/components/active_pipelines.html', context)
+
+
+@login_required
+def active_reports_fragment(request):
+    """HTMX polling fragment for active reports widget."""
+    active_running_reports = ReportExecution.objects.filter(status='running').select_related('report')
+    context = {"active_running_reports": active_running_reports}
+    # Updated path to match your dashboard/components/ structure
+    return render(request, 'control_plane/dashboard/components/active_reports.html', context)
 
 
 @login_required
@@ -45,8 +119,9 @@ def dashboard_view(request):
 def cancel_pipeline_view(request, source_pk):
     if request.method == 'POST':
         source = get_object_or_404(SourceProfile, pk=source_pk)
-        source.is_cancelled = True
-        source.save(update_fields=['is_cancelled'])
+        # Deactivating the source triggers the cancellation guard in your Celery task loop
+        source.is_active = False
+        source.save(update_fields=['is_active'])
     return redirect('control_plane:dashboard')
 
 
@@ -139,7 +214,6 @@ def update_widget_preferences(request):
             data = json.loads(request.body)
             prefs, _ = UserWidgetPreference.objects.get_or_create(user=request.user)
             
-            # Update fields dynamically based on incoming payload
             widget_key = data.get('widget')
             is_visible = data.get('visible')
             
@@ -151,6 +225,8 @@ def update_widget_preferences(request):
                 prefs.show_reports = is_visible
             elif widget_key == 'history':
                 prefs.show_history = is_visible
+            elif widget_key == 'dlq':
+                prefs.show_dlq = is_visible
                 
             prefs.save()
             return JsonResponse({'status': 'success'})

@@ -1,0 +1,12 @@
+{% extends 'control_plane/base.html' %}
+{% load static %}
+
+{% block title %}Dead Letter Queue - ReportHub{% endblock %}
+
+{% block content %}
+    {% include 'control_plane/dlq/dlq_list.html' %}
+{% endblock %}
+
+{% block javascript %}
+    <script src="{% static 'control_plane/js/dlq.js' %}" defer></script>
+{% endblock %}

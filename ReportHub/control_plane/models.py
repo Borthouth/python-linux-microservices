@@ -218,18 +218,17 @@ class SourceRelationship(TimeStampedAuditedModel):
         return f"{self.from_table}.{self.from_field} -> {self.to_table}.{self.to_field}"
 
 
-class WarehouseDatasetMapping(models.Model):
+class WarehouseDatasetMapping(TimeStampedAuditedModel):
     source_profile = models.ForeignKey('SourceProfile', on_delete=models.CASCADE, related_name='warehouse_mappings')
     table_name = models.CharField(max_length=255)
     field_name = models.CharField(max_length=255)
     is_enabled = models.BooleanField(default=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         unique_together = ('source_profile', 'table_name', 'field_name')
 
 
-class BackgroundJob(models.Model):
+class BackgroundJob(TimeStampedAuditedModel):
     class Status(models.TextChoices):
         PENDING = 'PENDING', 'Pending'
         RUNNING = 'RUNNING', 'Running'
@@ -242,8 +241,6 @@ class BackgroundJob(models.Model):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     progress_percentage = models.PositiveIntegerField(default=0)  # 0 to 100
     is_cancelled = models.BooleanField(default=False)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
 
 class UserWidgetPreference(models.Model):
@@ -252,6 +249,7 @@ class UserWidgetPreference(models.Model):
     show_pipelines = models.BooleanField(default=True)
     show_reports = models.BooleanField(default=True)
     show_history = models.BooleanField(default=True)
+    show_dlq = models.BooleanField(default=True)
 
     def __str__(self):
         return f"Widget Preferences for {self.user.username}"

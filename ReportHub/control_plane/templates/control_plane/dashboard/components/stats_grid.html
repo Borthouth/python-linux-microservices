@@ -1,0 +1,18 @@
+<div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+    <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+        <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Total Connections</div>
+        <div class="text-3xl font-bold text-white">{{ stats.total_connections|default:0 }}</div>
+    </div>
+    <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+        <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Active Pipelines</div>
+        <div class="text-3xl font-bold text-emerald-400">{{ stats.active_pipelines|default:0 }}</div>
+    </div>
+    <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+        <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Reports Generated</div>
+        <div class="text-3xl font-bold text-indigo-400">{{ stats.reports_generated|default:0 }}</div>
+    </div>
+    <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+        <div class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-2">Failed Tasks (DLQ)</div>
+        <div class="text-3xl font-bold text-red-400">{{ stats.dlq_count|default:0 }}</div>
+    </div>
+</div>

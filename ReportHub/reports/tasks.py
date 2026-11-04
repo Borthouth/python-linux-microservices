@@ -10,9 +10,13 @@ from django.utils import timezone
 from minio import Minio
 from django.conf import settings
 from .models import ReportDefinition, ReportExecution
+from control_plane.utils import set_task_progress
 
 @shared_task(bind=True)
 def execute_report_task(self, report_id, execution_id=None):
+    task_id = self.request.id
+    set_task_progress(task_id, percentage=5, status="RUNNING", current_step="Initializing report execution...")
+
     try:
         report = ReportDefinition.objects.get(pk=report_id)
         
@@ -34,6 +38,7 @@ def execute_report_task(self, report_id, execution_id=None):
         if execution.is_cancelled:
             execution.status = 'cancelled'
             execution.save(update_fields=['status'])
+            set_task_progress(task_id, percentage=10, status="CANCELLED", error="Cancelled before query")
             return "Execution cancelled before query."
 
         table_name = report.base_table.table_name if hasattr(report.base_table, 'table_name') else str(report.base_table)
@@ -58,6 +63,7 @@ def execute_report_task(self, report_id, execution_id=None):
         # --- Stage 1: Database Query Execution (Progress: 30%) ---
         execution.progress_percentage = 30
         execution.save(update_fields=['progress_percentage'])
+        set_task_progress(task_id, percentage=30, status="RUNNING", current_step=f"Querying database for {report.name}...")
 
         if fields_to_query and table_name and report.source:
             source = report.source
@@ -96,11 +102,13 @@ def execute_report_task(self, report_id, execution_id=None):
         if execution.is_cancelled:
             execution.status = 'cancelled'
             execution.save(update_fields=['status'])
+            set_task_progress(task_id, percentage=30, status="CANCELLED", error="Cancelled after query")
             return "Execution cancelled after database query."
 
         # --- Stage 2: Summary Aggregates & File Build (Progress: 60%) ---
         execution.progress_percentage = 60
         execution.save(update_fields=['progress_percentage'])
+        set_task_progress(task_id, percentage=60, status="RUNNING", current_step="Building summaries and formatting file...")
 
         summary_lines = []
         if show_totals and rows and len(rows) > 0:
@@ -206,6 +214,7 @@ def execute_report_task(self, report_id, execution_id=None):
         # --- Stage 3: MinIO Storage Upload (Progress: 85%) ---
         execution.progress_percentage = 85
         execution.save(update_fields=['progress_percentage'])
+        set_task_progress(task_id, percentage=85, status="RUNNING", current_step="Uploading artifact to MinIO...")
 
         endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://minio:9000')
         if endpoint.startswith('http://'): endpoint = endpoint[7:]
@@ -226,10 +235,15 @@ def execute_report_task(self, report_id, execution_id=None):
         execution.completed_at = timezone.now()
         execution.save()
 
+        set_task_progress(task_id, percentage=100, status="SUCCESS", current_step="Completed")
+        return f"Report {report.name} successfully executed."
+
     except Exception as e:
         if 'execution' in locals():
             execution.status = 'failed'
             execution.error_message = str(e)
             execution.completed_at = timezone.now()
             execution.save()
+        if 'task_id' in locals():
+            set_task_progress(task_id, percentage=100, status="FAILED", error=str(e))
         raise e

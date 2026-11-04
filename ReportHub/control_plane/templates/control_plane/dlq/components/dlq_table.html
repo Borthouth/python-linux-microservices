@@ -1,0 +1,51 @@
+<div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden mb-6">
+    <table class="w-full text-left border-collapse table-fixed">
+        <thead>
+            <tr class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400 bg-slate-950/40">
+                <th class="py-3 px-4" style="width: 25%;">Task Name</th>
+                <th class="py-3 px-4" style="width: 42%;">Error Summary</th>
+                <th class="py-3 px-4" style="width: 18%;">Failed At</th>
+                <th class="py-3 px-4 text-right" style="width: 15%;">Actions</th>
+            </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800/60 text-sm">
+            {% for task in dlq_tasks %}
+                <tr id="dlq-row-{{ task.id }}" class="hover:bg-slate-800/40 transition-all">
+                    <td class="py-3.5 px-4 font-medium text-white text-xs truncate" title="{{ task.display_name }}">
+                        {{ task.display_name }}
+                    </td>
+                    <td class="py-3.5 px-4 text-rose-400 text-xs font-normal truncate" title="{{ task.error_message }}">
+                        {{ task.error_message }}
+                    </td>
+                    <td class="py-3.5 px-4 text-slate-400 text-xs font-mono truncate" title="{{ task.failed_timestamp }}">
+                        {{ task.failed_timestamp }}
+                    </td>
+                    <td class="py-3.5 px-4 text-right" style="white-space: nowrap; width: 15%;">
+                        <div class="inline-flex items-center space-x-1.5 justify-end">
+                            <!-- Inspect matches standard Edit button style -->
+                            <a href="#" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-all">
+                                Inspect
+                            </a>
+                            <!-- Re-queue matches sky blue action button style -->
+                            <button hx-post="{% url 'control_plane:dlq_requeue' task.id %}" 
+                                    hx-target="#dlq-row-{{ task.id }}" 
+                                    hx-swap="outerHTML" 
+                                    class="px-3 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 text-xs font-medium rounded-lg transition-all shadow-sm">
+                                Re-queue
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+            {% empty %}
+                <tr>
+                    <td colspan="4" class="py-12 text-center text-slate-500 text-sm">
+                        No unresolved background task failures.
+                    </td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Pagination -->
+{% include 'control_plane/components/pagination.html' %}

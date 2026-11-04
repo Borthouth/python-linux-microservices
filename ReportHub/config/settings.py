@@ -71,6 +71,31 @@ LOGIN_URL = '/control-plane/login/'
 LOGIN_REDIRECT_URL = '/control-plane/'
 LOGOUT_REDIRECT_URL = '/control-plane/login/'
 
+# --- Caching & Session Engine Configuration ---
+
+# Redis Connection URL
+REDIS_URL = env('REDIS_URL', default='redis://redis:6379/0')
+
+# Dedicated Cache configuration pointing to Redis DB 1 (isolated from Celery broker on DB 0)
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": env('REDIS_CACHE_URL', default='redis://redis:6379/1'),
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "CONNECTION_POOL_KWARGS": {
+                "max_connections": 50,
+                "retry_on_timeout": True,
+            },
+        },
+        "KEY_PREFIX": "reporthub_session",
+    }
+}
+
+# Hybrid Session Engine: Redis cache with PostgreSQL fallback durability
+SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
+SESSION_CACHE_ALIAS = "default"
+
 # Celery Configuration Settings
 CELERY_BROKER_URL = env('REDIS_URL', default='redis://redis:6379/0')
 CELERY_RESULT_BACKEND = env('REDIS_URL', default='redis://redis:6379/0')
@@ -112,6 +137,8 @@ CELERY_TASK_ROUTES = {
     'control_plane.tasks.sync_data_source_task': {'queue': 'queue_hot'},
     'etl.tasks.introspect_source_schema_task': {'queue': 'queue_periodic'},
 }
+
+STATIC_URL = 'static/'
 
 TEMPLATES = [
     {

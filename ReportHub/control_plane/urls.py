@@ -7,6 +7,7 @@ from .views import (
     audit, 
     pipeline_automations,
     warehouse,
+    dlq,
 )
 
 app_name = 'control_plane'
@@ -20,9 +21,11 @@ urlpatterns = [
     path('api/widgets/update/', dashboard.update_widget_preferences, name='update_widget_preferences'),
     path('pipelines/history/', dashboard.pipeline_history_view, name='pipeline_history'),
     path('sources/<int:source_pk>/cancel/', dashboard.cancel_pipeline_view, name='cancel_pipeline'),
-    path('reports/<int:report_pk>/cancel/', dashboard.cancel_report_view, name='cancel_report'),
+    path('reports/<uuid:report_pk>/cancel/', dashboard.cancel_report_view, name='cancel_report'),
     path('reports/history/', dashboard.report_history_view, name='report_history'),
     path('reports/<uuid:report_pk>/download/', dashboard.download_report_view, name='download_report'),
+    path('dashboard/fragment/pipelines/', dashboard.active_pipelines_fragment, name='active_pipelines_fragment'),
+    path('dashboard/fragment/reports/', dashboard.active_reports_fragment, name='active_reports_fragment'),
 
     # User management URLs
     path('users/', users.user_management_view, name='user_management'),
@@ -55,5 +58,9 @@ urlpatterns = [
     # Warehouse Field Mapping Routes
     path('warehouse/', warehouse.warehouse_list_view, name='warehouse_list'),
     path('warehouse/<int:source_pk>/fields/', warehouse.warehouse_field_selection_view, name='warehouse_field_selection'),
+
+    # Dead Letter Queue (DLQ) URLs
+    path('dlq/', dlq.dlq_list_view, name='dlq_list'),
+    path('dlq/<str:task_id>/requeue/', dlq.dlq_requeue_view, name='dlq_requeue'),
 ]
 

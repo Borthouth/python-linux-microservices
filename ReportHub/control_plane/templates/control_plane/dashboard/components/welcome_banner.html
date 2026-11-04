@@ -1,0 +1,59 @@
+{% load static %}
+<div class="bg-gradient-to-br from-slate-900 to-slate-900/40 border border-slate-800 rounded-2xl p-8 mb-8 shadow-xl">
+    <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+            <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">
+                Welcome back, {{ request.user.first_name|default:request.user.username }}
+            </h1>
+            <p class="text-slate-400 max-w-3xl text-sm leading-relaxed">
+                Manage your multi-source database connections, granular user permissions, and secure ETL report generation pipelines from your unified command center.
+            </p>
+        </div>
+
+        <!-- Widget Customization Toggle Menu -->
+        <div class="relative inline-block text-left" x-data="{ open: false }">
+            <button @click="open = !open" type="button" class="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-medium rounded-xl border border-slate-700 transition flex items-center space-x-2 shadow-sm">
+                <span>⚙️ Customize Widgets</span>
+            </button>
+            
+            <div x-show="open" 
+                 @click.outside="open = false" 
+                 x-transition:enter="transition ease-out duration-150"
+                 x-transition:enter-start="opacity-0 scale-95"
+                 x-transition:enter-end="opacity-100 scale-100"
+                 x-transition:leave="transition ease-in duration-100"
+                 x-transition:leave-start="opacity-100 scale-100"
+                 x-transition:leave-end="opacity-0 scale-95"
+                 style="display: none;" 
+                 class="absolute right-0 mt-2 w-56 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-3 z-50 space-y-2">
+                
+                <span class="text-[10px] font-semibold text-slate-400 uppercase tracking-wider block px-2">Toggle Widgets</span>
+                
+                <label class="flex items-center space-x-2 px-2 py-1.5 hover:bg-slate-800/60 rounded-lg cursor-pointer text-xs text-slate-300 transition">
+                    <input type="checkbox" {% if widget_prefs.show_stats %}checked{% endif %} @change="toggleWidget('stats', $event.target.checked, '{{ csrf_token }}'); document.getElementById('widget-stats-wrapper').classList.toggle('hidden', !$event.target.checked)" class="rounded border-slate-700 bg-slate-950 text-indigo-500 focus:ring-0">
+                    <span>Quick Stats Grid</span>
+                </label>
+                
+                <label class="flex items-center space-x-2 px-2 py-1.5 hover:bg-slate-800/60 rounded-lg cursor-pointer text-xs text-slate-300 transition">
+                    <input type="checkbox" {% if widget_prefs.show_pipelines %}checked{% endif %} @change="toggleWidget('pipelines', $event.target.checked, '{{ csrf_token }}'); document.getElementById('widget-pipelines-wrapper').classList.toggle('hidden', !$event.target.checked)" class="rounded border-slate-700 bg-slate-950 text-indigo-500 focus:ring-0">
+                    <span>Active Pipeline Executions</span>
+                </label>
+                
+                <label class="flex items-center space-x-2 px-2 py-1.5 hover:bg-slate-800/60 rounded-lg cursor-pointer text-xs text-slate-300 transition">
+                    <input type="checkbox" {% if widget_prefs.show_reports %}checked{% endif %} @change="toggleWidget('reports', $event.target.checked, '{{ csrf_token }}'); document.getElementById('widget-reports-wrapper').classList.toggle('hidden', !$event.target.checked)" class="rounded border-slate-700 bg-slate-950 text-indigo-500 focus:ring-0">
+                    <span>Active Report Generations</span>
+                </label>
+                
+                <label class="flex items-center space-x-2 px-2 py-1.5 hover:bg-slate-800/60 rounded-lg cursor-pointer text-xs text-slate-300 transition">
+                    <input type="checkbox" {% if widget_prefs.show_history %}checked{% endif %} @change="toggleWidget('history', $event.target.checked, '{{ csrf_token }}'); document.getElementById('widget-history-wrapper').classList.toggle('hidden', !$event.target.checked)" class="rounded border-slate-700 bg-slate-950 text-indigo-500 focus:ring-0">
+                    <span>Recent Pipeline Runs</span>
+                </label>
+                
+                <label class="flex items-center space-x-2 px-2 py-1.5 hover:bg-slate-800/60 rounded-lg cursor-pointer text-xs text-slate-300 transition">
+                    <input type="checkbox" {% if widget_prefs.show_dlq %}checked{% endif %} @change="toggleWidget('dlq', $event.target.checked, '{{ csrf_token }}'); document.getElementById('widget-dlq-wrapper').classList.toggle('hidden', !$event.target.checked)" class="rounded border-slate-700 bg-slate-950 text-indigo-500 focus:ring-0">
+                    <span>Dead Letter Queue</span>
+                </label>
+            </div>
+        </div>
+    </div>
+</div>

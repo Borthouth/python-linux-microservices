@@ -1,0 +1,27 @@
+<div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 h-full flex flex-col justify-between">
+    <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center space-x-3">
+            <span class="text-indigo-400">📊</span>
+            <div>
+                <h2 class="text-lg font-semibold text-white">Active Report Generations</h2>
+                <p class="text-slate-400 text-xs mt-0.5">Background worker report generation processes.</p>
+            </div>
+        </div>
+        <span class="px-2.5 py-1 bg-slate-800/80 border border-slate-700/60 text-slate-300 text-[10px] font-mono rounded-full">
+            Live Polling
+        </span>
+    </div>
+
+    <div class="space-y-3">
+        {% for report in active_reports %}
+            <div class="bg-slate-950/50 border border-slate-800/80 rounded-xl p-3 flex items-center justify-between text-sm">
+                <span class="text-slate-200 font-mono text-xs">{{ report.title }}</span>
+                <span class="px-2 py-0.5 bg-indigo-950/60 border border-indigo-500/30 text-indigo-300 text-[10px] rounded-full">Processing</span>
+            </div>
+        {% empty %}
+            <div class="py-6 text-center text-slate-500 text-xs font-mono">
+                No active report generations running.
+            </div>
+        {% endfor %}
+    </div>
+</div>
