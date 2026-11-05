@@ -1,10 +1,14 @@
 import json
+import logging
 import re
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.core.paginator import Paginator
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
+from django.utils.html import format_html
 from control_plane.utils import get_redis_client
+
+logger = logging.getLogger(__name__)
 
 
 def is_admin(user):
@@ -121,13 +125,19 @@ def dlq_requeue_view(request, task_id):
 
             if request.headers.get("HX-Request"):
                 return HttpResponse(
-                    f'<div id="dlq-row-{task_id}" class="hidden"></div>'
+                    format_html(
+                        '<div id="dlq-row-{}" class="hidden"></div>', task_id
+                    )
                 )
 
             return JsonResponse(
                 {"status": "success", "message": "Task re-queued successfully."}
             )
-        except Exception as e:
-            return JsonResponse({"status": "error", "message": str(e)}, status=400)
+        except Exception:
+            logger.exception("Failed to re-queue DLQ task")
+            return JsonResponse(
+                {"status": "error", "message": "Unable to re-queue task."},
+                status=400,
+            )
 
     return JsonResponse({"status": "invalid method"}, status=405)

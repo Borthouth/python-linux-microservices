@@ -1,4 +1,5 @@
 import json
+import logging
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.shortcuts import render, get_object_or_404, redirect
 from django.utils.dateparse import parse_datetime
@@ -13,6 +14,8 @@ from control_plane.models import (
 )
 from control_plane.utils import get_redis_client, get_task_progress
 from reports.models import ReportExecution
+
+logger = logging.getLogger(__name__)
 
 
 def is_admin(user):
@@ -238,6 +241,10 @@ def update_widget_preferences(request):
                 
             prefs.save()
             return JsonResponse({'status': 'success'})
-        except Exception as e:
-            return JsonResponse({'status': 'error', 'message': str(e)}, status=400)
+        except Exception:
+            logger.exception("Failed to update widget preferences")
+            return JsonResponse(
+                {'status': 'error', 'message': 'Unable to update widget preferences.'},
+                status=400,
+            )
     return JsonResponse({'status': 'invalid method'}, status=405)
