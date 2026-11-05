@@ -8,7 +8,7 @@ import sqlalchemy as sa
 import pandas as pd
 import clickhouse_connect
 from django.conf import settings
-from celery import shared_task
+from celery import shared_task, Task
 from django.utils import timezone
 from control_plane.models import (
     SourceProfile, 
@@ -19,6 +19,35 @@ from control_plane.models import (
     DbChoice
 )
 from control_plane.utils import set_task_progress
+
+
+class CancellableETLTask(Task):
+    """Base Celery task that kills the corresponding ClickHouse query if revoked or cancelled."""
+
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
+        if isinstance(exc, (KeyboardInterrupt, SystemExit, InterruptedError)):
+            self._kill_clickhouse_query(task_id)
+        status = "CANCELLED" if isinstance(exc, InterruptedError) else "FAILED"
+        set_task_progress(
+            task_id,
+            percentage=100,
+            status=status,
+            error=str(exc),
+        )
+        super().on_failure(exc, task_id, args, kwargs, einfo)
+
+    def _kill_clickhouse_query(self, task_id):
+        query_id = f"etl_task_{task_id}"
+        try:
+            ch_client = clickhouse_connect.get_client(
+                host=getattr(settings, 'CLICKHOUSE_HOST', 'localhost'),
+                port=getattr(settings, 'CLICKHOUSE_PORT', 8123),
+                username=getattr(settings, 'CLICKHOUSE_USER', 'default'),
+                password=getattr(settings, 'CLICKHOUSE_PASSWORD', ''),
+            )
+            ch_client.command(f"KILL QUERY WHERE query_id = '{query_id}' SYNC")
+        except Exception:
+            pass
 
 
 def get_etl_logger():
@@ -194,7 +223,6 @@ def introspect_source_schema_task(self, source_pk):
             for table_index, table_name in enumerate(tables, start=1):
                 current_schema = schema_name if profile.db_type != DbChoice.MYSQL else profile.database_name
                 
-                # Update Redis with granular schema inspection progress
                 set_task_progress(
                     task_id,
                     percentage=int((schema_index / len(target_schemas)) * 50),
@@ -208,7 +236,6 @@ def introspect_source_schema_task(self, source_pk):
                     table_name=table_name
                 )
 
-                # 1. Introspect Columns
                 try:
                     columns = inspector.get_columns(table_name, schema=schema_name if profile.db_type != DbChoice.MYSQL else None)
                 except Exception as e:
@@ -225,7 +252,6 @@ def introspect_source_schema_task(self, source_pk):
                         defaults={'data_type': data_type}
                     )
 
-                # 2. Introspect Foreign Keys
                 try:
                     foreign_keys = inspector.get_foreign_keys(table_name, schema=schema_name if profile.db_type != DbChoice.MYSQL else None)
                     for fk in foreign_keys:
@@ -295,7 +321,7 @@ def trigger_all_active_source_introspection_task(self):
     return f"Successfully dispatched schema introspection for {active_sources.count()} active sources."
 
 
-@shared_task(bind=True, queue='queue_hot')
+@shared_task(bind=True, base=CancellableETLTask, queue='queue_hot')
 def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
     """
     Ingests selected tables and fields from a specific SourceProfile 
@@ -303,6 +329,7 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
     """
     logger = get_etl_logger()
     task_id = self.request.id
+    query_id = f"etl_task_{task_id}"
     set_task_progress(task_id, percentage=0, status="RUNNING", current_table="Initializing Ingestion...")
     
     if batch_size is None:
@@ -315,20 +342,24 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
         set_task_progress(task_id, percentage=0, status="FAILED", error="SourceProfile not found")
         return f"SourceProfile {source_pk} not found."
 
-    # Guard check: Ignore deactivated sources even if mappings exist
     if not profile.is_active:
         logger.warning(f"Ingestion skipped: Data source '{profile.name}' is currently deactivated.")
         set_task_progress(task_id, percentage=0, status="SKIPPED", error="Source deactivated")
         return f"Ingestion skipped for deactivated source: {profile.name}"
 
+    set_task_progress(
+        task_id,
+        percentage=0,
+        status="RUNNING",
+        current_table="Preparing ingestion...",
+        source_name=profile.name,
+    )
     logger.info(f"Starting ClickHouse data ingestion for source: '{profile.name}' (Batch Size: {batch_size})")
 
-    # Initialize running state
     profile.last_sync_status = SyncStatus.RUNNING
     profile.last_sync_error = ''
     profile.save(update_fields=['last_sync_status', 'last_sync_error'])
 
-    # 1. Connect to ClickHouse
     ch_client = clickhouse_connect.get_client(
         host=getattr(settings, 'CLICKHOUSE_HOST', 'localhost'),
         port=getattr(settings, 'CLICKHOUSE_PORT', 8123),
@@ -336,7 +367,6 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
         password=getattr(settings, 'CLICKHOUSE_PASSWORD', ''),
     )
 
-    # 2. Build Source Database SQLAlchemy Engine
     try:
         if profile.db_type == DbChoice.MYSQL:
             engine_url = f"mysql+pymysql://{profile.username}:{profile.password}@{profile.host}:{profile.port}/{profile.database_name}"
@@ -364,7 +394,6 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
         set_task_progress(task_id, percentage=0, status="FAILED", error=str(e))
         return f"Engine creation failed: {e}"
 
-    # 3. Iterate through tables and ONLY selected fields for active sources
     source_tables = list(SourceTable.objects.filter(source=profile, source__is_active=True))
     total_tables = len(source_tables)
 
@@ -379,7 +408,6 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
     preparer = source_engine.dialect.identifier_preparer
 
     for index, table in enumerate(source_tables, start=1):
-        # Refresh profile to check if source was deactivated mid-run
         profile.refresh_from_db()
         if not profile.is_active:
             profile.last_sync_status = SyncStatus.CANCELLED
@@ -388,7 +416,6 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
             logger.warning(f"ETL ingestion for '{profile.name}' was cancelled/deactivated.")
             return f"Ingestion cancelled for {profile.name}"
 
-        # Update Redis Progress dynamically per table
         current_percentage = int((index / total_tables) * 100)
         set_task_progress(
             task_id,
@@ -403,14 +430,11 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
             continue  
 
         field_names = [f.field_name for f in selected_fields]
-        
-        # Construct isolated ClickHouse table identifier
         ch_table_name = f"source_{profile.pk}__{table.schema_name}_{table.table_name}".lower()
 
         quoted_col_names = [preparer.quote(f.field_name) for f in selected_fields]
         select_cols_sql = ", ".join(quoted_col_names)
 
-        # Create ClickHouse MergeTree table if it doesn't exist
         columns_sql = ", ".join([f"`{f.field_name}` {map_to_clickhouse_type(f.data_type)}" for f in selected_fields])
         create_table_query = f"""
             CREATE TABLE IF NOT EXISTS {ch_table_name} (
@@ -419,12 +443,14 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
             ORDER BY tuple();
         """
         try:
-            ch_client.command(create_table_query)
+            ch_client.command(
+                create_table_query,
+                transport_settings={"query_id": query_id},
+            )
         except Exception as e:
             logger.error(f"Failed to create ClickHouse table {ch_table_name}: {e}")
-            continue
+            raise
 
-        # 4. Build dialect-aware source selection query using identifier preparer
         quoted_table_name = preparer.quote(table.table_name)
         if profile.db_type == DbChoice.MYSQL:
             source_query = f"SELECT {select_cols_sql} FROM {quoted_table_name}"
@@ -440,12 +466,26 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
         try:
             with source_engine.connect() as conn:
                 chunk_count = 0
-                max_chunks_per_burst = 50  # Yields execution control after 50 chunks to prevent worker hogging
-                
+                max_chunks_per_burst = 50
+
                 for chunk in pd.read_sql(source_query, con=conn, chunksize=batch_size):
+                    profile.refresh_from_db()
+                    if not profile.is_active:
+                        ch_client.command(f"KILL QUERY WHERE query_id = '{query_id}' SYNC")
+                        profile.last_sync_status = SyncStatus.CANCELLED
+                        profile.save(update_fields=['last_sync_status'])
+                        set_task_progress(
+                            task_id,
+                            percentage=current_percentage,
+                            status="CANCELLED",
+                        )
+                        logger.warning(
+                            f"ETL ingestion for '{profile.name}' was cancelled/deactivated."
+                        )
+                        return f"Ingestion cancelled for {profile.name}"
+
                     chunk = chunk.where(pd.notnull(chunk), None)
-                    
-                    # Safely sanitize strings and dates/times to avoid struct packing and encoding errors
+
                     for f in selected_fields:
                         ch_type = map_to_clickhouse_type(f.data_type)
                         if ch_type == 'String' and f.field_name in chunk.columns:
@@ -455,17 +495,22 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
                     
                     data_rows = chunk.values.tolist()
                     if data_rows:
-                        ch_client.insert(ch_table_name, data_rows, column_names=field_names)
+                        ch_client.insert(
+                            ch_table_name,
+                            data_rows,
+                            column_names=field_names,
+                            transport_settings={"query_id": query_id},
+                        )
                     
                     chunk_count += 1
                     if chunk_count >= max_chunks_per_burst:
-                        logger.info(f"Burst limit reached for table {table.table_name}. Yielding worker breath...")
-                        time.sleep(0.1)  # Brief yield to let other worker tasks run
+                        time.sleep(0.1)
                         chunk_count = 0
                         
             logger.info(f"Successfully ingested table {table.table_name} into ClickHouse as {ch_table_name}")
         except Exception as e:
             logger.error(f"Error streaming data for table {table.table_name}: {e}")
+            raise e
 
     profile.last_synced = timezone.now()
     profile.last_sync_status = SyncStatus.SUCCESS
@@ -486,10 +531,10 @@ def map_to_clickhouse_type(source_type):
     elif 'bool' in source_type_lower:
         return 'UInt8'
     elif 'date' in source_type_lower or 'time' in source_type_lower:
-        return 'String'  # Safely mapped to String (ISO format) to prevent native timestamp driver bounds crashes
+        return 'String'
     elif 'float' in source_type_lower or 'double' in source_type_lower or 'decimal' in source_type_lower:
         return 'Float64'
-    return 'String'  # Fallback
+    return 'String'
 
 
 @shared_task(bind=True, queue='queue_periodic')

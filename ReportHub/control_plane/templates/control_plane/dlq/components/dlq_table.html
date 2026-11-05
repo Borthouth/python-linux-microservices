@@ -22,15 +22,19 @@
                     </td>
                     <td class="py-3.5 px-4 text-right" style="white-space: nowrap; width: 15%;">
                         <div class="inline-flex items-center space-x-1.5 justify-end">
-                            <!-- Inspect matches standard Edit button style -->
-                            <a href="#" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-all">
-                                Inspect
-                            </a>
+                            <!-- Inspect button hooked up to openDlqModal -->
+                            <a href="#"
+                                onclick="openDlqModal(this); return false;"
+                                data-task-name="{{ task.display_name }}"
+                                data-traceback="{{ task.traceback }}"
+                                class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-all">
+                                    Inspect
+                                </a>
                             <!-- Re-queue matches sky blue action button style -->
                             <button hx-post="{% url 'control_plane:dlq_requeue' task.id %}" 
-                                    hx-target="#dlq-row-{{ task.id }}" 
-                                    hx-swap="outerHTML" 
-                                    class="px-3 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 text-xs font-medium rounded-lg transition-all shadow-sm">
+                                hx-target="#dlq-row-{{ task.id }}"
+                                hx-swap="outerHTML"
+                                class="px-3 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 text-xs font-medium rounded-lg transition-all shadow-sm">
                                 Re-queue
                             </button>
                         </div>

@@ -1,5 +1,6 @@
 import redis
 from django.conf import settings
+from django.utils import timezone
 
 def get_redis_client():
     """Returns a Redis client instance connected to DB 1 (Task Telemetry)."""
@@ -24,6 +25,9 @@ def set_task_progress(task_id, percentage, status="RUNNING", **kwargs):
         "percentage": str(percentage),
         "status": str(status),
     }
+
+    if status == "RUNNING":
+        r.hsetnx(key, "started_at", timezone.now().isoformat())
     
     # Add any extra metadata (current_table, source_name, error, etc.)
     for k, v in kwargs.items():

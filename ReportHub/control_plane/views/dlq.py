@@ -1,4 +1,5 @@
 import json
+import re
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.core.paginator import Paginator
 from django.http import HttpResponse, JsonResponse
@@ -8,6 +9,27 @@ from control_plane.utils import get_redis_client
 
 def is_admin(user):
     return user.is_staff or user.is_superuser
+
+
+def _decode_traceback(value):
+    if not isinstance(value, str) or not value:
+        return value
+
+    # Redis payloads may contain traceback text escaped across multiple layers.
+    value = re.sub(r'\\+u(?=[0-9a-fA-F]{4})', lambda _: r'\u', value)
+    value = re.sub(r'\\+([nrt"])', lambda match: '\\' + match.group(1), value)
+
+    def decode_surrogate_pair(match):
+        high, low = (int(code_unit, 16) for code_unit in match.groups())
+        return chr(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00))
+
+    value = re.sub(
+        r'\\u([dD][89a-bA-B][0-9a-fA-F]{2})\\u([dD][c-fC-F][0-9a-fA-F]{2})',
+        decode_surrogate_pair,
+        value,
+    )
+    value = re.sub(r'\\u([0-9a-fA-F]{4})', lambda match: chr(int(match.group(1), 16)), value)
+    return value.replace(r'\n', '\n').replace(r'\r', '\r').replace(r'\t', '\t').replace(r'\"', '"')
 
 
 @login_required
@@ -20,6 +42,8 @@ def dlq_list_view(request):
     keys = r.keys("dlq:task:*")
     
     tasks = []
+    seen_ids = set()  # Track IDs to prevent duplicates
+
     for key in keys:
         data = r.get(key)
         if data:
@@ -28,10 +52,24 @@ def dlq_list_view(request):
                 
                 # Normalize keys so templates never encounter missing lookups
                 task_dict['id'] = task_dict.get('id') or task_dict.get('task_id') or key.decode('utf-8').split(':')[-1]
+
+                # Skip duplicates based on unique task ID
+                if task_dict['id'] in seen_ids:
+                    continue
+                seen_ids.add(task_dict['id'])
+
                 task_dict['display_name'] = task_dict.get('task_name') or task_dict.get('name') or task_dict['id']
                 task_dict['error_message'] = task_dict.get('error_summary') or task_dict.get('traceback') or 'Exception raised during execution'
                 task_dict['failed_timestamp'] = task_dict.get('failed_at') or task_dict.get('timestamp') or ''
-                
+
+                raw_traceback = task_dict.get('traceback', '')
+                if raw_traceback:
+                    task_dict['traceback'] = _decode_traceback(
+                        raw_traceback if isinstance(raw_traceback, str) else str(raw_traceback)
+                    )
+                else:
+                    task_dict['traceback'] = 'No traceback recorded.'
+
                 tasks.append(task_dict)
             except Exception:
                 pass
@@ -66,7 +104,7 @@ def dlq_list_view(request):
             request, "control_plane/dlq/components/dlq_table.html", context
         )
 
-    return render(request, "control_plane/dlq/dlq_list.html", context)
+    return render(request, "control_plane/dlq_list.html", context)
 
 
 @login_required

@@ -1,7 +1,4 @@
-{% extends 'control_plane/base.html' %}
 {% load static %}
-
-{% block title %}Dead Letter Queue Management - Control Plane{% endblock %}
 
 {% block content %}
 <div class="max-w-7xl mx-auto px-6 py-8">
@@ -24,5 +21,7 @@
     <div id="dlq-table-container">
         {% include "control_plane/dlq/components/dlq_table.html" %}
     </div>
+
+    {% include "control_plane/dlq/components/dlq_modal.html" %}
 </div>
 {% endblock %}

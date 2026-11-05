@@ -5,14 +5,21 @@ import pyodbc
 import pymysql
 import psycopg2
 from datetime import datetime
-from celery import shared_task
+from celery import shared_task, Task
 from django.utils import timezone
 from minio import Minio
 from django.conf import settings
 from .models import ReportDefinition, ReportExecution
 from control_plane.utils import set_task_progress
 
-@shared_task(bind=True)
+
+class CancellableReportTask(Task):
+    """Base Celery task that cleans up execution state or handles revocation for reports."""
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
+        super().on_failure(exc, task_id, args, kwargs, einfo)
+
+
+@shared_task(bind=True, base=CancellableReportTask)
 def execute_report_task(self, report_id, execution_id=None):
     task_id = self.request.id
     set_task_progress(task_id, percentage=5, status="RUNNING", current_step="Initializing report execution...")
@@ -25,7 +32,8 @@ def execute_report_task(self, report_id, execution_id=None):
             execution.status = 'running'
             execution.progress_percentage = 10
             execution.is_cancelled = False
-            execution.save(update_fields=['status', 'progress_percentage', 'is_cancelled'])
+            execution.updated_at = timezone.now()
+            execution.save(update_fields=['status', 'progress_percentage', 'is_cancelled', 'updated_at'])
         else:
             execution = ReportExecution.objects.create(
                 report=report, 
@@ -37,7 +45,8 @@ def execute_report_task(self, report_id, execution_id=None):
         execution.refresh_from_db()
         if execution.is_cancelled:
             execution.status = 'cancelled'
-            execution.save(update_fields=['status'])
+            execution.completed_at = timezone.now()
+            execution.save(update_fields=['status', 'completed_at'])
             set_task_progress(task_id, percentage=10, status="CANCELLED", error="Cancelled before query")
             return "Execution cancelled before query."
 
@@ -76,32 +85,65 @@ def execute_report_task(self, report_id, execution_id=None):
                 conn = pyodbc.connect(conn_str)
                 cursor = conn.cursor()
                 cursor.execute(query)
-                for row in cursor.fetchall():
-                    rows.append(list(row))
-                    row_count += 1
+                while True:
+                    execution.refresh_from_db()
+                    if execution.is_cancelled:
+                        cursor.close()
+                        conn.close()
+                        raise InterruptedError("Report execution cancelled during fetch.")
+
+                    batch = cursor.fetchmany(1000)
+                    if not batch:
+                        break
+                    for row in batch:
+                        rows.append(list(row))
+                        row_count += 1
                 conn.close()
+
             elif 'mysql' in db_type or 'mysql' in source_name:
                 conn = pymysql.connect(host=source.host, port=source.port, user=source.username, password=source.password, database=source.database_name)
                 cursor = conn.cursor()
                 cursor.execute(query)
-                for row in cursor.fetchall():
-                    rows.append(list(row))
-                    row_count += 1
+                while True:
+                    execution.refresh_from_db()
+                    if execution.is_cancelled:
+                        cursor.close()
+                        conn.close()
+                        raise InterruptedError("Report execution cancelled during fetch.")
+
+                    batch = cursor.fetchmany(1000)
+                    if not batch:
+                        break
+                    for row in batch:
+                        rows.append(list(row))
+                        row_count += 1
                 conn.close()
+
             else:
                 conn = psycopg2.connect(host=source.host, port=source.port, user=source.username, password=source.password, dbname=source.database_name)
                 cursor = conn.cursor()
                 cursor.execute(query)
-                for row in cursor.fetchall():
-                    rows.append(list(row))
-                    row_count += 1
+                while True:
+                    execution.refresh_from_db()
+                    if execution.is_cancelled:
+                        cursor.close()
+                        conn.close()
+                        raise InterruptedError("Report execution cancelled during fetch.")
+
+                    batch = cursor.fetchmany(1000)
+                    if not batch:
+                        break
+                    for row in batch:
+                        rows.append(list(row))
+                        row_count += 1
                 conn.close()
 
         # Check cancellation after heavy query
         execution.refresh_from_db()
         if execution.is_cancelled:
             execution.status = 'cancelled'
-            execution.save(update_fields=['status'])
+            execution.completed_at = timezone.now()
+            execution.save(update_fields=['status', 'completed_at'])
             set_task_progress(task_id, percentage=30, status="CANCELLED", error="Cancelled after query")
             return "Execution cancelled after database query."
 
@@ -240,10 +282,16 @@ def execute_report_task(self, report_id, execution_id=None):
 
     except Exception as e:
         if 'execution' in locals():
-            execution.status = 'failed'
-            execution.error_message = str(e)
+            execution.refresh_from_db()
+            if execution.is_cancelled or isinstance(e, InterruptedError):
+                execution.status = 'cancelled'
+                execution.error_message = 'Execution cancelled by user.'
+            else:
+                execution.status = 'failed'
+                execution.error_message = str(e)
             execution.completed_at = timezone.now()
             execution.save()
         if 'task_id' in locals():
-            set_task_progress(task_id, percentage=100, status="FAILED", error=str(e))
+            status_val = "CANCELLED" if 'execution' in locals() and execution.status == 'cancelled' else "FAILED"
+            set_task_progress(task_id, percentage=100, status=status_val, error=str(e))
         raise e

@@ -1,0 +1,38 @@
+<div class="max-w-2xl mx-auto px-6 py-8">
+    <div class="mb-6">
+        <h1 class="text-2xl font-extrabold tracking-tight text-white">My Profile</h1>
+        <p class="text-slate-400 text-xs mt-1">Manage your account credentials and personal preferences.</p>
+    </div>
+
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-xl">
+        <form method="post" class="space-y-6">
+            {% csrf_token %}
+            
+            {% for field in form %}
+                <div>
+                    <label class="block text-xs font-medium text-slate-300 uppercase tracking-wider mb-2" for="{{ field.id_for_label }}">
+                        {{ field.label }}
+                    </label>
+                    
+                    {{ field }}
+                    
+                    {% if field.help_text %}
+                        <p class="text-xs text-slate-500 mt-1">{{ field.help_text }}</p>
+                    {% endif %}
+                    {% for error in field.errors %}
+                        <p class="text-xs text-red-400 mt-1">{{ error }}</p>
+                    {% endfor %}
+                </div>
+            {% endfor %}
+
+            <div class="pt-4 flex items-center justify-end space-x-3 border-t border-slate-800">
+                <a href="{% url 'control_plane:dashboard' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl transition-all">
+                    Cancel
+                </a>
+                <button type="submit" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">
+                    Update Profile
+                </button>
+            </div>
+        </form>
+    </div>
+</div>

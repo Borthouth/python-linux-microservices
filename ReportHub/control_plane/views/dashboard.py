@@ -39,7 +39,8 @@ def dashboard_view(request):
                 "percentage": int(data.get("percentage", 0)),
                 "current_table": data.get("current_table", "Processing..."),
                 "name": data.get("source_name", "Running Pipeline"),
-                "db_type": data.get("db_type", "ETL")
+                "db_type": data.get("db_type", "ETL"),
+                "started_at": parse_datetime(data["started_at"]) if data.get("started_at") else None,
             })
 
     recent_jobs = SourceProfile.objects.exclude(last_sync_status=SyncStatus.RUNNING).order_by('-updated_at')[:5]
@@ -70,6 +71,12 @@ def dashboard_view(request):
     dlq_tasks.sort(key=lambda x: x.get('failed_timestamp') or '', reverse=True)
 
     context = {
+        'stats': {
+            'total_connections': total_sources,
+            'active_pipelines': len(active_running_sources),
+            'reports_generated': ReportExecution.objects.filter(status='completed').count(),
+            'dlq_count': len(dlq_tasks),
+        },
         'total_sources': total_sources,
         'user_access_count': user_access_count,
         'active_running_sources': active_running_sources,
@@ -98,6 +105,7 @@ def active_pipelines_fragment(request):
                 "percentage": int(data.get("percentage", 0)),
                 "current_table": data.get("current_table", "Processing..."),
                 "name": data.get("source_name", "Running Pipeline"),
+                "started_at": parse_datetime(data["started_at"]) if data.get("started_at") else None
             })
             
     context = {"active_running_sources": active_running_sources}

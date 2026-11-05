@@ -1,6 +1,6 @@
 window.openDlqModal = function(btn) {
     const taskName = btn.getAttribute('data-task-name');
-    const traceback = btn.getAttribute('data-traceback');
+    const traceback = btn.getAttribute('data-traceback') || 'No traceback recorded for this task.';
 
     const titleEl = document.getElementById('dlq-modal-title');
     const bodyEl = document.getElementById('dlq-modal-body');
@@ -10,7 +10,7 @@ window.openDlqModal = function(btn) {
         titleEl.textContent = `Failure Traceback: ${taskName}`;
     }
     if (bodyEl) {
-        bodyEl.textContent = traceback || 'No traceback recorded for this task.';
+        bodyEl.textContent = traceback;
     }
     
     if (modalEl) {
@@ -25,7 +25,6 @@ window.closeDlqModal = function() {
     }
 };
 
-// Close when clicking outside the modal box
 document.addEventListener('click', function(e) {
     const modalEl = document.getElementById('dlq-modal');
     if (modalEl && e.target === modalEl) {

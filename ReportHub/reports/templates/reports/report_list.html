@@ -3,11 +3,12 @@
 {% block title %}Report Management - ReportHub{% endblock %}
 
 {% block content %}
+<div class="max-w-7xl mx-auto px-6 py-8">
 <div class="flex items-center justify-between mb-8">
     <div>
         <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">Report Management</h1>
         <p class="text-slate-400 text-sm">Configure analytical report definitions, execute asynchronous background tasks, and download generated artifacts.</p>
-    </div>
+</div>
     <a href="{% url 'reports:report_create' %}" class="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all flex items-center space-x-2">
         <span>➕</span>
         <span>+ Create Report</span>
@@ -104,5 +105,6 @@
             </tbody>
         </table>
     </div>
+</div>
 </div>
 {% endblock %}
