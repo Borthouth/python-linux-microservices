@@ -2,14 +2,11 @@
 
 {% block content %}
 <div class="max-w-7xl mx-auto px-6 py-8">
-    <div class="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+    <div class="mb-6">
         <div>
             <h1 class="text-2xl font-extrabold text-white">Dead Letter Queue Management</h1>
             <p class="text-slate-400 text-xs mt-1">Inspect, analyze stack traces, and re-queue failed background tasks across your infrastructure.</p>
         </div>
-        <a href="{% url 'control_plane:dashboard' %}" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded-xl border border-slate-700 transition self-start">
-            &larr; Back to Dashboard
-        </a>
     </div>
 
     <!-- Search Component with bottom margin gap -->

@@ -22,6 +22,9 @@
 
     <!-- Main Content Block -->
     <main class="flex-1 w-full mx-auto px-6 py-8">
+        <!-- Include Reusable Breadcrumbs -->
+        {% include 'control_plane/components/breadcrumbs.html' %}
+        
         {% block content %}{% endblock %}
     </main>
 

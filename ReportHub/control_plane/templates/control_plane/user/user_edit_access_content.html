@@ -1,36 +1,24 @@
 <div class="max-w-7xl mx-auto px-6 py-8">
-    <div class="mb-6 flex items-center justify-between">
+    <div class="mb-6">
         <div>
             <h1 class="text-2xl font-extrabold tracking-tight text-white">Manage Data Source Access</h1>
-            <p class="text-slate-400 text-sm mt-1">Configure granular database permissions for <span class="text-white font-semibold">{{ target_user.username }}</span>.</p>
+            <p class="text-slate-400 text-sm mt-1">Configure granular database permissions for admin.</p>
         </div>
-        <a href="{% url 'control_plane:user_management' %}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium rounded-lg transition-all">
-            &larr; Back to Users
-        </a>
+    </div>
+
+    <!-- Reusable Search Bar Component -->
+    <div class="mb-6">
+        {% include 'control_plane/components/search_bar.html' with placeholder="Search data sources..." %}
     </div>
 
     <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
-        <!-- Search filter for sources -->
-        <form method="get" class="mb-6 flex items-center">
-            <input type="text" name="q" value="{{ source_search }}" placeholder="Search data sources..." 
-                   class="w-full sm:w-72 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white placeholder-slate-500 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500">
-            <button type="submit" class="ml-2 px-3 py-2 bg-slate-800 hover:bg-indigo-600 text-slate-300 hover:text-white rounded-xl text-xs font-medium transition-all">
-                Search
-            </button>
-            {% if source_search %}
-                <a href="{% url 'control_plane:user_edit_access' target_user.id %}" class="ml-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-xl text-xs transition-all">
-                    Clear
-                </a>
-            {% endif %}
-        </form>
-
         <form method="post" class="space-y-6">
             {% csrf_token %}
             
-            <div class="overflow-x-auto border border-slate-800 rounded-xl">
+            <div class="overflow-x-auto">
                 <table class="w-full text-left border-collapse">
-                    <thead>
-                        <tr class="border-b border-slate-800 bg-slate-950/60 text-xs uppercase tracking-wider text-slate-400">
+                    <thead class="border-b border-slate-800">
+                        <tr class="text-xs uppercase tracking-wider text-slate-400">
                             <th class="py-3 px-4 w-12 text-center">Access</th>
                             <th class="py-3 px-4">Data Source Name</th>
                             <th class="py-3 px-4">Database Type</th>
@@ -52,8 +40,8 @@
                         {% empty %}
                             <tr>
                                 <td colspan="4" class="py-12 text-center text-slate-500 text-sm">
-                                    {% if source_search %}
-                                        No data sources found matching "{{ source_search }}".
+                                    {% if request.GET.q %}
+                                        No data sources found matching "{{ request.GET.q }}".
                                     {% else %}
                                         No data sources available in the system.
                                     {% endif %}

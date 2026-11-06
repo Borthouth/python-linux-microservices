@@ -3,7 +3,13 @@ from django.contrib.auth.decorators import login_required, user_passes_test
 from django.shortcuts import render, get_object_or_404, redirect
 from django.http import JsonResponse
 from django.db.models import OuterRef, Subquery
-from .models import ReportDefinition, SourceTable, SourceField, ReportExecution
+from .models import (
+    ReportDefinition, 
+    SourceTable, 
+    SourceField, 
+    ReportExecution, 
+    EmailAuditLog
+)
 from .forms import ReportDefinitionForm
 from datetime import timedelta
 from django.http import Http404, HttpResponseRedirect
@@ -13,6 +19,7 @@ from .tasks import execute_report_task
 from django.contrib import messages
 from django.template.loader import render_to_string
 from django.http import HttpResponse
+from django.views.decorators.csrf import csrf_exempt
 
 
 def is_admin(user):
@@ -306,3 +313,29 @@ def report_status(request, pk):
         'timestamp': timestamp,
         'poll_url': f"/reports/{report.pk}/status/"
     })
+
+
+@csrf_exempt
+def email_webhook_receiver(view_request):
+    if view_request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+    try:
+        events = json.loads(view_request.body)
+        for event in events:
+            msg_id = event.get('sg_message_id') or event.get('message-id')
+            event_type = event.get('event') # e.g., 'bounce', 'delivered', 'dropped'
+            
+            if msg_id:
+                log_entry = EmailAuditLog.objects.filter(message_id__icontains=msg_id).first()
+                if log_entry:
+                    if event_type in ['bounce', 'dropped']:
+                        log_entry.status = 'bounced'
+                        log_entry.error_message = event.get('reason', 'Unknown bounce reason')
+                    elif event_type == 'delivered':
+                        log_entry.status = 'delivered'
+                    log_entry.save()
+
+        return JsonResponse({'status': 'success'}, status=200)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=400)

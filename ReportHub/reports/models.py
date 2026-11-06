@@ -1,9 +1,11 @@
 import uuid
 from django.db import models
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django_celery_beat.models import PeriodicTask
 from simple_history.models import HistoricalRecords
 from control_plane.models import SourceProfile, SourceTable, SourceField
+from .validators import validate_comma_separated_emails
 
 class TimeStampedAuditedModel(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
@@ -56,6 +58,14 @@ class ReportDefinition(TimeStampedAuditedModel):
         default='csv'
     )
     
+    # Report Email Lists / Subscriptions
+    email_recipients = models.TextField(
+        blank=True, 
+        validators=[validate_comma_separated_emails],
+        help_text="Comma-separated list of email addresses for automated report distribution (e.g., user1@example.com, user2@example.com)."
+    )
+    is_email_active = models.BooleanField(default=False)
+    
     # Celery Beat Periodic Task integration
     periodic_task = models.OneToOneField(
         PeriodicTask, 
@@ -70,6 +80,19 @@ class ReportDefinition(TimeStampedAuditedModel):
     # Execution tracking fields
     last_run_at = models.DateTimeField(blank=True, null=True)
     last_run_status = models.CharField(max_length=50, blank=True, null=True)
+
+    def get_recipient_list(self):
+        """Helper to safely parse comma-separated emails into a clean Python list."""
+        if not self.email_recipients:
+            return []
+        return [email.strip() for email in self.email_recipients.split(',') if email.strip()]
+
+    def clean(self):
+        super().clean()
+        if self.is_email_active and not self.get_recipient_list():
+            raise ValidationError({
+                'email_recipients': 'At least one valid recipient email address is required when email activation is enabled.'
+            })
 
     def __str__(self):
         return self.name
@@ -96,3 +119,23 @@ class ReportExecution(TimeStampedAuditedModel):
     def __str__(self):
         date_str = self.created_at.strftime('%Y-%m-%d %H:%M') if self.created_at else 'Unknown date'
         return f"{self.report.name} - {self.status} ({date_str})"
+
+class EmailAuditLog(models.Model):
+    STATUS_CHOICES = [
+        ('sent', 'Sent'),
+        ('failed', 'Failed'),
+        ('bounced', 'Bounced'),
+        ('delivered', 'Delivered'),
+    ]
+
+    report = models.ForeignKey('ReportDefinition', on_delete=models.SET_NULL, null=True, related_name='email_logs')
+    execution = models.ForeignKey('ReportExecution', on_delete=models.SET_NULL, null=True, related_name='email_logs')
+    recipients = models.TextField(help_text="Comma-separated list of recipients")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='sent')
+    error_message = models.TextField(blank=True, null=True)
+    message_id = models.CharField(max_length=255, blank=True, null=True, help_text="SMTP or provider message ID")
+    created_at = models.DateTimeField(auto_now_add=True)
+    retry_count = models.PositiveIntegerField(default=0)
+
+    def __index__(self):
+        return f"Email for {self.report.name if self.report else 'Deleted'} - {self.status} ({self.created_at})"

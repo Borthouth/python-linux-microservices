@@ -1,0 +1,179 @@
+<div class="max-w-7xl mx-auto px-6 py-8" x-data="{ inspectModalOpen: false, deleteModalOpen: false, activeErrorTitle: '', activeErrorMessage: '', deleteUrl: '', deleteTargetName: '' }">
+    <!-- Header & Subtitle -->
+    <div class="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-extrabold text-white">Email Delivery Audit</h1>
+            <p class="text-slate-400 text-xs mt-1">Monitor automated report dispatches, delivery statuses, failure logs, and webhook bounce events.</p>
+        </div>
+    </div>
+
+    <!-- Search Bar & Status Filter Form -->
+    <form method="get" class="mb-6 flex flex-col xl:flex-row gap-4 items-center justify-between">
+        <div class="flex gap-4 items-center w-full xl:max-w-2xl">
+            <div class="flex-1">
+                <input type="text" name="q" value="{{ search_query }}" placeholder="Search recipient or report..." 
+                       class="w-full bg-slate-900 border border-slate-800 text-white px-4 py-2 rounded-xl focus:outline-none focus:border-indigo-500 text-sm">
+            </div>
+            <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-xl transition shadow-sm whitespace-nowrap">Search</button>
+            {% if search_query %}
+                <a href="{% url 'control_plane:email_audit_logs' %}{% if current_status %}?status={{ current_status }}{% endif %}" class="text-slate-400 hover:text-white text-sm underline shrink-0">Reset</a>
+            {% endif %}
+        </div>
+
+        <!-- Status Filter Pills -->
+        <div class="flex items-center gap-1.5 bg-slate-900/50 p-1.5 rounded-xl border border-slate-800/80 shrink-0 overflow-x-auto max-w-full">
+            {% if search_query %}
+                <input type="hidden" name="q" value="{{ search_query }}">
+            {% endif %}
+            
+            <a href="{% if search_query %}?q={{ search_query }}{% else %}.{% endif %}" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition {% if not current_status %}bg-indigo-600 text-white shadow{% else %}text-slate-400 hover:text-slate-200{% endif %}">All</a>
+            <a href="?status=sent{% if search_query %}&q={{ search_query }}{% endif %}" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition {% if current_status == 'sent' %}bg-indigo-600 text-white shadow{% else %}text-slate-400 hover:text-slate-200{% endif %}">Sent</a>
+            <a href="?status=delivered{% if search_query %}&q={{ search_query }}{% endif %}" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition {% if current_status == 'delivered' %}bg-indigo-600 text-white shadow{% else %}text-slate-400 hover:text-slate-200{% endif %}">Delivered</a>
+            <a href="?status=failed{% if search_query %}&q={{ search_query }}{% endif %}" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition {% if current_status == 'failed' %}bg-indigo-600 text-white shadow{% else %}text-slate-400 hover:text-slate-200{% endif %}">Failed</a>
+            <a href="?status=bounced{% if search_query %}&q={{ search_query }}{% endif %}" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition {% if current_status == 'bounced' %}bg-indigo-600 text-white shadow{% else %}text-slate-400 hover:text-slate-200{% endif %}">Bounced</a>
+        </div>
+    </form>
+
+    <!-- Table Card Container -->
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden mb-6 max-w-full">
+        <table class="w-full text-left border-collapse">
+            <thead>
+                <tr class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400 bg-slate-950/40">
+                    <th class="py-3 px-4">Timestamp</th>
+                    <th class="py-3 px-4">Report Name</th>
+                    <th class="py-3 px-4">Recipients</th>
+                    <th class="py-3 px-4">Status</th>
+                    <th class="py-3 px-4">Error Summary</th>
+                    <th class="py-3 px-4 text-right">Actions</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/60 text-sm">
+                {% for log in page_obj %}
+                <tr class="hover:bg-slate-800/40 transition-all">
+                    <td class="py-3.5 px-4 font-mono text-slate-400 text-xs whitespace-nowrap">{{ log.created_at|date:"Y-m-d H:i:s" }}</td>
+                    <td class="py-3.5 px-4 font-medium text-white text-xs">
+                        {% if log.report %}
+                            <a href="{% url 'reports:report_edit' log.report.pk %}" class="hover:text-indigo-400 transition-colors">
+                                {{ log.report.name }}
+                            </a>
+                        {% else %}
+                            <span class="text-slate-500 italic">Standalone</span>
+                        {% endif %}
+                    </td>
+                    <td class="py-3.5 px-4 font-mono text-slate-300 text-xs max-w-[200px] truncate" title="{{ log.recipients }}">{{ log.recipients }}</td>
+                    <td class="py-3.5 px-4 whitespace-nowrap text-xs">
+                        <div class="flex items-center space-x-1.5">
+                            {% if log.status == 'sent' %}
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20">Sent</span>
+                            {% elif log.status == 'delivered' %}
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Delivered</span>
+                            {% elif log.status == 'failed' %}
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-500/10 text-red-400 border border-red-500/20">Failed</span>
+                            {% elif log.status == 'bounced' %}
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20">Bounced</span>
+                            {% endif %}
+
+                            {% if log.retry_count and log.retry_count > 0 %}
+                                <span class="px-1.5 py-0.5 rounded text-[9px] font-mono bg-slate-800 text-slate-300 border border-slate-700" title="Retries">
+                                    {{ log.retry_count }}x
+                                </span>
+                            {% endif %}
+                        </div>
+                    </td>
+                    <td class="py-3.5 px-4 text-rose-400 text-xs font-normal max-w-[220px] truncate" title="{{ log.error_message }}">
+                        {% if log.error_message %}
+                            {{ log.error_message }}
+                        {% else %}
+                            <span class="text-slate-600">-</span>
+                        {% endif %}
+                    </td>
+                    <td class="py-3.5 px-4 text-right whitespace-nowrap">
+                        <div class="inline-flex items-center space-x-1.5 justify-end">
+                            {% if log.error_message %}
+                                <button type="button" 
+                                        @click="activeErrorTitle = '{{ log.recipients }}'; activeErrorMessage = `{{ log.error_message|escapejs }}`; inspectModalOpen = true;"
+                                        class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-all">
+                                    Inspect
+                                </button>
+                            {% endif %}
+
+                            <form action="{% url 'control_plane:email_audit_requeue' log.pk %}" method="post" class="inline">
+                                {% csrf_token %}
+                                <button type="submit" class="px-2.5 py-1 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 text-xs font-medium rounded-lg transition-all shadow-sm">
+                                    Re-queue
+                                </button>
+                            </form>
+
+                            <!-- Delete Button Triggering Confirmation Modal -->
+                            <button type="button"
+                                    @click="deleteUrl = '{% url 'control_plane:email_audit_delete' log.pk %}'; deleteTargetName = '{{ log.recipients }}'; deleteModalOpen = true;"
+                                    class="px-2.5 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-medium rounded-lg border border-red-500/20 transition-all">
+                                Delete
+                            </button>
+                        </div>
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="6" class="py-12 text-center text-slate-500 text-sm">
+                        No email delivery audit records found matching your criteria.
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <!-- Pagination -->
+        <div class="p-4 border-t border-slate-800">
+            {% include 'control_plane/components/pagination.html' %}
+        </div>
+    </div>
+
+    <!-- Inspect Modal -->
+    <div x-show="inspectModalOpen" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-4xl mx-auto overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+            <div class="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/50">
+                <h3 class="text-base font-semibold text-white font-mono flex items-center space-x-2 truncate pr-4">
+                    <span>Delivery Error Traceback:</span>
+                    <span class="text-indigo-400 text-xs truncate" x-text="activeErrorTitle"></span>
+                </h3>
+                <button @click="inspectModalOpen = false" class="text-slate-400 hover:text-white text-sm shrink-0">✕</button>
+            </div>
+            
+            <div class="p-6 overflow-auto flex-1 font-mono text-xs text-red-300 bg-slate-950/80 whitespace-pre-wrap break-all" x-text="activeErrorMessage"></div>
+            
+            <div class="px-6 py-4 border-t border-slate-800 bg-slate-950/50 flex justify-end">
+                <button @click="inspectModalOpen = false" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs rounded-xl transition">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Delete Confirmation Modal -->
+    <div x-show="deleteModalOpen" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-md w-full mx-auto shadow-2xl">
+            <div class="flex items-center space-x-3 mb-4">
+                <div class="p-2.5 bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl text-xl">
+                    ⚠️
+                </div>
+                <div>
+                    <h3 class="text-lg font-bold text-white">Delete Audit Record</h3>
+                    <p class="text-slate-400 text-xs">This action cannot be undone.</p>
+                </div>
+            </div>
+                    
+            <p class="text-sm text-slate-300 mb-6">
+                Are you sure you want to delete the audit log for <span x-text="deleteTargetName" class="font-semibold text-white"></span>?
+            </p>
+
+            <form :action="deleteUrl" method="post" class="flex items-center justify-end space-x-3">
+                {% csrf_token %}
+                <button type="button" @click="deleteModalOpen = false" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded-xl border border-slate-700 transition-all">
+                    Cancel
+                </button>
+                <button type="submit" class="px-4 py-2 bg-red-600 hover:bg-red-500 text-white text-xs font-medium rounded-xl shadow-lg shadow-red-600/20 transition-all">
+                    Yes, Delete
+                </button>
+            </form>
+        </div>
+    </div>
+</div>

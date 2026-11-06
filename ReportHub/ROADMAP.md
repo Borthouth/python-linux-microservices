@@ -79,8 +79,51 @@ Track the development phases, architectural milestones, and codebase optimizatio
 
 ---
 
-## Phase 5: Codebase Audit, Cleanup & Optimization (Active Phase 🎯)
+## Phase 5: User Workspaces, Access Control & Collaboration
+- [x] **Built-in Auth Integration:** Retaining Django's standard `auth.User` model while extending it with a `UserProfile` model (`OneToOne`) for extended metadata and verified email storage.
+- [x] **Collaborative Workspaces:** Introducing `SharedWorkspace` and `WorkspaceMembership` models to allow multiple users to collaborate and share access to specific data sources, pipelines, and connections.
+- [x] **Permission Enforcement:** Implementing workspace-level access checks in views and decorators to secure pipeline execution and data source visibility.
 
+---
+
+## Phase 6: Asynchronous Email Notifications & Delivery Audit
+- [x] **Celery Integration:** Moving email dispatches to background Celery tasks using Django's email backend so UI and HTMX workflows never block.
+- [x] **Report Email Lists:** Attaching recipient lists or subscription structures directly to report configurations.
+- [x] **Email Delivery Audit & Governance Module:**
+  - [x] Build `EmailAuditLog` data model storing delivery lifecycle states (`sent`, `delivered`, `failed`, `bounced`), `retry_count`, and error tracebacks.
+  - [x] Implement backend views for record retrieval, webhook status transitions, and administrative actions (`Re-queue` via sky-blue action buttons, `Delete` via confirmation modals).
+  - [x] Design fully responsive UI matching the Dead Letter Queue (DLQ) layout patterns, complete with error inspection modals, search filters, and status-coded badge pills.
+
+---
+
+## Phase 7: SFTP & File Transfer Protocol Integration
+- [x] **Transfer Destinations Model:** Creating configuration models (`TransferDestination`) to securely store SFTP, FTP, or cloud storage target credentials (hosts, ports, authentication keys).
+- [x] **Automated Export Pipelines:** Hooking file generation (CSV, Excel, PDF) into a downstream Celery task that handles automated file transfers using robust Python transfer libraries (e.g., `paramiko`).
+
+---
+
+## Phase 8: UI Framework, Navigation & Global Polish
+- [x] **Pure Tailwind CSS (Slate Palette):** Styling components (like action dropdowns, tables, and modals) using clean slate utilities (`slate-900`, `slate-800`, `slate-700`) and Alpine.js for lightweight interactivity.
+- [x] **Admin Navigation Dropdown:** Grouping administrative tools into clear categories:
+  - Users & Access Management (Profiles, Workspaces, Connection Permissions)
+  - System Operations & Monitoring (DLQ, Task/Worker Status, Global Pipeline History)
+  - Integrations & Infrastructure (Email Settings, SFTP Destinations)
+- [x] **Global Cursor/Selection Optimization:** Applied a clean app-wide `select-none` approach on structural/UI chrome while targeted `select-text` preserves copy-paste usability on essential audit logs, error traces, and recipient strings.
+
+---
+
+## Phase 9: Comprehensive Audit Suite
+- [x] **Expanding ReportHub's audit system into a multi-tab single pane of glass covering:**
+  - **UX & System Audit:** Administrative actions and general UI logs.
+  - **Queue Audit (DLQ):** Failed task tracking, stack trace rendering, and retry/purge actions.
+  - **Email Audit / Status:** Delivery tracking, failure logs, and bounce/delivery webhook monitoring.
+  - **File Transfer Audit:** Tracking SFTP/FTP/S3 uploads, file sizes, durations, and connection errors.
+  - **ETL & Ingestion Audit:** Row counts, batch performance, and ClickHouse synchronization history.
+  - **Security & Access Audit:** Permission changes, logins, and workspace membership updates.
+
+---
+
+## Phase 10: Codebase Audit, Cleanup & Optimization (Active Phase 🎯)
 - [ ] **Dependency & Configuration Pruning:**
   - [ ] Consolidate duplicate package declarations in `requirements.txt` (`celery`, `pymysql`, `psycopg2-binary`).
   - [ ] Evaluate unused stack dependencies (FastAPI, Uvicorn, AsyncPG) to trim container build overhead if not servicing separate microservice endpoints.
@@ -96,7 +139,7 @@ Track the development phases, architectural milestones, and codebase optimizatio
 
 ---
 
-## Phase 6: Asynchronous Reporting, Query Generation & Export Pipelines
+## Phase 11: Asynchronous Reporting, Query Generation & Export Pipelines
 - [ ] **Multi-Tiered Storage & Lifecycle Indexing:**
   - [ ] Manage report lifecycle metadata in PostgreSQL (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
   - [ ] Upload completed binary outputs directly to MinIO, updating PostgreSQL status with pre-signed retrieval keys in an atomic transaction.

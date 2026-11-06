@@ -22,7 +22,11 @@ class ReportDefinitionForm(forms.ModelForm):
 
     class Meta:
         model = ReportDefinition
-        fields = ['name', 'description', 'source', 'base_table', 'selected_fields_json', 'filter_config_input', 'export_format', 'is_active']
+        fields = [
+            'name', 'description', 'source', 'base_table', 
+            'selected_fields_json', 'filter_config_input', 
+            'export_format', 'email_recipients', 'is_email_active', 'is_active'
+        ]
         widgets = {
             'name': forms.TextInput(attrs={
                 'class': 'bg-gray-900 text-white placeholder-gray-500 shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-700 rounded-md px-3 py-2 border'
@@ -41,6 +45,14 @@ class ReportDefinitionForm(forms.ModelForm):
             }),
             'export_format': forms.Select(attrs={
                 'class': 'bg-gray-900 text-white shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-700 rounded-md px-3 py-2 border'
+            }),
+            'email_recipients': forms.Textarea(attrs={
+                'rows': 2,
+                'placeholder': 'admin@example.com, reporting-team@example.com',
+                'class': 'w-full bg-slate-950 border border-slate-800 text-white px-4 py-2.5 rounded-xl text-sm focus:outline-none focus:border-indigo-500'
+            }),
+            'is_email_active': forms.CheckboxInput(attrs={
+                'class': 'w-4 h-4 text-indigo-600 bg-slate-950 border-slate-700 rounded focus:ring-indigo-500'
             }),
             'is_active': forms.CheckboxInput(attrs={
                 'class': 'h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-700 rounded bg-gray-900'

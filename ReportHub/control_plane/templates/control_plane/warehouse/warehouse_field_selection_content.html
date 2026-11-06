@@ -1,13 +1,10 @@
 <div class="max-w-7xl mx-auto px-6 py-8">
     <div class="max-w-7xl mx-auto space-y-6">
-        <div class="flex items-center justify-between">
+        <div>
             <div>
                 <h1 class="text-2xl font-extrabold tracking-tight text-white">Configure Warehouse Fields</h1>
                 <p class="text-slate-400 text-sm mt-1">Select tables and columns to synchronize for <strong class="text-white">{{ source.name }}</strong>.</p>
             </div>
-            <a href="{% url 'control_plane:warehouse_list' %}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium rounded-lg transition-all">
-                &larr; Back to Warehouse Mapping
-            </a>
         </div>
 
         <form method="post">

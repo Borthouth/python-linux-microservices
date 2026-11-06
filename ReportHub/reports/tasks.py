@@ -4,19 +4,122 @@ import io
 import pyodbc
 import pymysql
 import psycopg2
+import logging
 from datetime import datetime
 from celery import shared_task, Task
 from django.utils import timezone
-from minio import Minio
+from django.core.mail import EmailMessage
 from django.conf import settings
+from minio import Minio
 from .models import ReportDefinition, ReportExecution
 from control_plane.utils import set_task_progress
+
+logger = logging.getLogger(__name__)
 
 
 class CancellableReportTask(Task):
     """Base Celery task that cleans up execution state or handles revocation for reports."""
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         super().on_failure(exc, task_id, args, kwargs, einfo)
+
+
+@shared_task(bind=True, autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 60})
+def send_report_email_task(self, report_id, execution_id=None):
+    """
+    Asynchronous Celery task to dispatch report completion notifications 
+    and file attachments from MinIO storage to configured recipient lists,
+    recording an audit log for every attempt.
+    """
+    from .models import EmailAuditLog, ReportDefinition, ReportExecution
+    
+    report = None
+    execution = None
+    recipients = []
+    
+    try:
+        report = ReportDefinition.objects.get(pk=report_id)
+        recipients = report.get_recipient_list()
+        recipient_str = ", ".join(recipients)
+
+        if not report.is_email_active or not recipients:
+            logger.info(f"Email notifications disabled or no recipients configured for report: {report.name}")
+            return f"Skipped: Email inactive or empty for {report.name}"
+
+        subject = f"[ReportHub] Automated Report Output: {report.name}"
+        body = (
+            f"Hello,\n\n"
+            f"Your scheduled execution for report '{report.name}' has completed successfully.\n\n"
+            f"Description:\n{report.description or 'No description provided.'}\n\n"
+            f"Attached is your generated report artifact.\n"
+            f"You can also view full results and audit history directly inside the ReportHub Control Plane.\n\n"
+            f"Best regards,\nReportHub Automation Engine"
+        )
+
+        email = EmailMessage(
+            subject=subject,
+            body=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=recipients,
+        )
+
+        # Retrieve and attach the report file artifact from MinIO if execution_id is provided
+        if execution_id:
+            try:
+                execution = ReportExecution.objects.get(pk=execution_id)
+                if execution.file_path:
+                    endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://minio:9000')
+                    if endpoint.startswith('http://'): endpoint = endpoint[7:]
+                    elif endpoint.startswith('https://'): endpoint = endpoint[8:]
+
+                    minio_client = Minio(
+                        endpoint,
+                        access_key=getattr(settings, 'AWS_ACCESS_KEY_ID', 'minioadmin'),
+                        secret_key=getattr(settings, 'AWS_SECRET_ACCESS_KEY', 'minioadminpassword'),
+                        secure=False
+                    )
+                    bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'reporthub-artifacts')
+                    
+                    response = minio_client.get_object(bucket_name, execution.file_path)
+                    file_data = response.read()
+                    response.close()
+                    response.release_conn()
+
+                    filename = execution.file_path.split('/')[-1]
+                    content_type = 'application/pdf' if filename.endswith('.pdf') else ('application/json' if filename.endswith('.json') else 'text/csv')
+                    
+                    email.attach(filename, file_data, content_type)
+            except Exception as attachment_err:
+                logger.warning(f"Could not attach report artifact to email for execution {execution_id}: {attachment_err}")
+
+        # Send Email via SMTP / Mailpit
+        email.send(fail_silently=False)
+
+        # Record Successful Audit Log
+        EmailAuditLog.objects.create(
+            report=report,
+            execution=execution,
+            recipients=recipient_str,
+            status='sent'
+        )
+
+        logger.info(f"Successfully dispatched report '{report.name}' to {len(recipients)} recipient(s).")
+        return f"Dispatched {report.name} to {recipients}"
+
+    except ReportDefinition.DoesNotExist:
+        logger.error(f"ReportDefinition with ID {report_id} does not exist.")
+        raise
+    except Exception as exc:
+        # Record Failed Audit Log
+        if report:
+            EmailAuditLog.objects.create(
+                report=report,
+                execution=execution,
+                recipients=", ".join(recipients) if recipients else "Unknown",
+                status='failed',
+                error_message=str(exc)
+            )
+        logger.error(f"Failed to send email for report ID {report_id}: {exc}")
+        raise exc
 
 
 @shared_task(bind=True, base=CancellableReportTask)
@@ -278,6 +381,11 @@ def execute_report_task(self, report_id, execution_id=None):
         execution.save()
 
         set_task_progress(task_id, percentage=100, status="SUCCESS", current_step="Completed")
+
+        # --- Stage 4: Trigger Asynchronous Email Notifications with Attachment ---
+        if report.is_email_active:
+            send_report_email_task.delay(report.pk, execution.pk)
+
         return f"Report {report.name} successfully executed."
 
     except Exception as e:

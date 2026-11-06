@@ -46,9 +46,20 @@ services:
       - mssql_test_data:/var/opt/mssql
     restart: unless-stopped
 
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: reporthub-mailpit
+    ports:
+      - "1025:1025"  # SMTP port for Django & Celery to connect to
+      - "8025:8025"  # Web dashboard to view captured emails
+    networks:
+      - shared_network
+    restart: unless-stopped
+
 networks:
   shared_network:
     name: reporthub_shared_network
+    external: true
 
 volumes:
   pg_test_data:

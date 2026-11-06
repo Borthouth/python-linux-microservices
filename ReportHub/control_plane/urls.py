@@ -8,6 +8,7 @@ from .views import (
     pipeline_automations,
     warehouse,
     dlq,
+    email_audit,
 )
 
 app_name = 'control_plane'
@@ -46,6 +47,12 @@ urlpatterns = [
 
     # Audit log URL
     path('audit/', audit.audit_log_view, name='audit_log'),
+
+    # Email audit log URLs
+    path('audit/emails/', email_audit.email_audit_log_view, name='email_audit_logs'),
+    path('api/webhooks/email/', email_audit.email_webhook_receiver, name='email_webhook_receiver'),
+    path('audit/emails/<int:log_id>/requeue/', email_audit.email_audit_requeue_view, name='email_audit_requeue'),
+    path('audit/emails/<int:log_id>/delete/', email_audit.email_audit_delete_view, name='email_audit_delete'),
 
     # Pipeline Automation URLs
     path('pipeline-automations/', pipeline_automations.pipeline_automation_list_view, name='pipeline_automation_list'),
