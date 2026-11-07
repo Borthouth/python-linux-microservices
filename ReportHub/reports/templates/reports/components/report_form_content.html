@@ -13,7 +13,7 @@
     </div>
 
     <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
-        <form method="post" class="space-y-6">
+        <form method="post" class="space-y-6" x-data="reportBuilder()">
             {% csrf_token %}
             <input type="hidden" name="is_active" value="{{ form.instance.is_active|yesno:'true,false' }}">
 
@@ -47,12 +47,7 @@
 
             <!-- Data Source & Base Table Row -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4" 
-                 x-data="reportFormSync()"
-                 x-init="
-                     selectedSource = '{{ form.instance.source_id|default:'' }}';
-                     selectedTable = '{{ form.instance.base_table_id|default:'' }}';
-                     if (selectedSource) { loadTables(selectedSource, true); }
-                 ">
+                 x-data="reportFormSync()">
                 <div>
                     <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Data Source</label>
                     {{ form.source }}
@@ -60,11 +55,45 @@
                 <div>
                     <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Base Table</label>
                     {{ form.base_table }}
+                    <p x-show="tableLoadMessage" x-text="tableLoadMessage" class="mt-1.5 text-xs text-amber-400"></p>
                 </div>
             </div>
 
             <!-- Visual Report Builder & Aggregations Workspace -->
-            <div class="bg-slate-950 border border-slate-800 rounded-xl p-5 space-y-5" x-data="reportBuilder()">
+            <div class="bg-slate-950 border border-slate-800 rounded-xl p-5 space-y-5">
+
+                <section class="rounded-xl border border-indigo-500/20 bg-indigo-500/5 p-4 space-y-3">
+                    <div>
+                        <h2 class="text-sm font-bold text-indigo-200">Draft with Local AI</h2>
+                        <p class="mt-1 text-xs text-slate-400">Describe the report you need. The local model uses this source's table and relationship metadata to suggest fields and layout; it does not receive row data or generate executable SQL.</p>
+                    </div>
+                    <textarea x-model="aiDescription"
+                              maxlength="2000"
+                              rows="3"
+                              placeholder="Example: Show [metric or records] by [category], grouped by [field] and sorted by [metric]."
+                              class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-indigo-500 focus:outline-none"></textarea>
+                    <div>
+                        <button type="button"
+                                @click="generateReportDesign()"
+                                :disabled="aiLoading"
+                                class="inline-flex items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-60">
+                            <span x-text="aiLoading ? 'Generating draft...' : 'Generate report draft'"></span>
+                        </button>
+                    </div>
+                    <div x-show="aiDesignMessage"
+                         x-cloak
+                         :class="aiDesignError
+                             ? 'border-red-500/40 bg-red-500/10 text-red-200'
+                             : (aiLoading
+                                 ? 'border-blue-500/40 bg-blue-500/10 text-blue-200'
+                                 : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200')"
+                         class="flex items-start gap-2.5 rounded-lg border px-3.5 py-3 text-sm font-medium"
+                         role="status"
+                         aria-live="polite">
+                        <span class="mt-px font-bold" aria-hidden="true" x-text="aiDesignError ? '!' : (aiLoading ? '…' : '✓')"></span>
+                        <p x-text="aiDesignMessage"></p>
+                    </div>
+                </section>
                 
                 <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 pb-4 border-b border-slate-800">
                     <div>
@@ -85,29 +114,61 @@
                         </button>
                     </div>
                 </div>
+                <p class="text-xs text-slate-500"
+                   x-text="reportType === 'tabular'
+                       ? 'Each result row represents one source record.'
+                       : 'Grouped Summary calculates selected aggregates for each combination of unaggregated columns. If every column has an aggregate, the report returns one overall summary row.'"></p>
 
                 <template x-if="hasInvalidColumns">
                     <div class="bg-red-500/10 border border-red-500/30 rounded-xl p-3.5 flex items-start gap-3 text-red-300 text-xs">
                         <span class="text-base leading-none">🚫</span>
                         <div>
-                            <strong class="font-semibold">Schema Mismatch:</strong> Active columns (<span x-text="invalidColumnNames"></span>) do not exist in this table. Remove them before saving.
+                            <strong class="font-semibold">Schema Mismatch:</strong> Active columns (<span x-text="invalidColumnNames"></span>) are not available for the selected tables.
                         </div>
                     </div>
                 </template>
 
+                <template x-if="hasDuplicateColumns">
+                    <div class="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3.5 flex items-start gap-3 text-amber-300 text-xs">
+                        <span class="text-base leading-none">⚠</span>
+                        <div>
+                            <strong class="font-semibold">Duplicate columns:</strong>
+                            <span x-text="duplicateColumnNames"></span> appear more than once with the same aggregate. You can still save the report; remove or change an aggregate if this is unintentional.
+                        </div>
+                    </div>
+                </template>
+
+                <div x-show="relatedTables.length > 0" class="rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">Related Tables</h3>
+                    <p class="mt-1 text-xs text-slate-500">Add tables connected directly to the base table by a foreign key.</p>
+                    <div class="mt-3 flex flex-wrap gap-2">
+                        <template x-for="table in relatedTables" :key="table.key">
+                            <label class="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:border-indigo-500/50">
+                                <input type="checkbox"
+                                       :checked="selectedRelationships.includes(table.key)"
+                                       @change="toggleRelationship(table)"
+                                       class="rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-indigo-500">
+                                <span x-text="table.label"></span>
+                                <span class="text-slate-500" x-text="'via ' + table.join_pairs.map(pair => pair.base_field).join(', ')"></span>
+                            </label>
+                        </template>
+                    </div>
+                </div>
+
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     
                     <!-- Available Fields Palette -->
-                    <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-3.5 flex flex-col h-[380px]">
+                    <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-3.5 flex flex-col h-[600px]">
                         <div class="flex justify-between items-center mb-2 pb-2 border-b border-slate-800 shrink-0">
                             <span class="text-xs font-bold text-slate-300 uppercase">Available Fields</span>
                             <span class="text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded-full" x-text="availableFields.length + ' fields'"></span>
                         </div>
-                        <div class="min-h-[280px] flex-1 overflow-y-auto space-y-1.5 pr-2">
-                            <template x-for="field in availableFields" :key="field">
-                                <div @click="addField(field)" 
+                        <p class="mb-2 text-[10px] text-slate-500">Re-run source ingestion after adding report fields or joins so the columns are available in ClickHouse.</p>
+                        <div class="slate-scrollbar my-2 min-h-0 flex-1 overflow-y-auto space-y-1.5 pr-2 py-2">
+                            <template x-for="field in availableFields" :key="field.field">
+                                <div @click="addField(field)"
                                      class="bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-indigo-500/50 p-2.5 rounded-xl cursor-pointer transition flex justify-between items-center">
-                                    <span class="text-xs font-mono text-slate-200" x-text="field"></span>
+                                    <span class="text-xs font-mono text-slate-200" x-text="field.table_name + '.' + field.field_name"></span>
                                     <span class="text-[10px] text-indigo-400">+ Add</span>
                                 </div>
                             </template>
@@ -115,13 +176,13 @@
                     </div>
 
                     <!-- Active Columns & Aggregates Workspace -->
-                    <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-3.5 lg:col-span-2 flex flex-col h-[380px]">
+                    <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-3.5 lg:col-span-2 flex flex-col h-[600px]">
                         <div class="flex justify-between items-center mb-2 pb-2 border-b border-slate-800 shrink-0">
                             <span class="text-xs font-bold text-slate-300 uppercase">Active Columns & Aggregate Functions</span>
                             <span class="text-xs font-mono text-indigo-400" x-text="selectedColumns.length + ' active'"></span>
                         </div>
 
-                        <div class="min-h-0 flex-1 overflow-y-auto space-y-2 pr-2">
+                        <div class="slate-scrollbar my-2 min-h-0 flex-1 overflow-y-auto space-y-2 pr-2 py-2">
                             <template x-for="(col, index) in selectedColumns" :key="index">
                                 <div class="border p-2.5 rounded-xl flex items-center gap-2"
                                      :class="isFieldValid(col.field) ? 'bg-slate-950 border-slate-800' : 'bg-red-950/20 border-red-500/50'">
@@ -129,11 +190,11 @@
                                         <button type="button" @click="moveUp(index)" :disabled="index === 0" class="hover:text-white disabled:opacity-20">▲</button>
                                         <button type="button" @click="moveDown(index)" :disabled="index === selectedColumns.length - 1" class="hover:text-white disabled:opacity-20">▼</button>
                                     </div>
-                                    <div class="w-24 truncate text-xs font-mono text-indigo-300" x-text="col.field"></div>
+                                    <div class="w-40 truncate text-xs font-mono text-indigo-300" x-text="col.table_name + '.' + col.field_name"></div>
                                     <div class="flex-1">
                                         <input type="text" x-model="col.label" placeholder="Display Alias" class="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500">
                                     </div>
-                                    <div class="w-32">
+                                    <div x-show="reportType === 'grouped_summary'" class="w-32">
                                         <select x-model="col.aggregate" class="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500">
                                             <option value="">No Aggregate</option>
                                             <option value="SUM">SUM</option>
@@ -166,58 +227,111 @@
                                 </select>
                             </div>
                         </div>
+
                     </div>
 
                 </div>
 
-                <input type="hidden" name="config_json" :value="JSON.stringify({reportType, selectedColumns, showTotals, summaryPosition})">
-            </div>
-
-            <!-- Filter Rules -->
-            <div>
-                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                    {{ form.filter_config_input.label }}
-                </label>
-                {{ form.filter_config_input }}
-                {% if form.filter_config_input.errors %}
-                    <p class="mt-1.5 text-xs text-red-400">{{ form.filter_config_input.errors.0 }}</p>
-                {% endif %}
-            </div>
-
-            <!-- Export Format -->
-            <div>
-                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                    {{ form.export_format.label }}
-                </label>
-                {{ form.export_format }}
-                {% if form.export_format.errors %}
-                    <p class="mt-1.5 text-xs text-red-400">{{ form.export_format.errors.0 }}</p>
-                {% endif %}
-            </div>
-
-            <!-- Automated Email Distribution Section -->
-            <div class="bg-slate-950 border border-slate-800 rounded-xl p-5 space-y-4">
-                <h3 class="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center">
-                    <span class="mr-2">📧</span> Automated Email Distribution
-                </h3>
-                
-                <div>
-                    <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2" for="{{ form.email_recipients.id_for_label }}">
-                        Recipient Email Addresses
+                <section class="rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+                    <p class="mt-1 mb-2 text-[11px] text-slate-500">Choose the file format for generated report exports.</p>
+                    <label class="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-2">
+                        {{ form.export_format.label }}
                     </label>
-                    {{ form.email_recipients }}
-                    <p class="text-xs text-slate-500 mt-1">Separate multiple email addresses with commas.</p>
-                    {% for error in form.email_recipients.errors %}
-                        <p class="text-xs text-red-400 mt-1">{{ error }}</p>
-                    {% endfor %}
-                </div>
+                    {{ form.export_format }}
+                    {% if form.export_format.errors %}
+                        <p class="mt-1.5 text-xs text-red-400">{{ form.export_format.errors.0 }}</p>
+                    {% endif %}
+                </section>
 
-                <div class="flex items-center space-x-3 pt-2">
-                    {{ form.is_email_active }}
-                    <label class="text-sm text-slate-300 font-medium select-none" for="{{ form.is_email_active.id_for_label }}">
-                        Enable automated email dispatches upon successful execution
+                <section x-show="supportsChartExport" class="rounded-xl border border-slate-800 bg-slate-900/50 p-4 space-y-3">
+                    <div>
+                        <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">Export Chart</h3>
+                        <p class="mt-1 text-[11px] text-slate-500">PDF and Excel exports support charts. Choose a category and numeric value from the active report columns.</p>
+                    </div>
+                    <label class="text-[11px] text-slate-400">
+                        Chart type
+                        <select x-model="chart.type" class="mt-1 w-full max-w-xs bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500">
+                            <option value="">No chart</option>
+                            <option value="bar">Bar chart</option>
+                            <option value="line">Line chart</option>
+                            <option value="pie">Pie chart</option>
+                        </select>
                     </label>
-                </div>
+                    <div x-show="chart.type" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        <label class="text-[11px] text-slate-400">
+                            Category
+                            <select x-model.number="chart.categoryIndex" class="mt-1 w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                                <option :value="null">Choose a field</option>
+                                <template x-for="(col, index) in selectedColumns" :key="'category-' + index">
+                                    <option :value="index" x-text="col.label || col.field_name"></option>
+                                </template>
+                            </select>
+                        </label>
+                        <label class="text-[11px] text-slate-400">
+                            Numeric value
+                            <select x-model.number="chart.valueIndex" class="mt-1 w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                                <option :value="null">Choose a field</option>
+                                <template x-for="(col, index) in selectedColumns" :key="'value-' + index">
+                                    <option :value="index" x-text="col.label || col.field_name"></option>
+                                </template>
+                            </select>
+                        </label>
+                        <label class="text-[11px] text-slate-400">
+                            Group values using
+                            <select x-model="chart.aggregation" class="mt-1 w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                                <option value="SUM">SUM</option>
+                                <option value="COUNT">COUNT</option>
+                                <option value="AVG">AVERAGE</option>
+                                <option value="MIN">MINIMUM</option>
+                                <option value="MAX">MAXIMUM</option>
+                            </select>
+                        </label>
+                    </div>
+                    <label x-show="chart.type" class="block text-[11px] text-slate-400">
+                        Chart title (optional)
+                        <input type="text" x-model="chart.title" maxlength="255" class="mt-1 w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                    </label>
+                    <p x-show="chart.type && (chart.categoryIndex === null || chart.valueIndex === null || chart.categoryIndex === chart.valueIndex)"
+                       class="text-xs text-amber-400">Choose two different report fields for the chart.</p>
+                </section>
+
+                <section x-show="supportsAiSummary" class="rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+                    <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">AI Summary</h3>
+                    <p class="mt-1 text-xs text-slate-500">Add a concise overview to the export using aggregate statistics only. Requires the local Ollama service.</p>
+                    <div class="mt-3 flex flex-wrap gap-2">
+                        <label class="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:border-indigo-500/50">
+                            {{ form.include_ai_summary }}
+                            <span>{{ form.include_ai_summary.label }}</span>
+                        </label>
+                    </div>
+                </section>
+
+                <section class="rounded-xl border border-slate-800 bg-slate-900/50 p-4 space-y-3">
+                    <div>
+                        <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">Automated Email Distribution</h3>
+                        <p class="mt-1 text-xs text-slate-500">Send completed report exports to configured recipients.</p>
+                    </div>
+
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1.5" for="{{ form.email_recipients.id_for_label }}">
+                            Recipient Email Addresses
+                        </label>
+                        {{ form.email_recipients }}
+                        <p class="mt-1 text-[11px] text-slate-500">Separate multiple email addresses with commas.</p>
+                        {% for error in form.email_recipients.errors %}
+                            <p class="mt-1 text-xs text-red-400">{{ error }}</p>
+                        {% endfor %}
+                    </div>
+
+                    <div class="flex flex-wrap gap-2">
+                        <label class="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:border-indigo-500/50">
+                            {{ form.is_email_active }}
+                            <span>Enable automated email dispatches upon successful execution</span>
+                        </label>
+                    </div>
+                </section>
+
+                <input type="hidden" name="config_json" :value="JSON.stringify({reportType, selectedColumns, selectedRelationships, showTotals, summaryPosition, chart})">
             </div>
 
             <!-- Form Action Buttons -->

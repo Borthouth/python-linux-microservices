@@ -8,7 +8,8 @@
 
     <!-- Reusable Search Bar Component -->
     <div class="mb-6">
-        {% include 'control_plane/components/search_bar.html' with placeholder="Search data sources..." %}
+        {% url 'control_plane:user_edit_access' target_user.id as search_action_url %}
+        {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search data sources..." search_query=source_search %}
     </div>
 
     <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">

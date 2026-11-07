@@ -4,25 +4,8 @@
         <p class="text-gray-400 text-sm mt-1">Track internal configuration changes and administrative activity across data sources and users.</p>
     </div>
 
-    <!-- Search & Filter Bar -->
-    <form method="get" class="mb-6 flex gap-4 items-center">
-        <div class="flex-1">
-            <input type="text" name="q" value="{{ search_query }}" placeholder="Search by source, name, or user..." 
-                   class="w-full bg-gray-900 border border-gray-700 text-white px-4 py-2 rounded-lg focus:outline-none focus:border-indigo-500">
-        </div>
-        <div>
-            <select name="action" class="bg-gray-900 border border-gray-700 text-white px-4 py-2 rounded-lg focus:outline-none focus:border-indigo-500">
-                <option value="">All Actions</option>
-                <option value="+" {% if selected_action == '+' %}selected{% endif %}>Created (+)</option>
-                <option value="~" {% if selected_action == '~' %}selected{% endif %}>Updated (~)</option>
-                <option value="-" {% if selected_action == '-' %}selected{% endif %}>Deleted (-)</option>
-            </select>
-        </div>
-        <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-lg font-medium transition">Filter</button>
-        {% if search_query or selected_action %}
-            <a href="{% url 'control_plane:audit_log' %}" class="text-gray-400 hover:text-white text-sm underline">Reset</a>
-        {% endif %}
-    </form>
+    {% url 'control_plane:audit_log' as search_action_url %}
+    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search by source, name, or user..." filter_name="action" filter_value=selected_action filter_label="All Actions" filter_options=filter_options search_query=search_query %}
 
     <!-- Component: Table -->
     {% include 'control_plane/audit/components/audit_table.html' %}

@@ -14,6 +14,8 @@ urlpatterns = [
     path('execution/<uuid:execution_pk>/download/', views.report_download, name='report_download'),
     path('ajax/load-tables/', views.ajax_load_tables, name='ajax_load_tables'),
     path('ajax/load-columns/', views.ajax_load_table_columns, name='ajax_load_table_columns'),
+    path('ajax/load-related-tables/', views.ajax_load_related_tables, name='ajax_load_related_tables'),
     path('ajax/load-fields/', views.ajax_load_table_fields, name='ajax_load_table_fields'),
+    path('ajax/ai-design/', views.ai_report_design, name='ai_report_design'),
     path('<uuid:pk>/status/', views.report_status, name='report_status'),
 ]

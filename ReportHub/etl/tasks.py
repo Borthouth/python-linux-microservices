@@ -7,6 +7,7 @@ import pyodbc
 import sqlalchemy as sa
 import pandas as pd
 import clickhouse_connect
+from django.db.models import Q
 from django.conf import settings
 from celery import shared_task, Task
 from django.utils import timezone
@@ -19,6 +20,7 @@ from control_plane.models import (
     DbChoice
 )
 from control_plane.utils import set_task_progress
+from reports.models import ReportDefinition
 
 
 class CancellableETLTask(Task):
@@ -46,7 +48,7 @@ class CancellableETLTask(Task):
                 password=getattr(settings, 'CLICKHOUSE_PASSWORD', ''),
             )
             ch_client.command(f"KILL QUERY WHERE query_id = '{query_id}' SYNC")
-        except Exception:
+        except Exception as e:
             pass
 
 
@@ -407,6 +409,37 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
 
     preparer = source_engine.dialect.identifier_preparer
 
+    required_fields_by_table = {}
+    source_relationships = list(SourceRelationship.objects.filter(source=profile))
+    for relationship in source_relationships:
+        required_fields_by_table.setdefault(
+            (relationship.from_schema, relationship.from_table), set()
+        ).add(relationship.from_field)
+        required_fields_by_table.setdefault(
+            (relationship.to_schema, relationship.to_table), set()
+        ).add(relationship.to_field)
+
+    for report in ReportDefinition.objects.filter(source=profile):
+        config_columns = (report.config or {}).get('selectedColumns', [])
+        for column in config_columns:
+            if not isinstance(column, dict):
+                continue
+            table_id = column.get('table_id')
+            field_name = column.get('field_name')
+            if not table_id or not field_name:
+                continue
+            source_table = SourceTable.objects.filter(source=profile, pk=table_id).first()
+            if source_table:
+                required_fields_by_table.setdefault(
+                    (source_table.schema_name, source_table.table_name), set()
+                ).add(field_name)
+
+        for field_name in report.selected_fields or []:
+            if isinstance(field_name, str):
+                required_fields_by_table.setdefault(
+                    (report.base_table.schema_name, report.base_table.table_name), set()
+                ).add(field_name)
+
     for index, table in enumerate(source_tables, start=1):
         profile.refresh_from_db()
         if not profile.is_active:
@@ -425,30 +458,47 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
             source_name=profile.name
         )
 
-        selected_fields = table.fields.filter(is_selected=True)
-        if not selected_fields.exists():
+        required_field_names = required_fields_by_table.get(
+            (table.schema_name, table.table_name), set()
+        )
+        selected_fields = list(
+            table.fields.filter(
+                Q(is_selected=True) | Q(field_name__in=required_field_names)
+            )
+        )
+        if not selected_fields:
             continue  
 
         field_names = [f.field_name for f in selected_fields]
         ch_table_name = f"source_{profile.pk}__{table.schema_name}_{table.table_name}".lower()
+        staging_table_name = (
+            f"{ch_table_name}__staging_{str(task_id).replace('-', '_')}"
+        ).lower()
 
         quoted_col_names = [preparer.quote(f.field_name) for f in selected_fields]
         select_cols_sql = ", ".join(quoted_col_names)
 
-        columns_sql = ", ".join([f"`{f.field_name}` {map_to_clickhouse_type(f.data_type)}" for f in selected_fields])
+        columns_sql = ", ".join([
+            f"`{f.field_name.replace('`', '``')}` {map_to_clickhouse_type(f.data_type)}"
+            for f in selected_fields
+        ])
         create_table_query = f"""
-            CREATE TABLE IF NOT EXISTS {ch_table_name} (
+            CREATE TABLE {staging_table_name} (
                 {columns_sql}
             ) ENGINE = MergeTree()
             ORDER BY tuple();
         """
         try:
             ch_client.command(
+                f"DROP TABLE IF EXISTS {staging_table_name}",
+                transport_settings={"query_id": query_id},
+            )
+            ch_client.command(
                 create_table_query,
                 transport_settings={"query_id": query_id},
             )
         except Exception as e:
-            logger.error(f"Failed to create ClickHouse table {ch_table_name}: {e}")
+            logger.error(f"Failed to create ClickHouse staging table {staging_table_name}: {e}")
             raise
 
         quoted_table_name = preparer.quote(table.table_name)
@@ -472,6 +522,7 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
                     profile.refresh_from_db()
                     if not profile.is_active:
                         ch_client.command(f"KILL QUERY WHERE query_id = '{query_id}' SYNC")
+                        ch_client.command(f"DROP TABLE IF EXISTS {staging_table_name}")
                         profile.last_sync_status = SyncStatus.CANCELLED
                         profile.save(update_fields=['last_sync_status'])
                         set_task_progress(
@@ -496,7 +547,7 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
                     data_rows = chunk.values.tolist()
                     if data_rows:
                         ch_client.insert(
-                            ch_table_name,
+                            staging_table_name,
                             data_rows,
                             column_names=field_names,
                             transport_settings={"query_id": query_id},
@@ -506,11 +557,37 @@ def ingest_source_to_clickhouse_task(self, source_pk, batch_size=None):
                     if chunk_count >= max_chunks_per_burst:
                         time.sleep(0.1)
                         chunk_count = 0
-                        
+
+            target_exists = ch_client.query(
+                f"EXISTS TABLE {ch_table_name}",
+                transport_settings={"query_id": query_id},
+            ).result_rows[0][0]
+            if target_exists:
+                ch_client.command(
+                    f"EXCHANGE TABLES {ch_table_name} AND {staging_table_name}",
+                    transport_settings={"query_id": query_id},
+                )
+                ch_client.command(
+                    f"DROP TABLE {staging_table_name}",
+                    transport_settings={"query_id": query_id},
+                )
+            else:
+                ch_client.command(
+                    f"RENAME TABLE {staging_table_name} TO {ch_table_name}",
+                    transport_settings={"query_id": query_id},
+                )
+
             logger.info(f"Successfully ingested table {table.table_name} into ClickHouse as {ch_table_name}")
         except Exception as e:
+            try:
+                ch_client.command(f"DROP TABLE IF EXISTS {staging_table_name}")
+            except Exception as cleanup_error:
+                logger.error(
+                    f"Failed to remove ClickHouse staging table {staging_table_name}: "
+                    f"{cleanup_error}"
+                )
             logger.error(f"Error streaming data for table {table.table_name}: {e}")
-            raise e
+            raise
 
     profile.last_synced = timezone.now()
     profile.last_sync_status = SyncStatus.SUCCESS

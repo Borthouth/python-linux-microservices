@@ -9,23 +9,21 @@ class ReportDefinitionForm(forms.ModelForm):
         required=False,
         widget=forms.HiddenInput()
     )
-    
-    filter_config_input = forms.CharField(
-        widget=forms.Textarea(attrs={
-            'rows': 3,
-            'placeholder': '{"status": "active"}',
-            'class': 'bg-gray-900 text-white font-mono placeholder-gray-500 shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-700 rounded-md px-3 py-2 border'
-        }),
+    include_ai_summary = forms.BooleanField(
         required=False,
-        label="Filter Rules (JSON)"
+        label="Include AI summary",
+        widget=forms.CheckboxInput(attrs={
+            'class': 'mt-0.5 rounded bg-slate-900 border-slate-700 text-indigo-600 focus:ring-0'
+        }),
     )
 
     class Meta:
         model = ReportDefinition
         fields = [
             'name', 'description', 'source', 'base_table', 
-            'selected_fields_json', 'filter_config_input', 
-            'export_format', 'email_recipients', 'is_email_active', 'is_active'
+            'selected_fields_json',
+            'export_format', 'include_ai_summary', 'email_recipients',
+            'is_email_active', 'is_active'
         ]
         widgets = {
             'name': forms.TextInput(attrs={
@@ -44,7 +42,8 @@ class ReportDefinitionForm(forms.ModelForm):
                 'class': 'bg-gray-900 text-white shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-700 rounded-md px-3 py-2 border'
             }),
             'export_format': forms.Select(attrs={
-                'class': 'bg-gray-900 text-white shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-700 rounded-md px-3 py-2 border'
+                'id': 'id_export_format',
+                'class': 'bg-slate-900 text-white block w-full border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-indigo-500'
             }),
             'email_recipients': forms.Textarea(attrs={
                 'rows': 2,
@@ -66,8 +65,8 @@ class ReportDefinitionForm(forms.ModelForm):
         if self.instance and self.instance.pk:
             if self.instance.selected_fields:
                 self.initial['selected_fields_json'] = json.dumps(self.instance.selected_fields)
-            if self.instance.filter_config:
-                self.initial['filter_config_input'] = json.dumps(self.instance.filter_config, indent=2)
+            config = self.instance.config if isinstance(self.instance.config, dict) else {}
+            self.initial['include_ai_summary'] = bool(config.get('includeAiSummary', False))
 
         # Handle dependent dropdown filtering for base_table
         source_id = None
@@ -104,25 +103,11 @@ class ReportDefinitionForm(forms.ModelForm):
         else:
             cleaned_data['selected_fields'] = []
 
-        # 2. Validate filter_config
-        filter_str = cleaned_data.get('filter_config_input')
-        if filter_str:
-            try:
-                parsed_filter = json.loads(filter_str)
-                if not isinstance(parsed_filter, dict):
-                    raise forms.ValidationError("Filter rules must be a JSON dictionary object.")
-                cleaned_data['filter_config'] = parsed_filter
-            except json.JSONDecodeError as e:
-                raise forms.ValidationError({'filter_config_input': f'Invalid JSON format: {e}'})
-        else:
-            cleaned_data['filter_config'] = {}
-
         return cleaned_data
 
     def save(self, commit=True):
         instance = super().save(commit=False)
         instance.selected_fields = self.cleaned_data.get('selected_fields', [])
-        instance.filter_config = self.cleaned_data.get('filter_config', {})
         if commit:
             instance.save()
         return instance

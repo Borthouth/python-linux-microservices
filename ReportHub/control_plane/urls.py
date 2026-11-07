@@ -30,6 +30,7 @@ urlpatterns = [
 
     # User management URLs
     path('users/', users.user_management_view, name='user_management'),
+    path('users/<int:user_id>/toggle-active/', users.user_toggle_active_view, name='user_toggle_active'),
     path('users/<int:user_id>/edit/', users.user_edit_view, name='user_edit'),  
     path('users/<int:user_id>/access/', users.user_edit_access_view, name='user_edit_access'),
     path('password-change/', users.password_change_view, name='password_change'),
@@ -70,4 +71,3 @@ urlpatterns = [
     path('dlq/', dlq.dlq_list_view, name='dlq_list'),
     path('dlq/<str:task_id>/requeue/', dlq.dlq_requeue_view, name='dlq_requeue'),
 ]
-

@@ -158,6 +158,12 @@ def pipeline_history_view(request):
         'query': query,
         'search_query': query,
         'status_filter': status_filter,
+        'filter_options': [
+            {'value': 'SUCCESS', 'label': 'Success'},
+            {'value': 'RUNNING', 'label': 'Running'},
+            {'value': 'FAILED', 'label': 'Failed'},
+            {'value': 'CANCELLED', 'label': 'Cancelled'},
+        ],
     }
     return render(request, 'control_plane/pipeline_history.html', context)
 
@@ -195,6 +201,12 @@ def report_history_view(request):
         'query': query,
         'search_query': query,
         'status_filter': status_filter,
+        'filter_options': [
+            {'value': 'completed', 'label': 'Completed'},
+            {'value': 'running', 'label': 'Running'},
+            {'value': 'failed', 'label': 'Failed'},
+            {'value': 'cancelled', 'label': 'Cancelled'},
+        ],
     }
     return render(request, 'control_plane/report_history.html', context)
 

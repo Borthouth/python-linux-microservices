@@ -7,32 +7,8 @@
         </div>
     </div>
 
-    <!-- Search Bar & Status Filter Form -->
-    <form method="get" class="mb-6 flex flex-col xl:flex-row gap-4 items-center justify-between">
-        <div class="flex gap-4 items-center w-full xl:max-w-2xl">
-            <div class="flex-1">
-                <input type="text" name="q" value="{{ search_query }}" placeholder="Search recipient or report..." 
-                       class="w-full bg-slate-900 border border-slate-800 text-white px-4 py-2 rounded-xl focus:outline-none focus:border-indigo-500 text-sm">
-            </div>
-            <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium rounded-xl transition shadow-sm whitespace-nowrap">Search</button>
-            {% if search_query %}
-                <a href="{% url 'control_plane:email_audit_logs' %}{% if current_status %}?status={{ current_status }}{% endif %}" class="text-slate-400 hover:text-white text-sm underline shrink-0">Reset</a>
-            {% endif %}
-        </div>
-
-        <!-- Status Filter Pills -->
-        <div class="flex items-center gap-1.5 bg-slate-900/50 p-1.5 rounded-xl border border-slate-800/80 shrink-0 overflow-x-auto max-w-full">
-            {% if search_query %}
-                <input type="hidden" name="q" value="{{ search_query }}">
-            {% endif %}
-            
-            <a href="{% if search_query %}?q={{ search_query }}{% else %}.{% endif %}" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition {% if not current_status %}bg-indigo-600 text-white shadow{% else %}text-slate-400 hover:text-slate-200{% endif %}">All</a>
-            <a href="?status=sent{% if search_query %}&q={{ search_query }}{% endif %}" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition {% if current_status == 'sent' %}bg-indigo-600 text-white shadow{% else %}text-slate-400 hover:text-slate-200{% endif %}">Sent</a>
-            <a href="?status=delivered{% if search_query %}&q={{ search_query }}{% endif %}" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition {% if current_status == 'delivered' %}bg-indigo-600 text-white shadow{% else %}text-slate-400 hover:text-slate-200{% endif %}">Delivered</a>
-            <a href="?status=failed{% if search_query %}&q={{ search_query }}{% endif %}" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition {% if current_status == 'failed' %}bg-indigo-600 text-white shadow{% else %}text-slate-400 hover:text-slate-200{% endif %}">Failed</a>
-            <a href="?status=bounced{% if search_query %}&q={{ search_query }}{% endif %}" class="px-3 py-1.5 rounded-lg text-xs font-semibold transition {% if current_status == 'bounced' %}bg-indigo-600 text-white shadow{% else %}text-slate-400 hover:text-slate-200{% endif %}">Bounced</a>
-        </div>
-    </form>
+    {% url 'control_plane:email_audit_logs' as search_action_url %}
+    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search recipient or report..." filter_name="status" filter_value=current_status filter_label="All Statuses" filter_options=filter_options search_query=search_query %}
 
     <!-- Table Card Container -->
     <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden mb-6 max-w-full">
@@ -140,7 +116,7 @@
                 <button @click="inspectModalOpen = false" class="text-slate-400 hover:text-white text-sm shrink-0">✕</button>
             </div>
             
-            <div class="p-6 overflow-auto flex-1 font-mono text-xs text-red-300 bg-slate-950/80 whitespace-pre-wrap break-all" x-text="activeErrorMessage"></div>
+            <div class="slate-scrollbar p-6 overflow-auto flex-1 font-mono text-xs text-red-300 bg-slate-950/80 whitespace-pre-wrap break-all" x-text="activeErrorMessage"></div>
             
             <div class="px-6 py-4 border-t border-slate-800 bg-slate-950/50 flex justify-end">
                 <button @click="inspectModalOpen = false" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs rounded-xl transition">Close</button>

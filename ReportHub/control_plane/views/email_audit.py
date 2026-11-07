@@ -40,7 +40,14 @@ def email_audit_log_view(request):
         'page_obj': page_obj,
         'logs': page_obj,  
         'current_status': status_filter,
+        'status_filter': status_filter,
         'search_query': search_query,
+        'filter_options': [
+            {'value': 'sent', 'label': 'Sent'},
+            {'value': 'delivered', 'label': 'Delivered'},
+            {'value': 'failed', 'label': 'Failed'},
+            {'value': 'bounced', 'label': 'Bounced'},
+        ],
     }
     return render(request, 'control_plane/email_audit.html', context)
 

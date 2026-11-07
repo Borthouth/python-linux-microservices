@@ -11,7 +11,8 @@
 
     <!-- Search Component with bottom margin gap -->
     <div class="mb-6">
-        {% include "control_plane/components/search_bar.html" with placeholder="Search failed tasks by name or error summary..." %}
+        {% url 'control_plane:dlq_list' as search_action_url %}
+        {% include "control_plane/components/search_bar.html" with action_url=search_action_url placeholder="Search failed tasks by name or error summary..." search_query=search_query %}
     </div>
 
     <!-- DLQ Table Container -->

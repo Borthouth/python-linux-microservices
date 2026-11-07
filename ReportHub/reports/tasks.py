@@ -1,20 +1,24 @@
 import csv
 import json
 import io
-import pyodbc
-import pymysql
-import psycopg2
 import logging
 from datetime import datetime
+import clickhouse_connect
 from celery import shared_task, Task
 from django.utils import timezone
 from django.core.mail import EmailMessage
 from django.conf import settings
 from minio import Minio
 from .models import ReportDefinition, ReportExecution
+from .ai_summary import generate_report_summary
+from .charting import build_chart_data
+from .exporters import build_json_report, build_xlsx_report
+from .query_builder import build_clickhouse_report_query
+from .pdf_export import build_pdf_report
 from control_plane.utils import set_task_progress
 
 logger = logging.getLogger(__name__)
+PDF_MAX_ROWS = 5000
 
 
 class CancellableReportTask(Task):
@@ -153,93 +157,53 @@ def execute_report_task(self, report_id, execution_id=None):
             set_task_progress(task_id, percentage=10, status="CANCELLED", error="Cancelled before query")
             return "Execution cancelled before query."
 
-        table_name = report.base_table.table_name if hasattr(report.base_table, 'table_name') else str(report.base_table)
         config = report.config or {}
         selected_columns = config.get('selectedColumns', [])
         show_totals = config.get('showTotals', True)
         summary_position = config.get('summaryPosition', 'bottom')
-        
-        if selected_columns:
-            fields_to_query = [col['field'] for col in selected_columns]
-            headers = [col.get('label') or col['field'] for col in selected_columns]
-            aggregates = [col.get('aggregate', '').upper() for col in selected_columns]
-        else:
-            fields_to_query = report.selected_fields or []
-            headers = fields_to_query
-            aggregates = [''] * len(fields_to_query)
+        chart_config = config.get('chart')
+        include_ai_summary = config.get('includeAiSummary') is True
+        fields_to_query = selected_columns or report.selected_fields or []
 
         export_format = report.export_format.lower() if report.export_format else 'csv'
         row_count = 0
         rows = []
-        
-        # --- Stage 1: Database Query Execution (Progress: 30%) ---
+        pdf_truncated = False
+
+        # --- Stage 1: ClickHouse Query Execution (Progress: 30%) ---
         execution.progress_percentage = 30
         execution.save(update_fields=['progress_percentage'])
-        set_task_progress(task_id, percentage=30, status="RUNNING", current_step=f"Querying database for {report.name}...")
+        set_task_progress(task_id, percentage=30, status="RUNNING", current_step=f"Querying ClickHouse for {report.name}...")
 
-        if fields_to_query and table_name and report.source:
-            source = report.source
-            query = f"SELECT {', '.join(fields_to_query)} FROM {table_name}"
-            db_type = str(source.db_type).lower()
-            source_name = str(source.name).lower()
-            
-            if any(k in db_type or k in source_name for k in ['mssql', 'sql server', 'microsoft']):
-                conn_str = f"DRIVER={{ODBC Driver 18 for SQL Server}};SERVER={source.host},{source.port};DATABASE={source.database_name};UID={source.username};PWD={source.password};TrustServerCertificate=yes;"
-                conn = pyodbc.connect(conn_str)
-                cursor = conn.cursor()
-                cursor.execute(query)
-                while True:
-                    execution.refresh_from_db()
-                    if execution.is_cancelled:
-                        cursor.close()
-                        conn.close()
-                        raise InterruptedError("Report execution cancelled during fetch.")
+        query, headers, aggregates = build_clickhouse_report_query(report, fields_to_query)
+        if export_format == 'pdf':
+            query += f" LIMIT {PDF_MAX_ROWS + 1}"
 
-                    batch = cursor.fetchmany(1000)
-                    if not batch:
-                        break
-                    for row in batch:
-                        rows.append(list(row))
-                        row_count += 1
-                conn.close()
-
-            elif 'mysql' in db_type or 'mysql' in source_name:
-                conn = pymysql.connect(host=source.host, port=source.port, user=source.username, password=source.password, database=source.database_name)
-                cursor = conn.cursor()
-                cursor.execute(query)
-                while True:
-                    execution.refresh_from_db()
-                    if execution.is_cancelled:
-                        cursor.close()
-                        conn.close()
-                        raise InterruptedError("Report execution cancelled during fetch.")
-
-                    batch = cursor.fetchmany(1000)
-                    if not batch:
-                        break
-                    for row in batch:
-                        rows.append(list(row))
-                        row_count += 1
-                conn.close()
-
-            else:
-                conn = psycopg2.connect(host=source.host, port=source.port, user=source.username, password=source.password, dbname=source.database_name)
-                cursor = conn.cursor()
-                cursor.execute(query)
-                while True:
-                    execution.refresh_from_db()
-                    if execution.is_cancelled:
-                        cursor.close()
-                        conn.close()
-                        raise InterruptedError("Report execution cancelled during fetch.")
-
-                    batch = cursor.fetchmany(1000)
-                    if not batch:
-                        break
-                    for row in batch:
-                        rows.append(list(row))
-                        row_count += 1
-                conn.close()
+        ch_client = clickhouse_connect.get_client(
+            host=getattr(settings, 'CLICKHOUSE_HOST', 'localhost'),
+            port=getattr(settings, 'CLICKHOUSE_PORT', 8123),
+            username=getattr(settings, 'CLICKHOUSE_USER', 'default'),
+            password=getattr(settings, 'CLICKHOUSE_PASSWORD', ''),
+        )
+        try:
+            result = ch_client.query(
+                query,
+                settings={"join_use_nulls": 1},
+                transport_settings={"query_id": f"report_{execution.pk}"},
+            )
+            execution.refresh_from_db()
+            if execution.is_cancelled:
+                ch_client.command(
+                    f"KILL QUERY WHERE query_id = 'report_{execution.pk}' SYNC"
+                )
+                raise InterruptedError("Report execution cancelled during query.")
+            rows = [list(row) for row in result.result_rows]
+            if export_format == 'pdf' and len(rows) > PDF_MAX_ROWS:
+                pdf_truncated = True
+                rows = rows[:PDF_MAX_ROWS]
+            row_count = len(rows)
+        finally:
+            ch_client.close()
 
         # Check cancellation after heavy query
         execution.refresh_from_db()
@@ -259,12 +223,18 @@ def execute_report_task(self, report_id, execution_id=None):
         if show_totals and rows and len(rows) > 0:
             for col_idx, agg_type in enumerate(aggregates):
                 if not agg_type: continue 
-                col_name = fields_to_query[col_idx]
+                col_name = headers[col_idx]
                 col_values = [r[col_idx] for r in rows if r[col_idx] is not None]
                 computed_val = ""
                 
                 if agg_type == 'COUNT':
-                    computed_val = len(rows)
+                    if (config.get('reportType') or 'tabular') == 'grouped_summary':
+                        try:
+                            computed_val = sum(int(value) for value in col_values)
+                        except (TypeError, ValueError):
+                            computed_val = ""
+                    else:
+                        computed_val = len(rows)
                 elif agg_type in ['SUM', 'AVG', 'MIN', 'MAX'] and col_values:
                     try:
                         numeric_vals = [float(v) for v in col_values if str(v).replace('.', '', 1).isdigit() or isinstance(v, (int, float))]
@@ -278,68 +248,59 @@ def execute_report_task(self, report_id, execution_id=None):
                         pass
                 summary_lines.append(f"{col_name} ({agg_type.lower()}): {computed_val}")
 
+        chart_data = None
+        if export_format in {'pdf', 'xlsx'} and chart_config:
+            if not isinstance(chart_config, dict):
+                raise ValueError("The chart configuration must be an object.")
+            if chart_config.get("type"):
+                chart_data = build_chart_data(chart_config, headers, rows)
+
+        ai_summary = None
+        if include_ai_summary and export_format in {'pdf', 'xlsx', 'json'}:
+            ai_summary = (
+                generate_report_summary(headers, rows, pdf_truncated)
+                if rows else "No records were available to summarize."
+            )
+
         file_bytes = b''
         content_type = 'text/csv'
 
         if export_format == 'json':
-            structured_data = [dict(zip(headers, row)) for row in rows]
-            output_payload = {"data": structured_data}
-            if show_totals and summary_lines: output_payload["summaries"] = summary_lines
-            file_bytes = json.dumps(output_payload, default=str, indent=2).encode('utf-8')
+            file_bytes = build_json_report(
+                headers,
+                rows,
+                summary_lines,
+                show_totals,
+                ai_summary,
+            )
             content_type = 'application/json'
 
+        elif export_format == 'xlsx':
+            file_bytes = build_xlsx_report(
+                headers,
+                rows,
+                summary_lines,
+                show_totals,
+                summary_position,
+                chart_data,
+                ai_summary,
+            )
+            content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+
         elif export_format == 'pdf':
-            from reportlab.lib.pagesizes import letter
-            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-            from reportlab.lib.styles import getSampleStyleSheet
-            from reportlab.lib import colors
-
-            buffer = io.BytesIO()
-            doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
-            story = []
-            styles = getSampleStyleSheet()
-
-            story.append(Paragraph(f"<b>Report:</b> {report.name}", styles['Heading1']))
-            story.append(Paragraph(f"<b>Generated at:</b> {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
-            story.append(Spacer(1, 10))
-
-            def build_summary_paragraph():
-                if not summary_lines: return None
-                return Paragraph("<b>Summary Aggregates:</b><br/>" + "<br/>".join(summary_lines), styles['Normal'])
-
-            if show_totals and summary_lines and summary_position == 'top':
-                sum_para = build_summary_paragraph()
-                if sum_para:
-                    story.append(sum_para)
-                    story.append(Spacer(1, 20))
-
-            story.append(Paragraph("<b>Detailed Records</b>", styles['Heading2']))
-            table_data = [headers]
-            for row in rows:
-                table_data.append([str(val) if val is not None else '' for val in row])
-
-            col_widths = [doc.width / max(len(headers), 1)] * len(headers)
-            t = Table(table_data, colWidths=col_widths)
-            t.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4F46E5')),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 9),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#F9FAFB')),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E5E7EB')),
-                ('FONTSIZE', (0, 1), (-1, -1), 8),
-            ]))
-            story.append(t)
-
-            if show_totals and summary_lines and summary_position == 'bottom':
-                story.append(Spacer(1, 15))
-                sum_para = build_summary_paragraph()
-                if sum_para: story.append(sum_para)
-
-            doc.build(story)
-            file_bytes = buffer.getvalue()
-            buffer.close()
+            file_bytes = build_pdf_report(
+                report_name=report.name,
+                generated_at=timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
+                headers=headers,
+                rows=rows,
+                summary_lines=summary_lines,
+                show_totals=show_totals,
+                summary_position=summary_position,
+                chart_data=chart_data,
+                ai_summary=ai_summary,
+                pdf_truncated=pdf_truncated,
+                max_rows=PDF_MAX_ROWS,
+            )
             content_type = 'application/pdf'
 
         else: # CSV
@@ -369,7 +330,7 @@ def execute_report_task(self, report_id, execution_id=None):
         bucket_name = getattr(settings, 'AWS_STORAGE_BUCKET_NAME', 'reporthub-artifacts')
         if not minio_client.bucket_exists(bucket_name): minio_client.make_bucket(bucket_name)
 
-        file_extension = export_format if export_format in ['csv', 'json', 'pdf'] else 'csv'
+        file_extension = export_format if export_format in ['csv', 'json', 'pdf', 'xlsx'] else 'csv'
         file_name = f"reports/executions/{execution.pk}/artifact.{file_extension}"
         minio_client.put_object(bucket_name, file_name, io.BytesIO(file_bytes), len(file_bytes), content_type=content_type)
 

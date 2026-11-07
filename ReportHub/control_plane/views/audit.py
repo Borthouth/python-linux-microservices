@@ -126,5 +126,10 @@ def audit_log_view(request):
         'audit_data': audit_data,
         'search_query': q,
         'selected_action': action_type,
+        'filter_options': [
+            {'value': '+', 'label': 'Created (+)'},
+            {'value': '~', 'label': 'Updated (~)'},
+            {'value': '-', 'label': 'Deleted (-)'},
+        ],
     }
     return render(request, 'control_plane/audit_list.html', context)

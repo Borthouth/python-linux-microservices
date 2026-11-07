@@ -15,10 +15,15 @@ def is_system_admin(user):
 @user_passes_test(is_system_admin)
 def pipeline_automation_list_view(request):
     query = request.GET.get('q', '').strip()
+    status_filter = request.GET.get('status', '')
     tasks_list = PeriodicTask.objects.all().order_by('name')
     
     if query:
         tasks_list = tasks_list.filter(name__icontains=query)
+    if status_filter == 'enabled':
+        tasks_list = tasks_list.filter(enabled=True)
+    elif status_filter == 'disabled':
+        tasks_list = tasks_list.filter(enabled=False)
         
     paginator = Paginator(tasks_list, 10)  # Show 10 automations per page
     page_number = request.GET.get('page')
@@ -26,7 +31,12 @@ def pipeline_automation_list_view(request):
     
     return render(request, 'control_plane/pipeline_automation_list.html', {
         'page_obj': page_obj,
-        'search_query': query
+        'search_query': query,
+        'status_filter': status_filter,
+        'filter_options': [
+            {'value': 'enabled', 'label': 'Enabled'},
+            {'value': 'disabled', 'label': 'Disabled'},
+        ],
     })
 
 @login_required

@@ -1,4 +1,20 @@
 services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: reporthub-ollama
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: 5m
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
   postgres:
     image: postgres:15-alpine
     container_name: reporthub-postgres
@@ -80,6 +96,9 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b}
+      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT:-120}
       - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
       - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadminpassword}
       - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-reporthub-reports}
@@ -100,6 +119,7 @@ services:
       - redis
       - clickhouse
       - minio
+      - ollama
     restart: unless-stopped
 
   celery_ux_worker:
@@ -265,3 +285,6 @@ services:
 networks:
   shared_network:
     name: reporthub_shared_network
+
+volumes:
+  ollama_data:

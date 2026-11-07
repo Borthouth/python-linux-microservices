@@ -20,17 +20,8 @@
         </div>
     {% endif %}
 
-    <!-- Search Bar Form -->
-    <form method="get" class="mb-6 flex gap-4 items-center">
-        <div class="flex-1">
-            <input type="text" name="q" value="{{ search_query }}" placeholder="Search pipeline automations by task name..." 
-                   class="w-full bg-slate-900 border border-slate-800 text-white px-4 py-2 rounded-xl focus:outline-none focus:border-indigo-500 text-sm">
-        </div>
-        <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-xl text-sm font-medium transition">Search</button>
-        {% if search_query %}
-            <a href="{% url 'control_plane:pipeline_automation_list' %}" class="text-slate-400 hover:text-white text-sm underline">Reset</a>
-        {% endif %}
-    </form>
+    {% url 'control_plane:pipeline_automation_list' as search_action_url %}
+    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search pipeline automations by task name..." search_query=search_query filter_name="status" filter_value=status_filter filter_label="All Statuses" filter_options=filter_options %}
 
     <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
         <div class="overflow-x-auto">
@@ -95,7 +86,11 @@
                     {% empty %}
                         <tr>
                             <td colspan="5" class="py-12 text-center text-slate-500 text-sm">
-                                No scheduled tasks found matching your criteria.
+                                {% if search_query or status_filter %}
+                                    No scheduled tasks found matching your search and status.
+                                {% else %}
+                                    No scheduled tasks found.
+                                {% endif %}
                             </td>
                         </tr>
                     {% endfor %}

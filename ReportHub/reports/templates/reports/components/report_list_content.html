@@ -10,6 +10,9 @@
     </a>
 </div>
 
+{% url 'reports:report_list' as search_action_url %}
+{% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search report name, description, or data source..." search_query=search_query filter_name="status" filter_value=status_filter filter_label="All Statuses" filter_options=filter_options %}
+
 <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
     <div class="overflow-x-auto">
         <table class="w-full text-left border-collapse">
@@ -24,7 +27,7 @@
                 </tr>
             </thead>
             <tbody class="divide-y divide-slate-800/60 text-sm">
-                {% for report in reports %}
+                {% for report in page_obj %}
                 <tr class="hover:bg-slate-800/40 transition-all">
                     <td class="py-3.5 px-4">
                         <div class="font-medium text-white">{{ report.name }}</div>
@@ -57,8 +60,8 @@
                     </td>
                     <td class="py-3.5 px-4 text-right">
                         <div class="inline-flex items-center space-x-1.5 justify-end">
-                            {% if report.latest_status|lower == 'completed' and report.latest_file_path %}
-                                <a href="{% url 'reports:report_download' report.latest_execution_pk %}" class="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 text-xs font-medium rounded-lg transition-all">
+                            {% if report.downloadable_execution_pk and report.downloadable_file_path %}
+                                <a href="{% url 'reports:report_download' report.downloadable_execution_pk %}" class="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 text-xs font-medium rounded-lg transition-all">
                                     Download
                                 </a>
                             {% endif %}
@@ -93,12 +96,17 @@
                 {% empty %}
                 <tr>
                     <td colspan="6" class="py-12 text-center text-slate-500 text-sm">
+                {% if search_query or status_filter %}
+                    No reports match your search and status.
+                    {% else %}
                         No reports configured yet. Click "+ Create Report" to build your first analytical query.
+                    {% endif %}
                     </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
     </div>
+    {% include 'control_plane/components/pagination.html' %}
 </div>
 </div>

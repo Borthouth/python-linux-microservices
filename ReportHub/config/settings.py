@@ -222,6 +222,11 @@ CLICKHOUSE_PORT = env.int('CLICKHOUSE_PORT', default=8123)
 CLICKHOUSE_USER = env('CLICKHOUSE_USER', default='default')
 CLICKHOUSE_PASSWORD = env('CLICKHOUSE_PASSWORD', default='your_secure_password')
 
+# Local AI report design (Ollama)
+OLLAMA_BASE_URL = env('OLLAMA_BASE_URL', default='http://ollama:11434')
+OLLAMA_MODEL = env('OLLAMA_MODEL', default='qwen2.5:3b')
+OLLAMA_TIMEOUT = env.int('OLLAMA_TIMEOUT', default=120)
+
 # --- MinIO / S3 Storage Configuration (django-storages) ---
 STORAGES = {
     "default": {

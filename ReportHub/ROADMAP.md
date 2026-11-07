@@ -8,15 +8,16 @@ Track the development phases, architectural milestones, and codebase optimizatio
 - [x] Set up `docker-compose.yml` orchestrating PostgreSQL (tuned for analytics), Redis (with AOF persistence), Django Web, and Celery workers.
 - [x] Set up **Polyglot Test Database Environment (`docker-compose.test.yml`)** supporting PostgreSQL (`5433`), MySQL (`3307`), and Microsoft SQL Server (`1434`) simultaneously on non-conflicting local ports with isolated persistent volumes.
 - [x] Configure environment variables (`.env.example`) and verify local container startup.
-- [x] **Hyper-V LAN Network Bridging:** Configured Hyper-V External Switch bridging development VM directly to local subnet (`HomeLAN_Bridge`) for direct connectivity to network targets (QNAP NAS & RHEL 9 work environment).
+- [ ] **Hyper-V LAN Network Bridging:** Confirm the external Hyper-V bridge (`HomeLAN_Bridge`) and access to LAN targets; this machine-level setup cannot be verified from the repository.
 - [x] **Decoupled Architecture & Warehouse Engine:** Established dual-database design:
-  - **Control Plane (Operational DB):** Hardened Django database for configuration, user access matrix, and target metadata.
+  - **Control Plane (Operational DB):** Django database for configuration, user-source access assignments, and target metadata.
   - **Analytical Warehouse (Warehouse DB):** Standalone PostgreSQL / ClickHouse database setup using dynamic schema reflection.
 - [x] **Alembic Warehouse Migration Engine:** Fully configured standalone Alembic setup in virtual environment; validated transactional DDL execution (`alembic upgrade head`).
 - [x] **MinIO S3-Compatible Object Storage Architecture:**
-  - [x] Deploy MinIO container in `docker-compose.yml` bound to a dedicated persistent Docker volume (`minio_data`).
+  - [x] Deploy MinIO container in `docker-compose.yml` with data persisted to the host-mounted `./docker/minio_data` directory.
   - [x] Configure `django-storages` and `boto3` pointing to internal Docker S3 endpoints (`AWS_S3_ENDPOINT_URL = 'http://minio:9000'`).
-  - [x] Externalize root credentials in `.env` and restrict public port exposure (keep database, Redis, and MinIO internal to Docker network).
+  - [x] Support environment-provided MinIO credentials (development defaults remain in Compose).
+  - [ ] Restrict host-published service ports and replace development credential defaults for production deployments.
 
 ---
 
@@ -35,7 +36,7 @@ Track the development phases, architectural milestones, and codebase optimizatio
 - [x] Build control plane models for **Target Connections (`SourceProfile` / `DbChoice`)** supporting MySQL, PostgreSQL, and Microsoft SQL Server, alongside the **User-Source Access Matrix** (Layer 1 security).
 - [x] Implement **Self-Service User Profile Management** (nav-bar linked account view for users to update their details, first/last name, email, and password).
 - [x] **Unified Audit Trail Engine & Scheduled Task Governance:**
-  - Integrated full history auditing across control plane infrastructure models, `TrackedUser`, and custom standalone `ScheduleAuditLog` model (with `changes_data` JSON diff tracking).
+  - Integrated history auditing across selected control plane models, `TrackedUser`, and the standalone `PipelineAutomationAuditLog` model (with `changes_data` JSON diff tracking).
   - Built unified audit log viewer (`/control-plane/audit/`) with global timestamp sorting, action code filtering (`+`, `~`, `-`), and full-text search across sources, names, and modifier users.
   - Developed field-level diff engine displaying precise *Old → New* value comparisons inside a responsive modal.
   - Hardened frontend against Stored XSS by removing `|safe` rendering, utilizing DOM `data-*` attributes, and escaping dynamic values.
@@ -67,8 +68,8 @@ Track the development phases, architectural milestones, and codebase optimizatio
 
 ## Phase 4: Analytical Data Warehouse (ClickHouse Integration & Ingestion Engine)
 - [x] **ClickHouse Container Deployment & Security:**
-  - [x] Deploy ClickHouse alongside PostgreSQL/Redis in Docker (internal network; ports `9000`/`8123` not exposed publicly).
-  - [x] Secure default user and configure connection parameters for Django & Celery.
+  - [x] Deploy ClickHouse alongside PostgreSQL/Redis in Docker and configure Django/Celery connections.
+  - [ ] Restrict host-published ports `9000`/`8123` and replace development credential defaults for production deployments.
 - [x] **Data Model & Performance Optimization:**
   - [x] Establish isolated ClickHouse table namespacing (`source_{pk}__{schema}_{table}`) with `MergeTree` engines.
   - [x] Implement robust type mapping (`map_to_clickhouse_type`) and ISO string casting for temporal/complex types to prevent driver struct-packing crashes.
@@ -79,10 +80,12 @@ Track the development phases, architectural milestones, and codebase optimizatio
 
 ---
 
-## Phase 5: User Workspaces, Access Control & Collaboration
-- [x] **Built-in Auth Integration:** Retaining Django's standard `auth.User` model while extending it with a `UserProfile` model (`OneToOne`) for extended metadata and verified email storage.
-- [x] **Collaborative Workspaces:** Introducing `SharedWorkspace` and `WorkspaceMembership` models to allow multiple users to collaborate and share access to specific data sources, pipelines, and connections.
-- [x] **Permission Enforcement:** Implementing workspace-level access checks in views and decorators to secure pipeline execution and data source visibility.
+## Phase 5: User Management & Source Access Control
+- [x] **Built-in Auth Integration:** Use Django's standard `auth.User` model with profile and password management views.
+- [x] **User-Source Access Configuration:** Configure source access assignments and roles through `UserSourceAccess`.
+- [ ] **Collaborative Workspaces:** Add workspace and membership models for sharing data sources, pipelines, and connections across users.
+- [ ] **Permission Enforcement:** Apply source-access and workspace authorization consistently across report, pipeline, and data-management views.
+- [ ] **Tenant Row-Level Security:** Add and enforce company/tenant-scoped row filtering; `company_id` query injection is not currently implemented.
 
 ---
 
@@ -97,29 +100,28 @@ Track the development phases, architectural milestones, and codebase optimizatio
 ---
 
 ## Phase 7: SFTP & File Transfer Protocol Integration
-- [x] **Transfer Destinations Model:** Creating configuration models (`TransferDestination`) to securely store SFTP, FTP, or cloud storage target credentials (hosts, ports, authentication keys).
-- [x] **Automated Export Pipelines:** Hooking file generation (CSV, Excel, PDF) into a downstream Celery task that handles automated file transfers using robust Python transfer libraries (e.g., `paramiko`).
+- [ ] **Transfer Destinations Model:** Create configuration models to securely store SFTP, FTP, or cloud storage target credentials (hosts, ports, authentication keys).
+- [ ] **Automated Export Pipelines:** Hook generated report files into a downstream task that handles automated transfers using appropriate Python libraries.
 
 ---
 
 ## Phase 8: UI Framework, Navigation & Global Polish
 - [x] **Pure Tailwind CSS (Slate Palette):** Styling components (like action dropdowns, tables, and modals) using clean slate utilities (`slate-900`, `slate-800`, `slate-700`) and Alpine.js for lightweight interactivity.
 - [x] **Admin Navigation Dropdown:** Grouping administrative tools into clear categories:
-  - Users & Access Management (Profiles, Workspaces, Connection Permissions)
+  - Users & Access Management (Profiles, Source Access, Connection Permissions)
   - System Operations & Monitoring (DLQ, Task/Worker Status, Global Pipeline History)
-  - Integrations & Infrastructure (Email Settings, SFTP Destinations)
+  - Integrations & Infrastructure (Email Settings)
 - [x] **Global Cursor/Selection Optimization:** Applied a clean app-wide `select-none` approach on structural/UI chrome while targeted `select-text` preserves copy-paste usability on essential audit logs, error traces, and recipient strings.
 
 ---
 
-## Phase 9: Comprehensive Audit Suite
-- [x] **Expanding ReportHub's audit system into a multi-tab single pane of glass covering:**
-  - **UX & System Audit:** Administrative actions and general UI logs.
-  - **Queue Audit (DLQ):** Failed task tracking, stack trace rendering, and retry/purge actions.
-  - **Email Audit / Status:** Delivery tracking, failure logs, and bounce/delivery webhook monitoring.
-  - **File Transfer Audit:** Tracking SFTP/FTP/S3 uploads, file sizes, durations, and connection errors.
-  - **ETL & Ingestion Audit:** Row counts, batch performance, and ClickHouse synchronization history.
-  - **Security & Access Audit:** Permission changes, logins, and workspace membership updates.
+## Phase 9: Audit & Operational History
+- [x] Provide a unified view of available model-history records and pipeline-automation changes.
+- [x] Provide a searchable Dead Letter Queue interface for failed task inspection and requeue actions.
+- [x] Track report-email delivery states and provide email audit history and administrative actions.
+- [x] Provide pipeline and report execution history views.
+- [ ] Add dedicated file-transfer audit tracking for SFTP/FTP/object-storage deliveries.
+- [ ] Add consolidated ETL ingestion metrics and dedicated security/login audit views.
 
 ---
 
@@ -140,12 +142,22 @@ Track the development phases, architectural milestones, and codebase optimizatio
 ---
 
 ## Phase 11: Asynchronous Reporting, Query Generation & Export Pipelines
-- [ ] **Multi-Tiered Storage & Lifecycle Indexing:**
-  - [ ] Manage report lifecycle metadata in PostgreSQL (`PENDING`, `PROCESSING`, `COMPLETED`, `FAILED`).
-  - [ ] Upload completed binary outputs directly to MinIO, updating PostgreSQL status with pre-signed retrieval keys in an atomic transaction.
+- [x] **Multi-Tiered Storage & Lifecycle Indexing:**
+  - [x] Track report execution lifecycle metadata in PostgreSQL (`pending`, `running`, `completed`, `failed`, `cancelled`).
+  - [x] Upload completed report artifacts to MinIO and persist their object paths with execution records.
+  - [ ] Add atomic/recoverable consistency handling between MinIO uploads and PostgreSQL execution updates.
 - [ ] **Dynamic Query Builder & Join Engine:**
-  - [ ] Build `ReportDefinition` model and config interface.
-  - [ ] Generate parameterized SQL `JOIN` queries against ClickHouse analytical tables utilizing stored `SourceRelationship` foreign keys.
-- [ ] **Streaming Exports & Share Control:**
+  - [x] Build the `ReportDefinition` model and report configuration interface.
+  - [x] Generate validated direct `LEFT JOIN` queries against ClickHouse analytical tables using stored `SourceRelationship` foreign keys.
+  - [x] Implement Tabular Detail and Grouped Summary queries with `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`.
+  - [ ] Implement report filters and configurable ordering, including applying requested ordering from AI drafts.
+  - [ ] Extend report joins to multi-hop relationship paths and configurable join types.
+- [ ] **Exports, Charts & Share Control:**
+  - [x] Generate CSV, JSON, Excel, and PDF report artifacts; store completed artifacts in MinIO and support authenticated admin downloads.
+  - [x] Support configurable bar, line, and pie charts in PDF and Excel exports.
+  - [x] Improve PDF readability with adaptive page layout, wrapped cells, and repeating headers.
+  - [x] Add an optional AI report-design draft workflow using validated schema metadata and natural-language requests.
+  - [x] Add optional aggregate-only AI summaries to PDF, Excel, and JSON exports.
   - [ ] Implement chunked streaming exports (CSV, Excel/pandas, ReportLab PDF) to keep Celery memory utilization low.
-  - [ ] Secure report downloads via tokenized, time-expiring URLs bound to user tenant scopes.
+  - [ ] Add tokenized, time-expiring report-sharing URLs with tenant-scoped authorization.
+  - [ ] Improve grouped-output labeling and calculate AI summary metrics with awareness of aggregate semantics.

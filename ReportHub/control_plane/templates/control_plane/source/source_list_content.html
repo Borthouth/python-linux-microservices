@@ -10,6 +10,9 @@
         </a>
     </div>
 
+    {% url 'control_plane:source_list' as search_action_url %}
+    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search source name, database type, host, or database..." search_query=search_query filter_name="status" filter_value=status_filter filter_label="All Statuses" filter_options=filter_options %}
+
     <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
         <div class="overflow-x-auto">
             <table class="w-full text-left border-collapse">
@@ -87,14 +90,18 @@
                     {% empty %}
                         <tr>
                             <td colspan="7" class="py-12 text-center text-slate-500 text-sm">
-                                No data sources registered yet. Click "Add Data Source" to connect your first database.
+                                {% if search_query %}
+                                    No data sources match your search and status.
+                                {% else %}
+                                    No data sources registered yet. Click "Add Data Source" to connect your first database.
+                                {% endif %}
                             </td>
                         </tr>
                     {% endfor %}
                 </tbody>
             </table>
-            {% include 'control_plane/components/pagination.html' %}
         </div>
+        {% include 'control_plane/components/pagination.html' %}
     </div>
 </div>
 

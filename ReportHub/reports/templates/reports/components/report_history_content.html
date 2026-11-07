@@ -1,10 +1,13 @@
 <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
     <div class="mb-6">
         <div>
-            <h1 class="text-2xl font-bold text-white mt-2">Execution History: <span class="text-indigo-400">{{ report.name }}</span></h1>
+            <h1 class="text-2xl font-bold text-white mt-2">Runs for: <span class="text-indigo-400">{{ report.name }}</span></h1>
             <p class="text-sm text-gray-400 mt-1">Review past execution runs, logs, statuses, and download generated artifacts.</p>
         </div>
     </div>
+
+    {% url 'reports:report_history' report.pk as search_action_url %}
+    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search runs by status or artifact path..." search_query=search_query filter_name="status" filter_value=status_filter filter_label="All Statuses" filter_options=filter_options %}
 
     <div class="bg-[#111827] border border-gray-800 shadow sm:rounded-lg overflow-hidden">
         <table class="min-w-full divide-y divide-gray-800">
@@ -49,11 +52,17 @@
                 {% empty %}
                 <tr>
                     <td colspan="5" class="px-6 py-12 text-center text-gray-500 italic">
-                        No execution history found for this report yet. Click "Run" on the reports list to trigger an execution.
+                        {% if search_query or status_filter %}
+                            No report runs match your search.
+                        {% else %}
+                            No execution history found for this report yet. Click "Run" on the reports list to trigger an execution.
+                        {% endif %}
                     </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
     </div>
+
+    {% include 'control_plane/components/pagination.html' %}
 </div>

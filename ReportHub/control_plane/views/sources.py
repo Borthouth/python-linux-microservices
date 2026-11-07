@@ -3,6 +3,7 @@ import psycopg2
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.shortcuts import render, get_object_or_404, redirect
 from django.core.paginator import Paginator
+from django.db.models import Q
 from django.utils import timezone
 from django.contrib import messages
 from control_plane.models import SourceProfile, DbChoice, SyncStatus
@@ -18,6 +19,19 @@ def is_admin(user):
 @user_passes_test(is_admin)
 def source_list_view(request):
     sources_qs = SourceProfile.objects.all().order_by('name')
+    search_query = request.GET.get('q', '').strip()
+    status_filter = request.GET.get('status', '')
+    if search_query:
+        sources_qs = sources_qs.filter(
+            Q(name__icontains=search_query) |
+            Q(db_type__icontains=search_query) |
+            Q(host__icontains=search_query) |
+            Q(database_name__icontains=search_query)
+        )
+    if status_filter == 'active':
+        sources_qs = sources_qs.filter(is_active=True)
+    elif status_filter == 'inactive':
+        sources_qs = sources_qs.filter(is_active=False)
     
     paginator = Paginator(sources_qs, 15) # 15 items per page
     page_number = request.GET.get('page')
@@ -25,6 +39,12 @@ def source_list_view(request):
 
     context = {
         'page_obj': page_obj,
+        'search_query': search_query,
+        'status_filter': status_filter,
+        'filter_options': [
+            {'value': 'active', 'label': 'Active'},
+            {'value': 'inactive', 'label': 'Inactive'},
+        ],
     }
     return render(request, 'control_plane/source_list.html', context)
 

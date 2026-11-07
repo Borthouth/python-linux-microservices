@@ -1,6 +1,8 @@
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.shortcuts import render, get_object_or_404, redirect
 from django.contrib import messages
+from django.core.paginator import Paginator
+from django.db.models import Q
 from control_plane.models import SourceProfile, WarehouseDatasetMapping
 
 def is_admin(user):
@@ -10,9 +12,18 @@ def is_admin(user):
 @user_passes_test(is_admin)
 def warehouse_list_view(request):
     sources = SourceProfile.objects.all().order_by('name')
-    
+    search_query = request.GET.get('q', '').strip()
+    if search_query:
+        sources = sources.filter(
+            Q(name__icontains=search_query) |
+            Q(db_type__icontains=search_query) |
+            Q(database_name__icontains=search_query)
+        )
+    paginator = Paginator(sources, 15)
+    page_obj = paginator.get_page(request.GET.get('page'))
+
     sources_data = []
-    for source in sources:
+    for source in page_obj:
         enabled_fields_count = source.warehouse_mappings.filter(is_enabled=True).count()
         
         # Pull the correct attribute for your database name field
@@ -24,7 +35,11 @@ def warehouse_list_view(request):
             'enabled_fields_count': enabled_fields_count,
         })
 
-    return render(request, 'control_plane/warehouse_list.html', {'sources_data': sources_data})
+    return render(request, 'control_plane/warehouse_list.html', {
+        'sources_data': sources_data,
+        'page_obj': page_obj,
+        'search_query': search_query,
+    })
 
 @login_required
 @user_passes_test(is_admin)

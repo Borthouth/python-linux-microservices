@@ -7,6 +7,9 @@
             </div>
         </div>
 
+        {% url 'control_plane:warehouse_list' as search_action_url %}
+        {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search source name, database type, or database..." search_query=search_query %}
+
         <div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
             <table class="w-full text-left border-collapse">
                 <thead>
@@ -39,12 +42,17 @@
                     {% empty %}
                     <tr>
                         <td colspan="4" class="py-8 text-center text-slate-500">
-                            No registered data sources found. Add a data source first before configuring warehouse fields.
+                            {% if search_query %}
+                                No data sources match your search.
+                            {% else %}
+                                No registered data sources found. Add a data source first before configuring warehouse fields.
+                            {% endif %}
                         </td>
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
+            {% include 'control_plane/components/pagination.html' %}
         </div>
     </div>
 </div>

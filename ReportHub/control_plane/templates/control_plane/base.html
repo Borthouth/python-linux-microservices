@@ -7,6 +7,31 @@
     <title>{% block title %}ReportHub Control Plane{% endblock %}</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .slate-scrollbar {
+            scrollbar-color: #475569 #0f172a;
+            scrollbar-width: thin;
+        }
+
+        .slate-scrollbar::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .slate-scrollbar::-webkit-scrollbar-track {
+            background: #0f172a;
+            border-radius: 9999px;
+        }
+
+        .slate-scrollbar::-webkit-scrollbar-thumb {
+            background: #475569;
+            border: 2px solid #0f172a;
+            border-radius: 9999px;
+        }
+
+        .slate-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #64748b;
+        }
+    </style>
     <!-- Alpine.js CDN -->
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <!-- HTMX CDN -->

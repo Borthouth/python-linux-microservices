@@ -1,29 +1,13 @@
 <div class="max-w-7xl mx-auto px-6 py-8">
     <div class="mb-6">
         <div>
-            <h1 class="text-2xl font-extrabold text-white">Report Execution History</h1>
+            <h1 class="text-2xl font-extrabold text-white">All Report Runs</h1>
             <p class="text-slate-400 text-xs mt-1">Search, filter, and review all past and active report generations.</p>
         </div>
     </div>
 
-    <!-- Search and Filter Bar -->
-    <form method="GET" class="bg-slate-900 border border-slate-800 rounded-2xl p-4 mb-6 flex flex-col md:flex-row items-center gap-4">
-        <div class="flex-1 w-full">
-            <input type="text" name="q" value="{{ query }}" placeholder="Search by report name..." class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500">
-        </div>
-        <div class="w-full md:w-48">
-            <select name="status" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500">
-                <option value="">All Statuses</option>
-                <option value="completed" {% if status_filter == 'completed' %}selected{% endif %}>Completed</option>
-                <option value="running" {% if status_filter == 'running' %}selected{% endif %}>Running</option>
-                <option value="failed" {% if status_filter == 'failed' %}selected{% endif %}>Failed</option>
-                <option value="cancelled" {% if status_filter == 'cancelled' %}selected{% endif %}>Cancelled</option>
-            </select>
-        </div>
-        <button type="submit" class="w-full md:w-auto px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-xl transition">
-            Filter Results
-        </button>
-    </form>
+    {% url 'control_plane:report_history' as search_action_url %}
+    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search by report name..." filter_name="status" filter_value=status_filter filter_label="All Statuses" filter_options=filter_options search_query=search_query %}
 
     <!-- Results Table -->
     <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden mb-6">

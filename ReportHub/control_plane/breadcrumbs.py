@@ -12,8 +12,13 @@ BREADCRUMB_REGISTRY = {
     ],
     'report_history': [
         {'name': 'Dashboard', 'url': 'control_plane:dashboard'},
+        {'name': 'Operations & History', 'url': ''},
+        {'name': 'All Report Runs', 'url': ''}
+    ],
+    'reports:report_history': [
+        {'name': 'Dashboard', 'url': 'control_plane:dashboard'},
         {'name': 'Reports', 'url': 'reports:report_list'},
-        {'name': 'History', 'url': ''}
+        {'name': 'Report Runs', 'url': ''}
     ],
 
     # --- Reports App ---
@@ -153,7 +158,11 @@ def get_breadcrumbs_for_request(request):
         return []
         
     url_name = resolver_match.url_name
-    raw_crumbs = BREADCRUMB_REGISTRY.get(url_name, [])
+    namespaced_url_name = f"{resolver_match.namespace}:{url_name}" if resolver_match.namespace else url_name
+    raw_crumbs = BREADCRUMB_REGISTRY.get(
+        namespaced_url_name,
+        BREADCRUMB_REGISTRY.get(url_name, []),
+    )
     
     resolved_crumbs = []
     for crumb in raw_crumbs:

@@ -1,15 +1,24 @@
 <!-- templates/control_plane/components/search_bar.html -->
-<form method="GET" action="{{ action_url|default:'' }}" class="flex items-center space-x-3 w-full">
+<form method="GET" action="{{ action_url|default:'' }}" class="mb-6 flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full">
     <div class="relative flex-1">
         <input type="text" 
                name="q" 
-               value="{{ request.GET.q }}" 
+               value="{{ search_query }}"
                placeholder="{{ placeholder|default:'Search...' }}" 
                class="w-full bg-slate-900 border border-slate-800 text-white px-4 py-2 rounded-xl focus:outline-none focus:border-indigo-500 text-sm">
     </div>
     
-    {% if request.GET.q %}
-        <a href="." class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-xl border border-slate-700 transition whitespace-nowrap shadow-sm text-center">
+    {% if filter_name %}
+        <select name="{{ filter_name }}" class="bg-slate-900 border border-slate-800 text-white px-4 py-2 rounded-xl focus:outline-none focus:border-indigo-500 text-sm">
+            <option value="">{{ filter_label|default:"All" }}</option>
+            {% for option in filter_options %}
+                <option value="{{ option.value }}" {% if filter_value == option.value %}selected{% endif %}>{{ option.label }}</option>
+            {% endfor %}
+        </select>
+    {% endif %}
+
+    {% if search_query or filter_value %}
+        <a href="{{ action_url|default:'.' }}" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-xl border border-slate-700 transition whitespace-nowrap shadow-sm text-center">
             Clear
         </a>
     {% endif %}

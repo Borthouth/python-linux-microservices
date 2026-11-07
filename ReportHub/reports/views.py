@@ -3,6 +3,7 @@ from django.contrib.auth.decorators import login_required, user_passes_test
 from django.shortcuts import render, get_object_or_404, redirect
 from django.http import JsonResponse
 from django.db.models import OuterRef, Subquery
+from django.core.paginator import Paginator
 from .models import (
     ReportDefinition, 
     SourceTable, 
@@ -14,12 +15,17 @@ from .forms import ReportDefinitionForm
 from datetime import timedelta
 from django.http import Http404, HttpResponseRedirect
 from django.conf import settings
+from django.db.models import Q
 from minio import Minio
 from .tasks import execute_report_task
 from django.contrib import messages
 from django.template.loader import render_to_string
 from django.http import HttpResponse
 from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
+from control_plane.models import SourceRelationship
+from .query_builder import relationship_groups
+from .ai_design import OllamaUnavailable, generate_report_design
 
 
 def is_admin(user):
@@ -29,19 +35,49 @@ def is_admin(user):
 @login_required
 @user_passes_test(is_admin)
 def report_list(request):
-    # Annotate each report with its latest execution status and file path
+    search_query = request.GET.get('q', '').strip()
+    status_filter = request.GET.get('status', '')
+    # Only expose artifacts generated after the current report configuration was saved.
     latest_execution = ReportExecution.objects.filter(
         report=OuterRef('pk')
     ).order_by('-created_at')
+    downloadable_execution = ReportExecution.objects.filter(
+        report=OuterRef('pk'),
+        status='completed',
+        completed_at__gte=OuterRef('updated_at'),
+    ).exclude(file_path__isnull=True).exclude(file_path='').order_by('-completed_at')
 
     reports = ReportDefinition.objects.annotate(
         latest_status=Subquery(latest_execution.values('status')[:1]),
         latest_execution_pk=Subquery(latest_execution.values('pk')[:1]),
         latest_file_path=Subquery(latest_execution.values('file_path')[:1]),
-        latest_run_time=Subquery(latest_execution.values('created_at')[:1])
+        latest_run_time=Subquery(latest_execution.values('created_at')[:1]),
+        downloadable_execution_pk=Subquery(downloadable_execution.values('pk')[:1]),
+        downloadable_file_path=Subquery(downloadable_execution.values('file_path')[:1]),
     ).order_by('-created_at')
 
-    return render(request, 'reports/report_list.html', {'reports': reports})
+    if search_query:
+        reports = reports.filter(
+            Q(name__icontains=search_query) |
+            Q(description__icontains=search_query) |
+            Q(source__name__icontains=search_query)
+        )
+    if status_filter == 'active':
+        reports = reports.filter(is_active=True)
+    elif status_filter == 'inactive':
+        reports = reports.filter(is_active=False)
+
+    page_obj = Paginator(reports, 15).get_page(request.GET.get('page'))
+    return render(request, 'reports/report_list.html', {
+        'reports': page_obj,
+        'page_obj': page_obj,
+        'search_query': search_query,
+        'status_filter': status_filter,
+        'filter_options': [
+            {'value': 'active', 'label': 'Active'},
+            {'value': 'inactive', 'label': 'Inactive'},
+        ],
+    })
 
 
 @login_required
@@ -60,13 +96,23 @@ def report_create(request):
                 try:
                     config_data = json.loads(config_raw)
                     report.config = config_data
+                    report.join_config = config_data.get('selectedRelationships', [])
                     
                     # Sync active columns into selected_fields for execution tasks
                     active_cols = config_data.get('selectedColumns', [])
                     if active_cols:
-                        report.selected_fields = [col['field'] for col in active_cols]
+                        report.selected_fields = [
+                            col.get('field_name') or col['field']
+                            for col in active_cols
+                        ]
                 except json.JSONDecodeError:
                     pass
+            config = report.config if isinstance(report.config, dict) else {}
+            config['includeAiSummary'] = (
+                form.cleaned_data['include_ai_summary']
+                and report.export_format in {'pdf', 'xlsx', 'json'}
+            )
+            report.config = config
                     
             report.save()
             return redirect('reports:report_list')
@@ -92,12 +138,22 @@ def report_edit(request, pk):
                 try:
                     config_data = json.loads(config_raw)
                     report.config = config_data
+                    report.join_config = config_data.get('selectedRelationships', [])
                     
                     active_cols = config_data.get('selectedColumns', [])
                     if active_cols:
-                        report.selected_fields = [col['field'] for col in active_cols]
+                        report.selected_fields = [
+                            col.get('field_name') or col['field']
+                            for col in active_cols
+                        ]
                 except json.JSONDecodeError:
                     pass
+            config = report.config if isinstance(report.config, dict) else {}
+            config['includeAiSummary'] = (
+                form.cleaned_data['include_ai_summary']
+                and report.export_format in {'pdf', 'xlsx', 'json'}
+            )
+            report.config = config
                     
             report.save()
             return redirect('reports:report_list')
@@ -175,9 +231,6 @@ def ajax_load_table_columns(request):
         # Fetch the actual introspected field names from SourceField
         fields = source_table.fields.all().values_list('field_name', flat=True)
         columns = list(fields)
-        
-        if not columns:
-            columns = ['id', 'created_at', 'updated_at', 'name', 'status', 'description']
             
         return JsonResponse(columns, safe=False)
     except SourceTable.DoesNotExist:
@@ -186,12 +239,173 @@ def ajax_load_table_columns(request):
 
 @login_required
 @user_passes_test(is_admin)
+def ajax_load_related_tables(request):
+    source_id = request.GET.get('source_id')
+    table_id = request.GET.get('table_id')
+    if not source_id or not table_id:
+        return JsonResponse([], safe=False)
+
+    try:
+        base_table = SourceTable.objects.get(pk=table_id, source_id=source_id)
+    except (SourceTable.DoesNotExist, ValueError, TypeError):
+        return JsonResponse([], safe=False)
+
+    relationships = SourceRelationship.objects.filter(source_id=source_id).filter(
+        Q(from_schema=base_table.schema_name, from_table=base_table.table_name)
+        | Q(to_schema=base_table.schema_name, to_table=base_table.table_name)
+    )
+
+    result = []
+    for group in relationship_groups(relationships):
+        first = group[0]
+        from_is_base = (
+            first.from_schema == base_table.schema_name
+            and first.from_table == base_table.table_name
+        )
+        related_schema = first.to_schema if from_is_base else first.from_schema
+        related_name = first.to_table if from_is_base else first.from_table
+        related_table = SourceTable.objects.filter(
+            source_id=source_id,
+            schema_name=related_schema,
+            table_name=related_name,
+        ).first()
+        if related_table is None:
+            continue
+
+        relationship_ids = sorted(item.pk for item in group)
+        pairs = [
+            {
+                'base_field': item.from_field if from_is_base else item.to_field,
+                'related_field': item.to_field if from_is_base else item.from_field,
+            }
+            for item in group
+        ]
+        result.append({
+            'key': ','.join(str(item) for item in relationship_ids),
+            'relationship_ids': relationship_ids,
+            'table_id': related_table.pk,
+            'table_name': related_table.table_name,
+            'schema_name': related_table.schema_name,
+            'label': f"{related_table.schema_name}.{related_table.table_name}",
+            'join_pairs': pairs,
+            'fields': list(related_table.fields.values_list('field_name', flat=True)),
+        })
+
+    return JsonResponse(result, safe=False)
+
+
+@login_required
+@user_passes_test(is_admin)
+@require_POST
+def ai_report_design(request):
+    try:
+        payload = json.loads(request.body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse({"error": "The request body must be valid JSON."}, status=400)
+    if not isinstance(payload, dict):
+        return JsonResponse({"error": "The request body must be a JSON object."}, status=400)
+
+    description = payload.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return JsonResponse({"error": "Describe the report you want to create."}, status=400)
+    if len(description) > 2000:
+        return JsonResponse({"error": "Keep the report description under 2,000 characters."}, status=400)
+
+    try:
+        base_table = SourceTable.objects.get(
+            pk=payload.get("table_id"),
+            source_id=payload.get("source_id"),
+        )
+    except (SourceTable.DoesNotExist, ValueError, TypeError):
+        return JsonResponse({"error": "Select a valid data source and base table first."}, status=400)
+
+    base_label = f"{base_table.schema_name}.{base_table.table_name}"
+    schema = {
+        "base_table": {
+            "table_id": base_table.pk,
+            "label": base_label,
+            "fields": [
+                {"name": field.field_name, "type": field.data_type}
+                for field in base_table.fields.order_by("field_name")
+            ],
+        },
+        "related_tables": [],
+    }
+
+    relationships = SourceRelationship.objects.filter(source_id=base_table.source_id).filter(
+        Q(from_schema=base_table.schema_name, from_table=base_table.table_name)
+        | Q(to_schema=base_table.schema_name, to_table=base_table.table_name)
+    )
+    for group in relationship_groups(relationships):
+        first = group[0]
+        from_is_base = (
+            first.from_schema == base_table.schema_name
+            and first.from_table == base_table.table_name
+        )
+        related_schema = first.to_schema if from_is_base else first.from_schema
+        related_name = first.to_table if from_is_base else first.from_table
+        related_table = SourceTable.objects.filter(
+            source_id=base_table.source_id,
+            schema_name=related_schema,
+            table_name=related_name,
+        ).first()
+        if related_table is None:
+            continue
+        relationship_ids = sorted(item.pk for item in group)
+        schema["related_tables"].append({
+            "key": ",".join(str(item) for item in relationship_ids),
+            "table_id": related_table.pk,
+            "label": f"{related_table.schema_name}.{related_table.table_name}",
+            "join_pairs": [
+                {
+                    "base_field": item.from_field if from_is_base else item.to_field,
+                    "related_field": item.to_field if from_is_base else item.from_field,
+                }
+                for item in group
+            ],
+            "fields": [
+                {"name": field.field_name, "type": field.data_type}
+                for field in related_table.fields.order_by("field_name")
+            ],
+        })
+
+    try:
+        config = generate_report_design(description.strip(), schema)
+    except OllamaUnavailable:
+        return JsonResponse(
+            {"error": "The local AI service is unavailable. Check that Ollama is running and the configured model is installed."},
+            status=503,
+        )
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=422)
+    return JsonResponse({"config": config})
+
+
+@login_required
+@user_passes_test(is_admin)
 def report_history(request, pk):
     report = get_object_or_404(ReportDefinition, pk=pk)
+    search_query = request.GET.get('q', '').strip()
+    status_filter = request.GET.get('status', '')
     executions = report.executions.all().order_by('-created_at')
+    if search_query:
+        executions = executions.filter(
+            Q(status__icontains=search_query) |
+            Q(file_path__icontains=search_query)
+        )
+    if status_filter in dict(ReportExecution.STATUS_CHOICES):
+        executions = executions.filter(status=status_filter)
+    page_obj = Paginator(executions, 20).get_page(request.GET.get('page'))
     return render(request, 'reports/report_history.html', {
         'report': report,
-        'executions': executions
+        'executions': page_obj,
+        'page_obj': page_obj,
+        'search_query': search_query,
+        'status_filter': status_filter,
+        'filter_options': [
+            {'value': value, 'label': label}
+            for value, label in ReportExecution.STATUS_CHOICES
+        ],
     })
 
 
