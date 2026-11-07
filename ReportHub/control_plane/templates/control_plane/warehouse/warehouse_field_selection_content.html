@@ -50,6 +50,22 @@
                             </div>
                         </div>
 
+                        <div class="space-y-1">
+                            <label for="incremental-field-{{ source_table.pk }}" class="text-xs font-medium text-slate-300">Modified-at field (optional)</label>
+                            <select id="incremental-field-{{ source_table.pk }}" name="incremental_field_{{ source_table.pk }}"
+                                    class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white">
+                                <option value="">Full refresh for this table</option>
+                                {% for field in source_table.fields.all %}
+                                    {% if "date" in field.data_type|lower or "datetime" in field.data_type|lower or "timestamp" in field.data_type|lower %}
+                                    <option value="{{ field.field_name }}" {% if source_table.incremental_field_name == field.field_name %}selected{% endif %}>
+                                        {{ field.field_name }} ({{ field.data_type }})
+                                    </option>
+                                    {% endif %}
+                                {% endfor %}
+                            </select>
+                            <p class="text-xs text-slate-500">Choose a field updated whenever a row changes. Incremental loading also requires an introspected primary key; otherwise ingestion uses a full refresh.</p>
+                        </div>
+
                         <!-- Column Search Filter -->
                         <div>
                             <input type="text" placeholder="Filter columns in {{ source_table.table_name }}..." onkeyup="filterColumns(this, '{{ source_table.table_name }}')"
@@ -64,7 +80,7 @@
                                 <div class="flex items-center space-x-3">
                                     <input type="checkbox" name="selected_fields" value="{{ field_key }}" id="field-{{ field_key }}"
                                            class="table-field-{{ source_table.table_name }} rounded border-slate-700 bg-slate-800 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
-                                           {% if field_key in enabled_set or not enabled_set %}checked{% endif %}>
+                                           {% if field_key in enabled_set or field_key not in mapped_field_keys %}checked{% endif %}>
                                     <label for="field-{{ field_key }}" class="text-sm text-slate-300 font-mono cursor-pointer truncate" title="{{ field.field_name }}">{{ field.field_name }}</label>
                                 </div>
                                 <span class="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700/50" title="{{ field.data_type }}">{{ field.data_type }}</span>

@@ -21,6 +21,7 @@ class PipelineAutomationForm(forms.Form):
             ('etl.tasks.cleanup_postgres_warehouse_task', 'Cleanup PostgreSQL Warehouse'),
             ('etl.tasks.trigger_all_active_source_introspection_task', 'Introspect All Active Sources & Foreign Keys'),
             ('etl.tasks.trigger_all_active_clickhouse_ingestion_task', 'Ingest All Active Sources to ClickHouse'),
+            ('etl.tasks.trigger_all_active_clickhouse_backfill_task', 'Backfill All Active Sources to ClickHouse'),
         ],
         widget=forms.Select(attrs={
             'class': 'w-full bg-slate-900 border border-slate-800 text-white px-4 py-2 rounded-xl focus:outline-none focus:border-indigo-500 text-sm'

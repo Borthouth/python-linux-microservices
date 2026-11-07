@@ -1,14 +1,14 @@
 # ReportHub 🚀
 > Enterprise-grade, dynamic multi-source analytical warehouse and reporting control plane.
 
-`ReportHub` is an analytics platform designed to ingest, unify, and report on data from multiple distributed source databases (PostgreSQL, MySQL, and Microsoft SQL Server) into a centralized analytical warehouse—**without hardcoding source-data models**. Built with a Django control plane, a **ClickHouse** analytical engine, **MinIO** S3-compatible object storage, and Celery-driven background tasks, ReportHub provides schema reflection, source-access configuration, scheduled task governance, asynchronous email notifications, and report generation.
+`ReportHub` is an analytics platform designed to ingest, unify, and report on data from multiple distributed source databases (PostgreSQL, MySQL, Microsoft SQL Server, MongoDB, and Oracle) into a centralized analytical warehouse—**without hardcoding source-data models**. Built with a Django control plane, a **ClickHouse** analytical engine, **MinIO** S3-compatible object storage, and Celery-driven background tasks, ReportHub provides schema reflection, source-access configuration, scheduled task governance, asynchronous email notifications, and report generation.
 
 ---
 
 ## 🏗️ Core Architecture & Design
 
 - **Decoupled Data Architecture:** The Django database stores control-plane configuration and source metadata, while ClickHouse stores ingested analytical data. Alembic is used for warehouse schema migrations.
-- **ClickHouse Analytical Warehouse:** Columnar database engine for analytical queries and aggregations. The current ingestion tables use `MergeTree`; automated TTL data retention is not configured.
+- **ClickHouse Analytical Warehouse:** Columnar database engine for analytical queries and aggregations. Tables configured for incremental ingestion use `ReplacingMergeTree`; tables without a safe incremental key use `MergeTree`. Automated TTL data retention is not configured.
 - **MinIO S3-Compatible Object Storage:** MinIO persists data in the host-mounted `./docker/minio_data` directory. Celery uploads report artifacts to MinIO; authenticated administrator downloads are served through Django. The Compose file publishes MinIO's console port and should be restricted appropriately outside development.
 - **Session Security & Idle Timeout:** Hardened session management utilizing browser-close expiration (`SESSION_EXPIRE_AT_BROWSER_CLOSE = True`) and `django-auto-logout` with dynamic environment-driven idle timeout control (`SESSION_IDLE_MINUTES`).
 - **Asynchronous Reporting:** Celery report tasks query ClickHouse and currently assemble export data in memory. Chunked/streaming report exports remain planned. Other background work uses dedicated Celery queues.
@@ -34,28 +34,40 @@
 
 ## 🧪 Polyglot Test Database & Test Email Server Environment
 
-ReportHub includes an isolated multi-database test harness (`docker-compose.test.yml`) and automated test utility scripts (`test.sh`) that spin up all supported target database engines and a local development **test email server** simultaneously alongside persistent volumes, allowing you to test schema introspection, automated email notifications, and ETL synchronization locally.
+ReportHub includes an isolated multi-database test harness in `tests/docker-compose.test.yml` and a one-command setup script at `tests/start_test_dbs.sh`. The script starts the test databases, waits for them to accept connections, imports Northwind into MSSQL, and reapplies the MongoDB and Oracle seeds safely on every run. PostgreSQL and MySQL run their initialization scripts when their volumes are first created. Test volumes persist between runs.
 
 ### Test Database Connection Matrix
 
-| Database Engine | Default Host | Port | Credentials (User / Password) | Target Database / Service Name |
+| Database Engine | Host on this machine | Port | Credentials (User / Password) | Target Database / Service Name |
 | :--- | :--- | :--- | :--- | :--- |
-| **PostgreSQL** | `localhost` | `5433` | `postgres` / `postgres_test_pwd` | `reporthub_test_pg` |
-| **MySQL** | `localhost` | `3307` | `root` / `mysql_test_pwd` | `reporthub_test_mysql` |
-| **Microsoft SQL Server** | `localhost` | `1434` | `sa` / `MssqlTestPassword123!` | `master` (or custom test db) |
+| **PostgreSQL** | `localhost` | `5433` | `test_user` / `test_password` | `chinook` |
+| **MySQL** | `localhost` | `3307` | `test_user` / `test_password` | `northwind` |
+| **Microsoft SQL Server** | `localhost` | `1434` | `sa` / `YourStrongPassword123!` | `northwind` |
+| **MongoDB** | `localhost` | `27018` | `test_user` / `test_password` | `app_analytics` (auth DB: `admin`) |
+| **Oracle** | `localhost` | `1522` | `app_user` / `YourStrongPassword123!` | `FREEPDB1` |
 | **Test Email Server** | `localhost` | `1025` / `8025` | *None (Development SMTP/Web UI)* | `mailpit` / local SMTP sink |
 
-### Launching the Test Environment & Test Script
+When ReportHub itself runs in Docker, use the Compose service hostnames and internal ports instead: `postgres-test:5432`, `mysql-test:3306`, `mssql-test:1433`, `mongo-test:27017`, and `oracle-test:1521`.
+
+### Starting and stopping test databases
 ```bash
-# Spin up the polyglot test containers and test email server in the background
-docker compose -f docker-compose.test.yml up -d
+# From the repository root: start and populate the test databases
+./tests/start_test_dbs.sh
 
-# Execute the test harness script (validates migrations, database connectivity, and email dispatch sink)
-./test.sh
+# Stop containers but preserve their database volumes
+docker compose -f tests/docker-compose.test.yml down
 
-# Shut down and clean up test containers/volumes when finished
-docker compose -f docker-compose.test.yml down -v
+# Optional: remove test containers and erase all their data, then start fresh
+./tests/start_test_dbs.sh --reset
 ```
+
+## ClickHouse ingestion and backfills
+
+Scheduled ingestion processes at most `DEFAULT_ETL_BATCH_SIZE` rows per Celery task (already set to `10000` in the project `.env`), then queues a continuation so other sources can run between batches. The same row limit applies to backfills. To change it, update `.env` and restart the app and Celery workers so they reload the setting. Celery prefetch is set to 1 to reduce workers reserving batches ahead of time.
+
+For routine incremental ingestion, first sync the source schema, then open **Warehouse Mapping** and choose a date/time **Modified-at field** for each table. A single or composite primary key must also be discovered by introspection. The first load (and any load after the warehouse field selection changes) is a bounded full refresh. Later scheduled loads query rows at or after the saved per-table modification-time watermark, through a fixed upper bound, and upsert them into a ClickHouse `ReplacingMergeTree` keyed by the primary key. Reports read these tables with `FINAL` so they see deduplicated current rows. The chosen modified-at field must be updated whenever a source row changes; tables without a suitable timestamp or primary key use bounded full refreshes instead.
+
+The warehouse field selections saved in **Warehouse Mapping** control the ClickHouse columns. When selections change, run **Backfill All Active Sources to ClickHouse** from Pipeline Automations to rebuild the selected ClickHouse columns and reload their historical values for every active source. Backfill batches use the dedicated `queue_backfill` queue; routine ingestion uses `queue_hot`. Both yield between bounded tasks so other queued work can run.
 
 ## 🤖 Local AI Report Design
 
@@ -94,7 +106,7 @@ OLLAMA_TIMEOUT=120
 - **Backend:** Python, Django (Synchronous Control Plane), Hypercorn / Gunicorn ASGI/WSGI
 - **Async & ETL:** Celery, Redis (Configured with AOF persistence enabled)
 - **Analytical & Object Storage:** ClickHouse (Columnar Data Warehouse), MinIO (S3-Compatible Object Storage via `django-storages` and `boto3`), PostgreSQL 15 (Operational & Warm Storage)
-- **Source Integration & Drivers:** PostgreSQL (`psycopg2`), MySQL (`pymysql`), Microsoft SQL Server (`pyodbc` with Microsoft ODBC Driver 18 for Debian/Linux)
+- **Source Integration & Drivers:** PostgreSQL (`psycopg2`), MySQL (`pymysql`), Microsoft SQL Server (`pyodbc` with Microsoft ODBC Driver 18 for Debian/Linux), MongoDB (`pymongo`), and Oracle (`python-oracledb`)
 - **Testing & Quality:** Pytest, Playwright (for automated web application testing & debugging)
 - **Frontend:** HTMX, Tailwind CSS, Alpine.js, Custom Components, Modern Vanilla JavaScript (Event-Driven DOM handlers)
 - **Infrastructure:** Docker, Docker Compose, RHEL 9 compatible deployment targets

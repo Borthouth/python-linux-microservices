@@ -7,6 +7,10 @@ def clickhouse_table_name(source_id, schema_name, table_name):
     return f"source_{source_id}__{schema_name}_{table_name}".lower()
 
 
+def clickhouse_final_clause(table):
+    return " FINAL" if table.clickhouse_uses_replacing_merge_tree else ""
+
+
 def quote_clickhouse_identifier(identifier):
     return f"`{str(identifier).replace('`', '``')}`"
 
@@ -91,7 +95,8 @@ def build_clickhouse_report_query(report, selected_columns):
             report.source_id, related_table.schema_name, related_table.table_name
         )
         join_clauses.append(
-            f"LEFT JOIN {quote_clickhouse_identifier(physical_name)} AS {alias} "
+            f"LEFT JOIN {quote_clickhouse_identifier(physical_name)}"
+            f" AS {alias}{clickhouse_final_clause(related_table)} "
             f"ON {' AND '.join(conditions)}"
         )
 
@@ -145,7 +150,8 @@ def build_clickhouse_report_query(report, selected_columns):
     )
     query = (
         f"SELECT {', '.join(select_parts)} "
-        f"FROM {quote_clickhouse_identifier(base_physical_name)} AS t0"
+        f"FROM {quote_clickhouse_identifier(base_physical_name)}"
+        f" AS t0{clickhouse_final_clause(base_table)}"
     )
     if join_clauses:
         query += " " + " ".join(join_clauses)

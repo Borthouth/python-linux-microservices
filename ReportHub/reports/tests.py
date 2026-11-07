@@ -600,6 +600,32 @@ class ClickHouseReportQueryTests(TestCase):
         self.assertEqual(headers, ["Order ID", "Customer"])
         self.assertEqual(aggregates, ["", "COUNT"])
 
+    def test_incremental_tables_use_final_for_deduplicated_rows(self):
+        self.orders.clickhouse_uses_replacing_merge_tree = True
+        self.orders.save(update_fields=["clickhouse_uses_replacing_merge_tree"])
+        self.customers.clickhouse_uses_replacing_merge_tree = True
+        self.customers.save(update_fields=["clickhouse_uses_replacing_merge_tree"])
+        report = self.make_report(
+            self.orders,
+            [str(self.customer_relationship.pk)],
+        )
+
+        query, _, _ = build_clickhouse_report_query(
+            report,
+            [
+                {"table_key": "base", "field_name": "id"},
+                {
+                    "table_key": str(self.customer_relationship.pk),
+                    "field_name": "id",
+                },
+            ],
+        )
+
+        self.assertIn("FROM `source_", query)
+        self.assertIn("` AS t0 FINAL", query)
+        self.assertIn("LEFT JOIN `source_", query)
+        self.assertIn("` AS t1 FINAL", query)
+
     def test_tabular_detail_keeps_selected_columns_as_source_rows(self):
         report = self.make_report(self.orders, [])
         report.config = {"reportType": "tabular"}

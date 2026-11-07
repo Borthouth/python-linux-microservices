@@ -41,6 +41,8 @@ class DbChoice(models.TextChoices):
     MYSQL = 'mysql', 'MySQL'
     POSTGRESQL = 'postgresql', 'PostgreSQL'
     MSSQL = 'mssql', 'Microsoft SQL Server'
+    MONGODB = 'mongodb', 'MongoDB'
+    ORACLE = 'oracle', 'Oracle'
 
 class SyncStatus(models.TextChoices):
     PENDING = 'PENDING', 'Pending'
@@ -156,6 +158,16 @@ class SourceTable(TimeStampedAuditedModel):
         null=True, 
         help_text="Column name used for time-based partitioning and tiering."
     )
+    incremental_field_name = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Date/time column used to detect new and updated source rows.",
+    )
+    incremental_watermark = models.TextField(blank=True, null=True)
+    primary_key_fields = models.JSONField(default=list, blank=True)
+    incremental_ready = models.BooleanField(default=False)
+    clickhouse_uses_replacing_merge_tree = models.BooleanField(default=False)
     
     last_synced_at = models.DateTimeField(blank=True, null=True)
 

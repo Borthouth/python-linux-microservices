@@ -55,13 +55,14 @@ Track the development phases, architectural milestones, and codebase optimizatio
 ## Phase 3: Schema Reflection & Configuration UI
 - [x] Build the multi-source connection profile manager UI and control plane web views.
 - [x] **Celery Schema Introspection Task:**
-  - Implemented background `introspect_source_schema_task` using SQLAlchemy inspector (`information_schema`, MSSQL catalog views) to asynchronously discover tables and columns across PostgreSQL, MySQL, and Microsoft SQL Server.
-  - Automatically populates and updates relational control plane metadata models (`SourceTable` and `SourceField`).
+  - Implemented background `introspect_source_schema_task` using SQLAlchemy inspector (`information_schema`, MSSQL catalog views) to asynchronously discover tables, columns, and primary keys across PostgreSQL, MySQL, Microsoft SQL Server, and Oracle; MongoDB collections and document fields are also introspected.
+  - Automatically populates and updates relational control plane metadata models (`SourceTable` and `SourceField`), including key metadata for incremental loads.
   - Added periodic Celery Beat wrapper (`trigger_all_active_source_introspection_task`) for automated recurring schema discovery.
 - [x] **High-Performance Master-Detail Schema Mapping UI:**
   - Developed `WarehouseDatasetMapping` domain model for fine-grained table and field synchronization control.
   - Built master-detail mapping interface (`/control-plane/warehouse/`) featuring a searchable, scrollable table navigator on the left and a column selection panel on the right.
   - Implemented live table/column search filtering, quick "Select All / Deselect All" batch toggles, and data type badges optimized for high-density database schemas.
+  - Persist warehouse field selections as the ingestion source of truth and configure an optional modified-at field per table.
 - [x] Validate schema discovery and persistent field selection against target databases over local LAN and test containers.
 
 ---
@@ -71,12 +72,15 @@ Track the development phases, architectural milestones, and codebase optimizatio
   - [x] Deploy ClickHouse alongside PostgreSQL/Redis in Docker and configure Django/Celery connections.
   - [ ] Restrict host-published ports `9000`/`8123` and replace development credential defaults for production deployments.
 - [x] **Data Model & Performance Optimization:**
-  - [x] Establish isolated ClickHouse table namespacing (`source_{pk}__{schema}_{table}`) with `MergeTree` engines.
+  - [x] Establish isolated ClickHouse table namespacing (`source_{pk}__{schema}_{table}`), using `ReplacingMergeTree` for primary-key incremental tables and `MergeTree` otherwise.
   - [x] Implement robust type mapping (`map_to_clickhouse_type`) and ISO string casting for temporal/complex types to prevent driver struct-packing crashes.
 - [x] **Ingestion Engine & High-Volume Flushing:**
-  - [x] Build idempotent batch ingestion Celery tasks (`ingest_source_to_clickhouse_task`) reading selected fields with dialect-aware identifier quoting.
-  - [x] Implement active-source guard checks (`is_active=True`) and environment-driven batch sizing (`DEFAULT_ETL_BATCH_SIZE`).
-  - [x] Configure periodic dispatch tasks (`trigger_all_active_clickhouse_ingestion_task`) and dedicated worker queue routing (`queue_cold`, `queue_warm`, `queue_ux`, `queue_periodic`).
+  - [x] Build bounded Celery ingestion tasks (`ingest_source_to_clickhouse_task`) using keyset pagination where primary keys exist; enqueue continuations after at most `DEFAULT_ETL_BATCH_SIZE` rows so other queued work can run.
+  - [x] Incrementally capture inserts and updates for tables with an introspected primary key and configured modified-at field; persist per-table watermarks and use ClickHouse `ReplacingMergeTree` deduplication for reports.
+  - [x] Fall back to bounded full refreshes for tables without safe incremental metadata; rebuild full selected history after warehouse-field changes.
+  - [x] Add a scheduled/manual Pipeline Automation backfill dispatcher (`trigger_all_active_clickhouse_backfill_task`) on the dedicated `queue_backfill` queue.
+  - [x] Implement active-source guard checks (`is_active=True`), set the default batch limit to 10,000 rows via `DEFAULT_ETL_BATCH_SIZE`, and set Celery worker prefetch to 1.
+  - [x] Configure periodic dispatch tasks (`trigger_all_active_clickhouse_ingestion_task`) and dedicated worker queue routing (`queue_hot`, `queue_backfill`, `queue_periodic`, and other application queues).
 
 ---
 

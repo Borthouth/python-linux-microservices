@@ -5,9 +5,28 @@
                 <h1 class="text-2xl font-extrabold tracking-tight text-white">
                     {% if profile %}Edit Data Source: {{ profile.name }}{% else %}Register New Data Source{% endif %}
                 </h1>
-                <p class="text-slate-400 text-sm mt-1">Configure connection parameters for an external PostgreSQL or MySQL database.</p>
+                <p class="text-slate-400 text-sm mt-1">Configure connection parameters for an external database.</p>
             </div>
         </div>
+
+        <script>
+            document.addEventListener('change', function (event) {
+                if (event.target.id !== 'id_db_type') return;
+
+                const portField = document.getElementById('id_port');
+                const defaultPorts = {
+                    mysql: 3306,
+                    postgresql: 5432,
+                    mssql: 1433,
+                    mongodb: 27017,
+                    oracle: 1521
+                };
+                const currentPort = Number(portField.value);
+                if (!currentPort || Object.values(defaultPorts).includes(currentPort)) {
+                    portField.value = defaultPorts[event.target.value];
+                }
+            });
+        </script>
 
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-xl">
             <form method="post" class="space-y-5">

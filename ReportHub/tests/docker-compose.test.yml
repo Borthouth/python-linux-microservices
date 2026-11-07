@@ -29,7 +29,8 @@ services:
       - shared_network
     volumes:
       - mysql_test_data:/var/lib/mysql
-      - ./init-db/mysql:/docker-entrypoint-initdb.d
+      - ./init-db/mysql/1_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./init-db/mysql/2_data.sql:/docker-entrypoint-initdb.d/02-data.sql:ro
 
   mssql-test:
     image: mcr.microsoft.com/mssql/server:2022-latest
@@ -44,6 +45,37 @@ services:
       - shared_network
     volumes:
       - mssql_test_data:/var/opt/mssql
+    restart: unless-stopped
+
+  mongo-test:
+    image: mongo:latest
+    container_name: reporthub-mongo-test
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: test_user
+      MONGO_INITDB_ROOT_PASSWORD: test_password
+      MONGO_INITDB_DATABASE: app_analytics
+    ports:
+      - "27018:27017"
+    networks:
+      - shared_network
+    volumes:
+      - mongo_test_data:/data/db
+      - ./init-db/mongo:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+
+  oracle-test:
+    image: container-registry.oracle.com/database/free:latest
+    container_name: reporthub-oracle-test
+    environment:
+      - ORACLE_PWD=YourStrongPassword123!
+    ports:
+      - "1522:1521"
+      - "5500:5500"
+    networks:
+      - shared_network
+    volumes:
+      - oracle_test_data:/opt/oracle/oradata
+      - ./init-db/oracle:/opt/oracle/scripts/startup
     restart: unless-stopped
 
   mailpit:
@@ -65,3 +97,5 @@ volumes:
   pg_test_data:
   mysql_test_data:
   mssql_test_data:
+  mongo_test_data:
+  oracle_test_data:

@@ -2,10 +2,17 @@ import json
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
-from django.test import RequestFactory, SimpleTestCase, TestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 
-from control_plane.models import TrackedUser
+from control_plane.models import (
+    DbChoice,
+    SourceField,
+    SourceProfile,
+    SourceTable,
+    TrackedUser,
+    WarehouseDatasetMapping,
+)
 from control_plane.views.dlq import dlq_requeue_view
 from control_plane.views.dashboard import update_widget_preferences
 
@@ -138,3 +145,101 @@ class UserStatusViewTests(TestCase):
         history = TrackedUser.history.filter(id=self.target.pk).latest()
         self.assertTrue(history.is_active)
         self.assertEqual(history.history_change_reason, "Account reactivated by admin")
+
+
+@override_settings(CACHES={
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
+})
+class WarehouseFieldSelectionTests(TestCase):
+    def setUp(self):
+        admin = get_user_model().objects.create_user(
+            username="warehouse-admin",
+            password="test-password",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.client.force_login(admin)
+        self.source = SourceProfile.objects.create(
+            name="Warehouse selection source",
+            db_type=DbChoice.POSTGRESQL,
+            host="localhost",
+            port=5432,
+            database_name="test_db",
+            username="test_user",
+        )
+        self.table = SourceTable.objects.create(
+            source=self.source,
+            schema_name="public",
+            table_name="events",
+        )
+        SourceField.objects.create(
+            table=self.table,
+            field_name="event_id",
+            data_type="INTEGER",
+        )
+        SourceField.objects.create(
+            table=self.table,
+            field_name="modified_at",
+            data_type="TIMESTAMP WITH TIME ZONE",
+        )
+
+    def test_saves_warehouse_fields_and_incremental_field(self):
+        response = self.client.post(
+            reverse(
+                "control_plane:warehouse_field_selection",
+                args=[self.source.pk],
+            ),
+            {
+                "selected_fields": ["events.event_id", "events.modified_at"],
+                f"incremental_field_{self.table.pk}": "modified_at",
+            },
+        )
+
+        self.assertRedirects(response, reverse("control_plane:warehouse_list"))
+        self.assertEqual(
+            set(
+                self.source.warehouse_mappings.filter(is_enabled=True)
+                .values_list("field_name", flat=True)
+            ),
+            {"event_id", "modified_at"},
+        )
+        self.table.refresh_from_db()
+        self.assertEqual(self.table.incremental_field_name, "modified_at")
+        self.assertFalse(self.table.incremental_ready)
+
+    def test_field_page_offers_supported_modified_at_fields(self):
+        response = self.client.get(
+            reverse(
+                "control_plane:warehouse_field_selection",
+                args=[self.source.pk],
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Modified-at field (optional)")
+        self.assertContains(response, "modified_at (TIMESTAMP WITH TIME ZONE)")
+
+    def test_rejects_non_datetime_incremental_field(self):
+        response = self.client.post(
+            reverse(
+                "control_plane:warehouse_field_selection",
+                args=[self.source.pk],
+            ),
+            {
+                "selected_fields": ["events.event_id"],
+                f"incremental_field_{self.table.pk}": "event_id",
+            },
+        )
+
+        self.assertRedirects(
+            response,
+            reverse(
+                "control_plane:warehouse_field_selection",
+                args=[self.source.pk],
+            ),
+        )
+        self.assertFalse(
+            WarehouseDatasetMapping.objects.filter(
+                source_profile=self.source
+            ).exists()
+        )

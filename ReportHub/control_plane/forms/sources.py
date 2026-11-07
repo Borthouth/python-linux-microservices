@@ -2,6 +2,28 @@ from django import forms
 from control_plane.models import SourceProfile
 
 class SourceProfileForm(forms.ModelForm):
+    DEFAULT_PORTS = {
+        'mysql': 3306,
+        'postgresql': 5432,
+        'mssql': 1433,
+        'mongodb': 27017,
+        'oracle': 1521,
+    }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['port'].help_text = (
+            'Default ports: MySQL 3306, PostgreSQL 5432, SQL Server 1433, '
+            'MongoDB 27017, Oracle 1521.'
+        )
+        self.fields['database_name'].help_text = (
+            'For MongoDB, enter the database name. For Oracle, enter the service name '
+            '(for example, FREEPDB1).'
+        )
+        if not self.is_bound and not self.instance.pk:
+            db_type = self.initial.get('db_type', self.instance.db_type)
+            self.initial['port'] = self.DEFAULT_PORTS.get(db_type, 3306)
+
     class Meta:
         model = SourceProfile
         fields = ['name', 'db_type', 'host', 'port', 'database_name', 'username', 'password', 'is_active']
