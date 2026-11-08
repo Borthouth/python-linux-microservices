@@ -44,6 +44,12 @@ class DbChoice(models.TextChoices):
     MONGODB = 'mongodb', 'MongoDB'
     ORACLE = 'oracle', 'Oracle'
 
+
+class IngestionMode(models.TextChoices):
+    BATCH = 'batch', 'Batch refresh'
+    CDC = 'cdc', 'Change data capture (CDC)'
+
+
 class SyncStatus(models.TextChoices):
     PENDING = 'PENDING', 'Pending'
     RUNNING = 'RUNNING', 'Running'
@@ -63,9 +69,26 @@ class SourceProfile(TimeStampedAuditedModel):
     host = models.CharField(max_length=255)
     port = models.IntegerField(default=3306)
     database_name = models.CharField(max_length=100)
+    oracle_cdb_name = models.CharField(max_length=100, blank=True, default="")
+    oracle_pdb_name = models.CharField(max_length=100, blank=True, default="")
+    oracle_logminer_username = models.CharField(
+        max_length=100, blank=True, default=""
+    )
+    oracle_logminer_password = EncryptedCharField(
+        max_length=255, blank=True, null=True
+    )
     username = models.CharField(max_length=100)
     password = EncryptedCharField(max_length=255, blank=True, null=True)
     is_active = models.BooleanField(default=True)
+    ingestion_mode = models.CharField(
+        max_length=10,
+        choices=IngestionMode.choices,
+        default=IngestionMode.BATCH,
+        help_text=(
+            "Batch refresh does not require Kafka. CDC requires Kafka, "
+            "Debezium and source database CDC configuration."
+        ),
+    )
 
     # Schema Synchronization Tracking Fields
     last_synced = models.DateTimeField(null=True, blank=True)
@@ -81,6 +104,16 @@ class SourceProfile(TimeStampedAuditedModel):
 
     def get_status_url(self):
         return reverse('control_plane:source_status', kwargs={'pk': self.pk})
+
+
+class CdcExecutionFailure(models.Model):
+    source = models.ForeignKey(
+        SourceProfile, on_delete=models.CASCADE, related_name="cdc_failures"
+    )
+    task_id = models.CharField(max_length=255, blank=True)
+    failed_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    error_message = models.TextField()
+
 
 class UserSourceAccess(TimeStampedAuditedModel):
     """Layer 1 Security: Maps users to specific Source Profiles with assigned roles."""
@@ -168,6 +201,7 @@ class SourceTable(TimeStampedAuditedModel):
     primary_key_fields = models.JSONField(default=list, blank=True)
     incremental_ready = models.BooleanField(default=False)
     clickhouse_uses_replacing_merge_tree = models.BooleanField(default=False)
+    cdc_managed = models.BooleanField(default=False)
     
     last_synced_at = models.DateTimeField(blank=True, null=True)
 
@@ -262,6 +296,7 @@ class UserWidgetPreference(models.Model):
     show_reports = models.BooleanField(default=True)
     show_history = models.BooleanField(default=True)
     show_dlq = models.BooleanField(default=True)
+    show_cdc_failures = models.BooleanField(default=True)
 
     def __str__(self):
         return f"Widget Preferences for {self.user.username}"

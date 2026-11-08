@@ -10,6 +10,16 @@ BREADCRUMB_REGISTRY = {
         {'name': 'Dashboard', 'url': 'control_plane:dashboard'},
         {'name': 'Pipeline History', 'url': ''}
     ],
+    'active_pipeline_executions': [
+        {'name': 'Dashboard', 'url': 'control_plane:dashboard'},
+        {'name': 'Administration', 'url': ''},
+        {'name': 'Active Pipeline Executions', 'url': ''}
+    ],
+    'active_report_generations': [
+        {'name': 'Dashboard', 'url': 'control_plane:dashboard'},
+        {'name': 'Administration', 'url': ''},
+        {'name': 'Active Report Generations', 'url': ''}
+    ],
     'report_history': [
         {'name': 'Dashboard', 'url': 'control_plane:dashboard'},
         {'name': 'Operations & History', 'url': ''},

@@ -1,0 +1,67 @@
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: reporthub-kafka
+    ports:
+      - "127.0.0.1:9092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_LOG_RETENTION_HOURS: 720
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    restart: unless-stopped
+
+  debezium-connect:
+    image: quay.io/debezium/connect:3.5.2.Final
+    container_name: reporthub-debezium-connect
+    ports:
+      - "127.0.0.1:8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: ${KAFKA_CONNECT_BOOTSTRAP_SERVERS:-kafka:9092}
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: reporthub_connect_configs
+      OFFSET_STORAGE_TOPIC: reporthub_connect_offsets
+      STATUS_STORAGE_TOPIC: reporthub_connect_statuses
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - shared_network
+    depends_on:
+      - kafka
+    restart: unless-stopped
+
+  app:
+    depends_on:
+      - debezium-connect
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      KAFKA_CONNECT_BOOTSTRAP_SERVERS: ${KAFKA_CONNECT_BOOTSTRAP_SERVERS:-kafka:9092}
+      KAFKA_CONNECT_URL: ${KAFKA_CONNECT_URL:-http://debezium-connect:8083}
+
+  celery_ux_worker:
+    depends_on:
+      - debezium-connect
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      KAFKA_CONNECT_BOOTSTRAP_SERVERS: ${KAFKA_CONNECT_BOOTSTRAP_SERVERS:-kafka:9092}
+      KAFKA_CONNECT_URL: ${KAFKA_CONNECT_URL:-http://debezium-connect:8083}
+
+volumes:
+  kafka_data:

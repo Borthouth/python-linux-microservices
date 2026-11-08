@@ -12,19 +12,28 @@ import clickhouse_connect
 from bson import Decimal128, ObjectId
 from django.db.models import Q
 from django.conf import settings
+from django.core.cache import cache
 from celery import shared_task, Task
 from django.utils import timezone
 from pymongo import MongoClient
 from control_plane.models import (
+    CdcExecutionFailure,
     SourceProfile, 
     SourceTable, 
     SourceField, 
     SourceRelationship, 
     WarehouseDatasetMapping,
     SyncStatus, 
-    DbChoice
+    DbChoice,
+    IngestionMode,
 )
 from control_plane.utils import set_task_progress
+from etl.progress import (
+    CONNECTING_TO_SOURCE,
+    INITIALIZING_INGESTION,
+    INTROSPECTING_SCHEMA,
+    PREPARING_INGESTION,
+)
 from reports.models import ReportDefinition
 
 
@@ -465,7 +474,7 @@ def sync_data_source_task(self, source_pk):
     """
     logger = get_etl_logger()
     task_id = self.request.id
-    set_task_progress(task_id, percentage=10, status="RUNNING", current_table="Connecting to source...")
+    set_task_progress(task_id, percentage=10, status="RUNNING", current_table=CONNECTING_TO_SOURCE)
     
     try:
         profile = SourceProfile.objects.get(pk=source_pk)
@@ -581,7 +590,7 @@ def introspect_source_schema_task(self, source_pk):
     """
     logger = get_etl_logger()
     task_id = self.request.id
-    set_task_progress(task_id, percentage=5, status="RUNNING", current_table="Introspecting Schema...")
+    set_task_progress(task_id, percentage=5, status="RUNNING", current_table=INTROSPECTING_SCHEMA)
     
     try:
         profile = SourceProfile.objects.get(pk=source_pk)
@@ -647,6 +656,7 @@ def _ingest_source_to_clickhouse_batch(
     task,
     source_pk,
     batch_size=None,
+    cdc_fallback_only=False,
     full_refresh=False,
     table_index=0,
     row_offset=0,
@@ -664,7 +674,7 @@ def _ingest_source_to_clickhouse_batch(
     logger = get_etl_logger()
     task_id = task.request.id
     query_id = f"etl_task_{task_id}"
-    set_task_progress(task_id, percentage=0, status="RUNNING", current_table="Initializing Ingestion...")
+    set_task_progress(task_id, percentage=0, status="RUNNING", current_table=INITIALIZING_INGESTION)
 
     if batch_size is None:
         batch_size = getattr(settings, 'DEFAULT_ETL_BATCH_SIZE', 10000)
@@ -683,6 +693,25 @@ def _ingest_source_to_clickhouse_batch(
         set_task_progress(task_id, percentage=0, status="SKIPPED", error="Source deactivated")
         return f"Ingestion skipped for deactivated source: {profile.name}"
 
+    if profile.ingestion_mode == IngestionMode.BATCH and SourceTable.objects.filter(
+        source=profile, cdc_managed=True
+    ).exists() and profile.db_type != DbChoice.MONGODB:
+        raise RuntimeError(
+            "Cannot run batch ingestion on a CDC-managed source until a "
+            "coordinated mode transition is implemented."
+        )
+
+    if full_refresh and profile.ingestion_mode == IngestionMode.CDC and any(
+        table.primary_key_fields
+        for table in SourceTable.objects.filter(source=profile)
+    ):
+        raise RuntimeError(
+            "Full-refresh backfills are disabled for sources with primary-key "
+            "tables managed by CDC. Use Debezium's initial snapshot; a "
+            "backfill requires a coordinated CDC snapshot to preserve event "
+            "ordering."
+        )
+
     set_task_progress(
         task_id,
         percentage=int(
@@ -694,7 +723,7 @@ def _ingest_source_to_clickhouse_batch(
             * 100
         ),
         status="RUNNING",
-        current_table="Preparing ingestion...",
+        current_table=PREPARING_INGESTION,
         source_name=profile.name,
     )
     logger.info(
@@ -732,6 +761,11 @@ def _ingest_source_to_clickhouse_batch(
             source__is_active=True,
         ).order_by('pk')
     )
+    if cdc_fallback_only:
+        source_tables = [
+            source_table for source_table in source_tables
+            if not source_table.primary_key_fields
+        ]
     total_tables = len(source_tables)
 
     if total_tables == 0:
@@ -835,10 +869,12 @@ def _ingest_source_to_clickhouse_batch(
             table.incremental_ready = False
             table.incremental_watermark = None
             table.clickhouse_uses_replacing_merge_tree = False
+            table.cdc_managed = False
             table.save(update_fields=[
                 'incremental_ready',
                 'incremental_watermark',
                 'clickhouse_uses_replacing_merge_tree',
+                'cdc_managed',
             ])
         next_table_index = table_index + 1
         if source_engine:
@@ -849,6 +885,7 @@ def _ingest_source_to_clickhouse_batch(
                 args=[source_pk],
                 kwargs={
                     'batch_size': batch_size,
+                    'cdc_fallback_only': cdc_fallback_only,
                     'full_refresh': full_refresh,
                     'table_index': next_table_index,
                     'ingestion_run_id': ingestion_run_id,
@@ -867,10 +904,18 @@ def _ingest_source_to_clickhouse_batch(
     source_fields = {field.field_name: field for field in table.fields.all()}
     incremental_field = source_fields.get(table.incremental_field_name)
     incremental_eligible = bool(
-        table.primary_key_fields
+        profile.ingestion_mode == IngestionMode.CDC
+        and profile.db_type != DbChoice.MONGODB
+        and table.primary_key_fields
         and incremental_field
         and is_datetime_source_type(incremental_field.data_type)
         and all(key in source_fields for key in table.primary_key_fields)
+    )
+    cdc_full_refresh = bool(
+        profile.ingestion_mode == IngestionMode.CDC
+        and profile.db_type != DbChoice.MONGODB
+        and table.primary_key_fields
+        and (table.cdc_managed or full_refresh)
     )
 
     target_exists = ch_client.query(
@@ -941,7 +986,20 @@ def _ingest_source_to_clickhouse_batch(
             column_defs.append(f"`{safe_name}` {ch_type}")
         columns_sql = ", ".join(column_defs)
 
-        if incremental_eligible:
+        if cdc_full_refresh:
+            order_by = ", ".join(
+                f"`{key.replace('`', '``')}`" for key in table.primary_key_fields
+            )
+            column_defs.extend([
+                "`_cdc_version` UInt64",
+                "`_cdc_deleted` UInt8",
+            ])
+            columns_sql = ", ".join(column_defs)
+            engine_sql = (
+                "ReplacingMergeTree(_cdc_version, _cdc_deleted) "
+                f"ORDER BY ({order_by})"
+            )
+        elif incremental_eligible:
             order_by = ", ".join(
                 f"`{key.replace('`', '``')}`" for key in table.primary_key_fields
             )
@@ -971,27 +1029,13 @@ def _ingest_source_to_clickhouse_batch(
                     "$gte": parse_ingestion_watermark(watermark_value),
                     "$lte": parse_ingestion_watermark(watermark_upper),
                 }
-            if (
-                not incremental_run
-                and last_key_values
-                and table.primary_key_fields == ["_id"]
-            ):
-                key_field = source_fields["_id"]
-                last_key = parse_source_key(last_key_values[0], key_field)
-                if key_field.data_type == "ObjectId":
-                    last_key = ObjectId(str(last_key))
-                query_filter["_id"] = {"$gt": last_key}
             chunks = read_mongo_chunks(
                 profile,
                 table.table_name,
                 field_names,
                 batch_size,
                 query_filter=query_filter,
-                skip=(
-                    row_offset
-                    if incremental_run or table.primary_key_fields != ["_id"]
-                    else 0
-                ),
+                skip=row_offset,
             )
             chunk = next(chunks, pd.DataFrame(columns=field_names))
         else:
@@ -1122,10 +1166,21 @@ def _ingest_source_to_clickhouse_batch(
 
         data_rows = sanitized_rows
         if data_rows:
+            insert_field_names = field_names
+            if cdc_full_refresh:
+                snapshot_version = int(datetime.now().timestamp() * 1000) * 1_000_000
+                data_rows = [
+                    row + [snapshot_version + index, 0]
+                    for index, row in enumerate(data_rows)
+                ]
+                insert_field_names = field_names + [
+                    "_cdc_version",
+                    "_cdc_deleted",
+                ]
             ch_client.insert(
                 ch_table_name if incremental_run else staging_table_name,
                 data_rows,
-                column_names=field_names,
+                column_names=insert_field_names,
                 transport_settings={"query_id": query_id},
             )
     except Exception as exc:
@@ -1145,7 +1200,8 @@ def _ingest_source_to_clickhouse_batch(
     rows_in_batch = len(chunk.index)
     if rows_in_batch >= batch_size:
         use_keyset = bool(
-            not incremental_run and table.primary_key_fields
+            profile.db_type != DbChoice.MONGODB
+            and not incremental_run and table.primary_key_fields
         )
         next_offset = (
             row_offset
@@ -1161,6 +1217,7 @@ def _ingest_source_to_clickhouse_batch(
             args=[source_pk],
             kwargs={
                 'batch_size': batch_size,
+                'cdc_fallback_only': cdc_fallback_only,
                 'full_refresh': full_refresh,
                 'table_index': table_index,
                 'row_offset': next_offset,
@@ -1203,12 +1260,21 @@ def _ingest_source_to_clickhouse_batch(
     else:
         table.incremental_ready = False
         table.incremental_watermark = None
-    table.clickhouse_uses_replacing_merge_tree = incremental_eligible
+    table.clickhouse_uses_replacing_merge_tree = bool(
+        cdc_full_refresh or incremental_eligible
+    )
+    if profile.ingestion_mode == IngestionMode.BATCH:
+        table.cdc_managed = False
+    elif full_refresh:
+        table.cdc_managed = bool(table.primary_key_fields)
+    elif not table.primary_key_fields:
+        table.cdc_managed = False
     table.last_synced_at = timezone.now()
     table.save(update_fields=[
         'incremental_watermark',
         'incremental_ready',
         'clickhouse_uses_replacing_merge_tree',
+        'cdc_managed',
         'last_synced_at',
     ])
     logger.info(
@@ -1224,6 +1290,7 @@ def _ingest_source_to_clickhouse_batch(
             args=[source_pk],
             kwargs={
                 'batch_size': batch_size,
+                'cdc_fallback_only': cdc_fallback_only,
                 'full_refresh': full_refresh,
                 'table_index': next_table_index,
                 'ingestion_run_id': ingestion_run_id,
@@ -1246,6 +1313,7 @@ def ingest_source_to_clickhouse_task(
     self,
     source_pk,
     batch_size=None,
+    cdc_fallback_only=False,
     full_refresh=False,
     table_index=0,
     row_offset=0,
@@ -1255,13 +1323,73 @@ def ingest_source_to_clickhouse_task(
     watermark_value=None,
     watermark_upper=None,
     watermark_max=None,
+    cdc_continue=False,
     task_queue='queue_hot',
 ):
     try:
+        profile = SourceProfile.objects.filter(pk=source_pk).only(
+            "db_type", "ingestion_mode"
+        ).first()
+        if profile and profile.ingestion_mode == IngestionMode.BATCH:
+            if cdc_continue or cdc_fallback_only:
+                raise RuntimeError(
+                    "A queued CDC task cannot run for a batch-mode source."
+                )
+            return _ingest_source_to_clickhouse_batch(
+                self,
+                source_pk,
+                batch_size=batch_size,
+                full_refresh=True,
+                table_index=table_index,
+                row_offset=row_offset,
+                last_key_values=last_key_values,
+                ingestion_run_id=ingestion_run_id,
+                task_queue=task_queue,
+            )
+        if profile and profile.db_type == DbChoice.MONGODB:
+            raise RuntimeError(
+                "MongoDB CDC ingestion is not supported; use batch refresh."
+            )
+        if cdc_continue or (
+            not full_refresh
+            and not cdc_fallback_only
+            and table_index == 0
+            and row_offset == 0
+            and last_key_values is None
+            and ingestion_run_id is None
+            and incremental_run is None
+            and watermark_value is None
+            and watermark_upper is None
+            and watermark_max is None
+        ):
+            try:
+                return _run_scheduled_cdc_ingestion(
+                    self,
+                    source_pk,
+                    batch_size=batch_size,
+                    task_queue=task_queue,
+                )
+            except Exception as exc:
+                try:
+                    CdcExecutionFailure.objects.create(
+                        source_id=source_pk,
+                        task_id=self.request.id or "",
+                        error_message=(
+                            f"{type(exc).__name__}: CDC execution failed. "
+                            "See the ETL worker logs for details."
+                        ),
+                    )
+                except Exception:
+                    get_etl_logger().exception(
+                        "Could not record CDC execution failure for source %s",
+                        source_pk,
+                    )
+                raise
         return _ingest_source_to_clickhouse_batch(
             self,
             source_pk,
             batch_size=batch_size,
+            cdc_fallback_only=cdc_fallback_only,
             full_refresh=full_refresh,
             table_index=table_index,
             row_offset=row_offset,
@@ -1284,11 +1412,130 @@ def ingest_source_to_clickhouse_task(
             last_sync_error=str(exc),
         )
         get_etl_logger().exception(
-            "ClickHouse ingestion batch failed for source %s: %s",
+            "Source ingestion batch failed for source %s: %s",
             source_pk,
             exc,
         )
         raise
+
+
+def _run_scheduled_cdc_ingestion(
+    task,
+    source_pk,
+    batch_size=None,
+    task_queue='queue_hot',
+):
+    task_id = task.request.id
+    try:
+        profile = SourceProfile.objects.get(pk=source_pk)
+    except SourceProfile.DoesNotExist:
+        set_task_progress(
+            task_id,
+            percentage=0,
+            status="FAILED",
+            error="SourceProfile not found",
+        )
+        return f"SourceProfile {source_pk} not found."
+
+    if not profile.is_active:
+        set_task_progress(
+            task_id,
+            percentage=0,
+            status="SKIPPED",
+            error="Source deactivated",
+        )
+        return f"Ingestion skipped for deactivated source: {profile.name}"
+
+    if batch_size is None:
+        batch_size = settings.DEFAULT_ETL_BATCH_SIZE
+    batch_size = max(1, int(batch_size))
+    profile.last_sync_status = SyncStatus.RUNNING
+    profile.last_sync_error = ""
+    profile.save(update_fields=["last_sync_status", "last_sync_error"])
+    ch_client = clickhouse_connect.get_client(
+        host=getattr(settings, 'CLICKHOUSE_HOST', 'localhost'),
+        port=getattr(settings, 'CLICKHOUSE_PORT', 8123),
+        username=getattr(settings, 'CLICKHOUSE_USER', 'default'),
+        password=getattr(settings, 'CLICKHOUSE_PASSWORD', ''),
+    )
+    lock_key = f"reporthub:cdc-ingestion:{source_pk}"
+    lock_token = uuid4().hex
+    try:
+        lock_acquired = cache.add(lock_key, lock_token, timeout=900)
+    except Exception:
+        ch_client.close()
+        raise
+    if not lock_acquired:
+        ch_client.close()
+        ingest_source_to_clickhouse_task.apply_async(
+            args=[source_pk],
+            kwargs={
+                "batch_size": batch_size,
+                "cdc_continue": True,
+                "task_queue": task_queue,
+            },
+            countdown=10,
+            queue=task_queue,
+        )
+        return f"CDC ingestion for {profile.name} is already running; queued a retry."
+
+    try:
+        from etl.cdc import consume_source_cdc_batch, ensure_debezium_connector
+
+        ensure_debezium_connector(profile)
+        processed = consume_source_cdc_batch(
+            profile,
+            ch_client,
+            batch_size=batch_size,
+        )
+        has_polling_tables = any(
+            not source_table.primary_key_fields
+            for source_table in profile.tables.all()
+        )
+        if has_polling_tables:
+            ingest_source_to_clickhouse_task.apply_async(
+                args=[source_pk],
+                kwargs={
+                    "batch_size": batch_size,
+                    "cdc_fallback_only": True,
+                    "task_queue": task_queue,
+                },
+                queue=task_queue,
+            )
+        else:
+            profile.last_synced = timezone.now()
+            profile.last_sync_status = SyncStatus.SUCCESS
+            profile.last_sync_error = ""
+            profile.save(update_fields=[
+                "last_synced",
+                "last_sync_status",
+                "last_sync_error",
+            ])
+            set_task_progress(
+                task_id,
+                percentage=100,
+                status="SUCCESS",
+                current_table="CDC batch completed",
+            )
+        if processed >= batch_size:
+            ingest_source_to_clickhouse_task.apply_async(
+                args=[source_pk],
+                kwargs={
+                    "batch_size": batch_size,
+                    "cdc_continue": True,
+                    "task_queue": task_queue,
+                },
+                queue=task_queue,
+            )
+        return (
+            f"Processed {processed} CDC event(s) for {profile.name}"
+            + ("; queued polling fallback tables." if has_polling_tables else ".")
+            + (" Queued another CDC batch." if processed >= batch_size else "")
+        )
+    finally:
+        ch_client.close()
+        if cache.get(lock_key) == lock_token:
+            cache.delete(lock_key)
 
 
 def map_to_clickhouse_type(source_type, is_nullable=True):
@@ -1330,6 +1577,15 @@ def trigger_all_active_clickhouse_ingestion_task(self):
 @shared_task(bind=True, queue='queue_periodic')
 def backfill_source_to_clickhouse_task(self, source_pk, batch_size=None):
     """Rebuild one source's ClickHouse tables using its saved warehouse field selections."""
+    if _source_has_primary_key_tables(source_pk):
+        logger = get_etl_logger()
+        message = (
+            f"Skipped ClickHouse backfill for source {source_pk}: "
+            "it has primary-key tables managed by CDC."
+        )
+        logger.warning(message)
+        return message
+
     ingest_source_to_clickhouse_task.apply_async(
         args=[source_pk],
         kwargs={
@@ -1342,13 +1598,37 @@ def backfill_source_to_clickhouse_task(self, source_pk, batch_size=None):
     return f"Dispatched ClickHouse backfill for source {source_pk}"
 
 
+def _source_has_primary_key_tables(source_pk):
+    return any(
+        primary_key_fields
+        for primary_key_fields in SourceTable.objects.filter(
+            source_id=source_pk, source__ingestion_mode=IngestionMode.CDC
+        ).values_list(
+            'primary_key_fields', flat=True
+        )
+    )
+
+
 @shared_task(bind=True, queue='queue_periodic')
 def trigger_all_active_clickhouse_backfill_task(self, batch_size=None):
-    """Dispatch bounded full-refresh batches for all active data sources."""
+    """Dispatch bounded full-refresh batches for active sources without CDC tables."""
+    logger = get_etl_logger()
     active_sources = SourceProfile.objects.filter(is_active=True)
+    dispatched_count = 0
+    skipped_count = 0
+
     for source in active_sources:
+        if _source_has_primary_key_tables(source.pk):
+            logger.warning(
+                f"Skipped ClickHouse backfill for source {source.pk} ({source.name}): "
+                "it has primary-key tables managed by CDC."
+            )
+            skipped_count += 1
+            continue
         backfill_source_to_clickhouse_task.delay(source.pk, batch_size=batch_size)
+        dispatched_count += 1
+
     return (
-        f"Successfully dispatched ClickHouse backfill for "
-        f"{active_sources.count()} active sources."
+        f"Dispatched ClickHouse backfill for {dispatched_count} active source(s); "
+        f"skipped {skipped_count} source(s) with primary-key tables managed by CDC."
     )

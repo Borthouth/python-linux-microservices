@@ -25,7 +25,20 @@
                 if (!currentPort || Object.values(defaultPorts).includes(currentPort)) {
                     portField.value = defaultPorts[event.target.value];
                 }
+                updateOracleFields();
             });
+
+            function updateOracleFields() {
+                const dbTypeField = document.getElementById('id_db_type');
+                if (!dbTypeField) return;
+                const isOracle = dbTypeField.value === 'oracle';
+                document.querySelectorAll('[data-oracle-config]').forEach(function (field) {
+                    field.closest('div').hidden = !isOracle;
+                });
+            }
+
+            document.addEventListener('DOMContentLoaded', updateOracleFields);
+            if (document.readyState !== 'loading') updateOracleFields();
         </script>
 
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-xl">

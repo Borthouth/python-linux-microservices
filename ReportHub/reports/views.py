@@ -1,4 +1,5 @@
 import json
+import logging
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.shortcuts import render, get_object_or_404, redirect
 from django.http import JsonResponse
@@ -8,8 +9,7 @@ from .models import (
     ReportDefinition, 
     SourceTable, 
     SourceField, 
-    ReportExecution, 
-    EmailAuditLog
+    ReportExecution
 )
 from .forms import ReportDefinitionForm
 from datetime import timedelta
@@ -26,6 +26,10 @@ from django.views.decorators.http import require_POST
 from control_plane.models import SourceRelationship
 from .query_builder import relationship_groups
 from .ai_design import OllamaUnavailable, generate_report_design
+from .email_webhooks import handle_email_webhook
+
+
+logger = logging.getLogger(__name__)
 
 
 def is_admin(user):
@@ -376,8 +380,12 @@ def ai_report_design(request):
             {"error": "The local AI service is unavailable. Check that Ollama is running and the configured model is installed."},
             status=503,
         )
-    except ValueError as exc:
-        return JsonResponse({"error": str(exc)}, status=422)
+    except ValueError:
+        logger.exception("AI report design generation or validation failed")
+        return JsonResponse(
+            {"error": "The AI returned an invalid report configuration. Please try again."},
+            status=422,
+        )
     return JsonResponse({"config": config})
 
 
@@ -531,25 +539,4 @@ def report_status(request, pk):
 
 @csrf_exempt
 def email_webhook_receiver(view_request):
-    if view_request.method != 'POST':
-        return JsonResponse({'error': 'Method not allowed'}, status=405)
-
-    try:
-        events = json.loads(view_request.body)
-        for event in events:
-            msg_id = event.get('sg_message_id') or event.get('message-id')
-            event_type = event.get('event') # e.g., 'bounce', 'delivered', 'dropped'
-            
-            if msg_id:
-                log_entry = EmailAuditLog.objects.filter(message_id__icontains=msg_id).first()
-                if log_entry:
-                    if event_type in ['bounce', 'dropped']:
-                        log_entry.status = 'bounced'
-                        log_entry.error_message = event.get('reason', 'Unknown bounce reason')
-                    elif event_type == 'delivered':
-                        log_entry.status = 'delivered'
-                    log_entry.save()
-
-        return JsonResponse({'status': 'success'}, status=200)
-    except Exception as e:
-        return JsonResponse({'error': str(e)}, status=400)
+    return handle_email_webhook(view_request)

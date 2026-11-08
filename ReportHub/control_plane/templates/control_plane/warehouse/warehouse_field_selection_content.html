@@ -50,20 +50,12 @@
                             </div>
                         </div>
 
-                        <div class="space-y-1">
-                            <label for="incremental-field-{{ source_table.pk }}" class="text-xs font-medium text-slate-300">Modified-at field (optional)</label>
-                            <select id="incremental-field-{{ source_table.pk }}" name="incremental_field_{{ source_table.pk }}"
-                                    class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white">
-                                <option value="">Full refresh for this table</option>
-                                {% for field in source_table.fields.all %}
-                                    {% if "date" in field.data_type|lower or "datetime" in field.data_type|lower or "timestamp" in field.data_type|lower %}
-                                    <option value="{{ field.field_name }}" {% if source_table.incremental_field_name == field.field_name %}selected{% endif %}>
-                                        {{ field.field_name }} ({{ field.data_type }})
-                                    </option>
-                                    {% endif %}
-                                {% endfor %}
-                            </select>
-                            <p class="text-xs text-slate-500">Choose a field updated whenever a row changes. Incremental loading also requires an introspected primary key; otherwise ingestion uses a full refresh.</p>
+                        <div class="rounded-lg border border-slate-800 bg-slate-800/40 px-3 py-2">
+                            {% if source_table.primary_key_fields %}
+                            <p class="text-xs text-slate-400">CDC uses the source transaction log/change stream for this table. No modified-at column is required.</p>
+                            {% else %}
+                            <p class="text-xs text-amber-300">Primary-key metadata is missing or stale. <a href="{% url 'control_plane:source_list' %}" class="underline hover:text-amber-200">Run Sync on the Data Sources page</a> to refresh it. If no key is found after syncing, this table uses bounded full-refresh batches; CDC updates and deletes need a primary key.</p>
+                            {% endif %}
                         </div>
 
                         <!-- Column Search Filter -->
@@ -76,14 +68,19 @@
                         <div class="slate-scrollbar grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[calc(100vh-380px)] overflow-y-auto pr-2">
                             {% for field in source_table.fields.all %}
                             {% with field_key=source_table.table_name|add:"."|add:field.field_name %}
-                            <div class="column-item flex items-center justify-between bg-slate-800/40 p-3 rounded-xl border border-slate-800 hover:border-slate-700 transition-all" data-colname="{{ field.field_name|lower }}">
+                            <div class="column-item flex items-center justify-between bg-slate-800/40 p-3 rounded-xl border {% if field.field_name in source_table.primary_key_fields %}border-amber-500/40 hover:border-amber-400/60{% else %}border-slate-800 hover:border-slate-700{% endif %} transition-all" data-colname="{{ field.field_name|lower }}">
                                 <div class="flex items-center space-x-3">
                                     <input type="checkbox" name="selected_fields" value="{{ field_key }}" id="field-{{ field_key }}"
                                            class="table-field-{{ source_table.table_name }} rounded border-slate-700 bg-slate-800 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
                                            {% if field_key in enabled_set or field_key not in mapped_field_keys %}checked{% endif %}>
-                                    <label for="field-{{ field_key }}" class="text-sm text-slate-300 font-mono cursor-pointer truncate" title="{{ field.field_name }}">{{ field.field_name }}</label>
+                                    <label for="field-{{ field_key }}" class="text-sm {% if field.field_name in source_table.primary_key_fields %}text-amber-200{% else %}text-slate-300{% endif %} font-mono cursor-pointer truncate" title="{{ field.field_name }}">{{ field.field_name }}</label>
                                 </div>
-                                <span class="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700/50" title="{{ field.data_type }}">{{ field.data_type }}</span>
+                                <div class="flex items-center gap-1.5 shrink-0">
+                                    {% if field.field_name in source_table.primary_key_fields %}
+                                    <span class="text-[9px] uppercase font-bold tracking-wide px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30" title="Part of this table's primary key">Primary Key</span>
+                                    {% endif %}
+                                    <span class="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700/50" title="{{ field.data_type }}">{{ field.data_type }}</span>
+                                </div>
                             </div>
                             {% endwith %}
                             {% empty %}

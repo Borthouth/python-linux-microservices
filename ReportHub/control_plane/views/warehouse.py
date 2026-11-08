@@ -55,33 +55,8 @@ def warehouse_field_selection_view(request, source_pk):
 
     if request.method == 'POST':
         selected_fields = set(request.POST.getlist('selected_fields'))  # Format: "table_name.field_name"
-        incremental_fields = {}
         selection_changes = {}
         for table in tables_qs:
-            incremental_field_name = request.POST.get(
-                f'incremental_field_{table.pk}'
-            ) or None
-            incremental_field = (
-                table.fields.filter(field_name=incremental_field_name).first()
-                if incremental_field_name else None
-            )
-            if incremental_field_name and (
-                incremental_field is None
-                or not any(
-                    kind in incremental_field.data_type.lower()
-                    for kind in ('date', 'datetime', 'timestamp')
-                )
-            ):
-                messages.error(
-                    request,
-                    f"Choose a date/time field for incremental updates on {table.table_name}.",
-                )
-                return redirect(
-                    'control_plane:warehouse_field_selection',
-                    source_pk=source.pk,
-                )
-            incremental_fields[table.pk] = incremental_field_name
-
             existing_mappings = source.warehouse_mappings.filter(
                 table_name=table.table_name
             )
@@ -115,17 +90,7 @@ def warehouse_field_selection_view(request, source_pk):
                 )
 
         for table in tables_qs:
-            incremental_field_name = incremental_fields[table.pk]
-            if table.incremental_field_name != incremental_field_name:
-                table.incremental_field_name = incremental_field_name
-                table.incremental_watermark = None
-                table.incremental_ready = False
-                table.save(update_fields=[
-                    'incremental_field_name',
-                    'incremental_watermark',
-                    'incremental_ready',
-                ])
-            elif selection_changes[table.pk]:
+            if selection_changes[table.pk]:
                 table.incremental_ready = False
                 table.save(update_fields=['incremental_ready'])
                 

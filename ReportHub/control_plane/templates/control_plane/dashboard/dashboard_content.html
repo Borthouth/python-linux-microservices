@@ -18,6 +18,12 @@
     </div>
 
     <!-- Dead Letter Queue Widget Component -->
+    {% if request.user.is_staff or request.user.is_superuser %}
+    <div class="{% if not widget_prefs.show_cdc_failures %}hidden{% endif %} mb-6" id="widget-cdc_failures-wrapper">
+        {% include 'control_plane/dashboard/components/cdc_failures.html' %}
+    </div>
+    {% endif %}
+
     <div class="{% if not widget_prefs.show_dlq %}hidden{% endif %} mb-6" id="widget-dlq-wrapper">
         {% include 'control_plane/dashboard/components/dlq_widget.html' %}
     </div>

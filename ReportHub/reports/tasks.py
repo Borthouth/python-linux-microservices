@@ -10,6 +10,7 @@ from django.core.mail import EmailMessage
 from django.conf import settings
 from minio import Minio
 from .models import ReportDefinition, ReportExecution
+from .progress import ReportProgress
 from .ai_summary import generate_report_summary
 from .charting import build_chart_data
 from .exporters import build_json_report, build_xlsx_report
@@ -137,7 +138,7 @@ def execute_report_task(self, report_id, execution_id=None):
         if execution_id:
             execution = ReportExecution.objects.get(pk=execution_id)
             execution.status = 'running'
-            execution.progress_percentage = 10
+            execution.progress_percentage = ReportProgress.INITIALIZING
             execution.is_cancelled = False
             execution.updated_at = timezone.now()
             execution.save(update_fields=['status', 'progress_percentage', 'is_cancelled', 'updated_at'])
@@ -145,7 +146,7 @@ def execute_report_task(self, report_id, execution_id=None):
             execution = ReportExecution.objects.create(
                 report=report, 
                 status='running', 
-                progress_percentage=10
+                progress_percentage=ReportProgress.INITIALIZING
             )
 
         # Check cancellation early
@@ -171,9 +172,9 @@ def execute_report_task(self, report_id, execution_id=None):
         pdf_truncated = False
 
         # --- Stage 1: ClickHouse Query Execution (Progress: 30%) ---
-        execution.progress_percentage = 30
+        execution.progress_percentage = ReportProgress.QUERYING
         execution.save(update_fields=['progress_percentage'])
-        set_task_progress(task_id, percentage=30, status="RUNNING", current_step=f"Querying ClickHouse for {report.name}...")
+        set_task_progress(task_id, percentage=ReportProgress.QUERYING.value, status="RUNNING", current_step=f"Querying ClickHouse for {report.name}...")
 
         query, headers, aggregates = build_clickhouse_report_query(report, fields_to_query)
         if export_format == 'pdf':
@@ -215,9 +216,9 @@ def execute_report_task(self, report_id, execution_id=None):
             return "Execution cancelled after database query."
 
         # --- Stage 2: Summary Aggregates & File Build (Progress: 60%) ---
-        execution.progress_percentage = 60
+        execution.progress_percentage = ReportProgress.FORMATTING
         execution.save(update_fields=['progress_percentage'])
-        set_task_progress(task_id, percentage=60, status="RUNNING", current_step="Building summaries and formatting file...")
+        set_task_progress(task_id, percentage=ReportProgress.FORMATTING.value, status="RUNNING", current_step="Building summaries and formatting file...")
 
         summary_lines = []
         if show_totals and rows and len(rows) > 0:
@@ -318,9 +319,9 @@ def execute_report_task(self, report_id, execution_id=None):
             content_type = 'text/csv'
 
         # --- Stage 3: MinIO Storage Upload (Progress: 85%) ---
-        execution.progress_percentage = 85
+        execution.progress_percentage = ReportProgress.UPLOADING
         execution.save(update_fields=['progress_percentage'])
-        set_task_progress(task_id, percentage=85, status="RUNNING", current_step="Uploading artifact to MinIO...")
+        set_task_progress(task_id, percentage=ReportProgress.UPLOADING.value, status="RUNNING", current_step="Uploading artifact to MinIO...")
 
         endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://minio:9000')
         if endpoint.startswith('http://'): endpoint = endpoint[7:]
@@ -335,7 +336,7 @@ def execute_report_task(self, report_id, execution_id=None):
         minio_client.put_object(bucket_name, file_name, io.BytesIO(file_bytes), len(file_bytes), content_type=content_type)
 
         execution.status = 'completed'
-        execution.progress_percentage = 100
+        execution.progress_percentage = ReportProgress.COMPLETED
         execution.file_path = file_name
         execution.row_count = row_count
         execution.completed_at = timezone.now()

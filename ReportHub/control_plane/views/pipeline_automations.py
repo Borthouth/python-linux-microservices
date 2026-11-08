@@ -182,7 +182,7 @@ def run_pipeline_automation_manually_view(request, task_id):
     task = get_object_or_404(PeriodicTask, id=task_id)
     from celery import current_app
     current_app.send_task(task.task)
-    messages.success(request, f"Pipeline automation '{task.name}' triggered manually.")
+    messages.info(request, f"Pipeline automation '{task.name}' triggered manually.")
     return redirect('control_plane:pipeline_automation_list')
 
 @login_required

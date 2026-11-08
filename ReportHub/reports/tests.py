@@ -3,7 +3,7 @@ import json
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from openpyxl import load_workbook
@@ -19,9 +19,71 @@ from reports.ai_design import validate_report_design
 from reports.ai_summary import build_summary_metrics, generate_report_summary
 from reports.charting import build_chart_data, build_pdf_chart
 from reports.exporters import build_json_report, build_xlsx_report
-from reports.models import ReportDefinition, ReportExecution
+from reports.models import EmailAuditLog, ReportDefinition, ReportExecution
+from reports.ollama import OllamaUnavailable
 from reports.pdf_export import build_pdf_report
 from reports.query_builder import build_clickhouse_report_query
+from reports.views import email_webhook_receiver
+
+
+class EmailWebhookTests(TestCase):
+    def setUp(self):
+        self.log = EmailAuditLog.objects.create(
+            recipients="test@example.com", message_id="message-123", status="sent"
+        )
+        self.url = reverse("control_plane:email_webhook_receiver")
+        self.factory = RequestFactory()
+
+    def test_routed_webhook_accepts_single_provider_event(self):
+        response = self.client.post(
+            self.url,
+            data=json.dumps({"MessageID": "message-123", "Type": "Bounce", "reason": "Mailbox full"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "success"})
+        self.log.refresh_from_db()
+        self.assertEqual((self.log.status, self.log.error_message), ("bounced", "Mailbox full"))
+
+    def test_legacy_webhook_accepts_event_list(self):
+        request = self.factory.post(
+            "/",
+            data=json.dumps([{"sg_message_id": "message-123", "event": "delivered"}]),
+            content_type="application/json",
+        )
+        response = email_webhook_receiver(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.log.refresh_from_db()
+        self.assertEqual(self.log.status, "delivered")
+
+    def test_invalid_payloads_return_safe_bad_request(self):
+        for payload in ("not json", '"not an event"', '[{"event": "delivered"}, 1]'):
+            with self.subTest(payload=payload):
+                response = self.client.post(self.url, data=payload, content_type="application/json")
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json(), {"error": "Invalid webhook payload."})
+
+    @patch("reports.email_webhooks.EmailAuditLog.objects.filter")
+    def test_processing_failure_is_logged_without_exposing_exception(self, filter_logs):
+        filter_logs.side_effect = RuntimeError("sensitive internal details")
+
+        with self.assertLogs("reports.email_webhooks", level="ERROR") as logs:
+            response = self.client.post(
+                self.url,
+                data=json.dumps([{"message-id": "message-123", "event": "delivered"}]),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json(), {"error": "Failed to process webhook."})
+        self.assertNotContains(response, "sensitive internal details", status_code=500)
+        self.assertIn("Failed to process email delivery webhook", logs.output[0])
+
+    def test_non_post_is_rejected(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 405)
 
 
 @override_settings(CACHES={
@@ -52,6 +114,46 @@ class ReportManagementDownloadTests(TestCase):
             source=source,
             base_table=table,
         )
+
+    def post_ai_design(self):
+        return self.client.post(
+            reverse("reports:ai_report_design"),
+            data=json.dumps({
+                "source_id": self.report.source_id,
+                "table_id": self.report.base_table_id,
+                "description": "Show the items",
+            }),
+            content_type="application/json",
+        )
+
+    @patch("reports.views.generate_report_design")
+    def test_ai_design_value_error_does_not_expose_exception_details(self, generate):
+        generate.side_effect = ValueError("sensitive internal details")
+
+        with self.assertLogs("reports.views", level="ERROR") as logs:
+            response = self.post_ai_design()
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json(),
+            {"error": "The AI returned an invalid report configuration. Please try again."},
+        )
+        self.assertNotContains(response, "sensitive internal details", status_code=422)
+        self.assertIn("AI report design generation or validation failed", logs.output[0])
+
+    @patch("reports.views.generate_report_design", return_value={"reportType": "tabular"})
+    def test_ai_design_success_returns_configuration(self, generate):
+        response = self.post_ai_design()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"config": {"reportType": "tabular"}})
+
+    @patch("reports.views.generate_report_design", side_effect=OllamaUnavailable)
+    def test_ai_design_unavailable_keeps_service_error(self, generate):
+        response = self.post_ai_design()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("local AI service is unavailable", response.json()["error"])
 
     def test_download_is_hidden_until_a_completed_run_exists(self):
         response = self.client.get(reverse("reports:report_list"))
@@ -625,6 +727,34 @@ class ClickHouseReportQueryTests(TestCase):
         self.assertIn("` AS t0 FINAL", query)
         self.assertIn("LEFT JOIN `source_", query)
         self.assertIn("` AS t1 FINAL", query)
+
+    def test_cdc_tables_filter_versioned_delete_tombstones(self):
+        self.orders.cdc_managed = True
+        self.orders.save(update_fields=["cdc_managed"])
+        self.customers.cdc_managed = True
+        self.customers.save(update_fields=["cdc_managed"])
+        report = self.make_report(
+            self.orders,
+            [str(self.customer_relationship.pk)],
+        )
+
+        query, _, _ = build_clickhouse_report_query(
+            report,
+            [
+                {"table_key": "base", "field_name": "id"},
+                {
+                    "table_key": str(self.customer_relationship.pk),
+                    "field_name": "id",
+                },
+            ],
+        )
+
+        self.assertIn(
+            "FROM (SELECT * FROM `source_",
+            query,
+        )
+        self.assertEqual(query.count("`_cdc_deleted` = 0"), 2)
+        self.assertEqual(query.count(" FINAL WHERE "), 2)
 
     def test_tabular_detail_keeps_selected_columns_as_source_rows(self):
         report = self.make_report(self.orders, [])

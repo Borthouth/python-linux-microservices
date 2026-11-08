@@ -53,6 +53,12 @@
                     <input type="checkbox" {% if widget_prefs.show_dlq %}checked{% endif %} @change="toggleWidget('dlq', $event.target.checked, '{{ csrf_token }}'); document.getElementById('widget-dlq-wrapper').classList.toggle('hidden', !$event.target.checked)" class="rounded border-slate-700 bg-slate-950 text-indigo-500 focus:ring-0">
                     <span>Dead Letter Queue</span>
                 </label>
+                {% if request.user.is_staff or request.user.is_superuser %}
+                <label class="flex items-center space-x-2 px-2 py-1.5 hover:bg-slate-800/60 rounded-lg cursor-pointer text-xs text-slate-300 transition">
+                    <input type="checkbox" {% if widget_prefs.show_cdc_failures %}checked{% endif %} @change="toggleWidget('cdc_failures', $event.target.checked, '{{ csrf_token }}'); document.getElementById('widget-cdc_failures-wrapper').classList.toggle('hidden', !$event.target.checked)" class="rounded border-slate-700 bg-slate-950 text-indigo-500 focus:ring-0">
+                    <span>CDC Failures</span>
+                </label>
+                {% endif %}
             </div>
         </div>
     </div>

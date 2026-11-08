@@ -1,0 +1,11 @@
+CONNECTING_TO_SOURCE = "Connecting to source..."
+INTROSPECTING_SCHEMA = "Introspecting Schema..."
+INITIALIZING_INGESTION = "Initializing Ingestion..."
+PREPARING_INGESTION = "Preparing ingestion..."
+
+PIPELINE_STEPS = (
+    CONNECTING_TO_SOURCE,
+    INTROSPECTING_SCHEMA,
+    INITIALIZING_INGESTION,
+    PREPARING_INGESTION,
+)

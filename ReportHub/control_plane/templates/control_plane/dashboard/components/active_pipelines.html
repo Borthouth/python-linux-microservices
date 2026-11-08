@@ -5,7 +5,7 @@
             <span class="text-amber-400">⚡</span>
             <div>
                 <h2 class="text-lg font-semibold text-white">Active Pipeline Executions</h2>
-                <p class="text-slate-400 text-xs mt-0.5">Real-time status of running Celery ETL tasks.</p>
+                <p class="text-slate-400 text-xs mt-0.5">Recently reported running tasks; records can be stale.</p>
             </div>
         </div>
         <span class="px-2.5 py-1 bg-slate-800/80 border border-slate-700/60 text-slate-300 text-[10px] font-mono rounded-full">
@@ -30,5 +30,8 @@
                 No active pipeline executions running.
             </div>
         {% endfor %}
+    </div>
+    <div class="mt-4 text-right">
+        <a href="{% url 'control_plane:active_pipeline_executions' %}" class="text-xs text-indigo-400 hover:text-indigo-300 font-medium">View All Active Pipeline Executions &rarr;</a>
     </div>
 </div>

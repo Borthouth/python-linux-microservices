@@ -1,11 +1,10 @@
-import json
 from django.contrib.admin.views.decorators import staff_member_required
 from django.core.paginator import Paginator
 from django.db.models import Q
-from django.http import JsonResponse
 from django.shortcuts import render, get_object_or_404, redirect
 from django.views.decorators.csrf import csrf_exempt
 from reports.models import EmailAuditLog
+from reports.email_webhooks import handle_email_webhook
 from django.contrib import messages
 
 
@@ -58,31 +57,7 @@ def email_webhook_receiver(request):
     Public webhook endpoint for handling external SMTP provider delivery feedback,
     bounces, drops, and delivered events.
     """
-    if request.method != 'POST':
-        return JsonResponse({'error': 'Method not allowed'}, status=405)
-
-    try:
-        events = json.loads(request.body)
-        if isinstance(events, dict):
-            events = [events]
-
-        for event in events:
-            msg_id = event.get('sg_message_id') or event.get('message-id') or event.get('MessageID')
-            event_type = event.get('event') or event.get('Type')
-            
-            if msg_id:
-                log_entry = EmailAuditLog.objects.filter(message_id__icontains=msg_id).first()
-                if log_entry:
-                    if event_type in ['bounce', 'dropped', 'Bounce']:
-                        log_entry.status = 'bounced'
-                        log_entry.error_message = event.get('reason', 'Unknown bounce reason')
-                    elif event_type in ['delivered', 'Delivered']:
-                        log_entry.status = 'delivered'
-                    log_entry.save()
-
-        return JsonResponse({'status': 'success'}, status=200)
-    except Exception as e:
-        return JsonResponse({'error': str(e)}, status=400)
+    return handle_email_webhook(request, extended_events=True)
 
 
 @staff_member_required

@@ -19,7 +19,7 @@
                 <div>
                     <span class="text-slate-200 font-mono text-xs">{{ report.report.name }}</span>
                     <div class="text-slate-400 text-xs mt-1">{{ report.progress_percentage }}% complete</div>
-                    <div class="text-slate-500 text-xs mt-1">Started {{ report.updated_at|date:"M j, Y, g:i A" }}</div>
+                    <div class="text-slate-500 text-xs mt-1">Created {{ report.created_at|date:"M j, Y, g:i A"|default:"Unknown" }}</div>
                 </div>
                 <span class="px-2 py-0.5 bg-indigo-950/60 border border-indigo-500/30 text-indigo-300 text-[10px] rounded-full">Processing</span>
             </div>
@@ -28,5 +28,8 @@
                 No active report generations running.
             </div>
         {% endfor %}
+    </div>
+    <div class="mt-4 text-right">
+        <a href="{% url 'control_plane:active_report_generations' %}" class="text-xs text-indigo-400 hover:text-indigo-300 font-medium">View All Active Report Generations &rarr;</a>
     </div>
 </div>

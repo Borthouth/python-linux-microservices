@@ -2,7 +2,7 @@
     <div class="mb-6">
         <div>
             <h1 class="text-2xl font-extrabold text-white">Pipeline Execution History</h1>
-            <p class="text-slate-400 text-xs mt-1">Search, filter, and review all past and active ETL pipeline runs.</p>
+            <p class="text-slate-400 text-xs mt-1">Review the latest source status and recent CDC execution failures.</p>
         </div>
     </div>
 
@@ -54,4 +54,7 @@
     </div>
 
     {% include 'control_plane/components/pagination.html' %}
+    <div class="mt-6">
+        {% include 'control_plane/dashboard/components/cdc_failures.html' with hide_history_link=True %}
+    </div>
 </div>

@@ -1,0 +1,21 @@
+<div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-6">
+    <h2 class="text-lg font-semibold text-white">Recent CDC Execution Failures</h2>
+    <p class="text-slate-400 text-xs mt-1 mb-4">Historical failures, including sources that have since recovered. Use the task ID to find details in the ETL worker logs.</p>
+    <div class="divide-y divide-slate-800/60">
+        {% for failure in cdc_failures %}
+        <div class="py-3 text-xs text-slate-300">
+            <div class="flex flex-wrap justify-between gap-2">
+                <span class="font-semibold text-white">{{ failure.source.name }}</span>
+                <span>{{ failure.failed_at|date:"M j, Y H:i:s" }}</span>
+            </div>
+            <p class="mt-1">{{ failure.error_message }}</p>
+            {% if failure.task_id %}<p class="mt-1 font-mono text-slate-400">Task: {{ failure.task_id }}</p>{% endif %}
+        </div>
+        {% empty %}
+        <p class="py-3 text-xs text-slate-500">No recorded CDC execution failures.</p>
+        {% endfor %}
+    </div>
+    {% if not hide_history_link %}
+    <a href="{% url 'control_plane:pipeline_history' %}" class="block mt-4 text-right text-xs text-indigo-400">View pipeline history &rarr;</a>
+    {% endif %}
+</div>

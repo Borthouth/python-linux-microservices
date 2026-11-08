@@ -140,6 +140,18 @@ CELERY_TASK_DEFAULT_ROUTING_KEY = 'queue_warm'
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 
 DEFAULT_ETL_BATCH_SIZE = env.int('DEFAULT_ETL_BATCH_SIZE', default=10000)
+KAFKA_BOOTSTRAP_SERVERS = env(
+    'KAFKA_BOOTSTRAP_SERVERS',
+    default='kafka:9092',
+)
+KAFKA_CONNECT_BOOTSTRAP_SERVERS = env(
+    'KAFKA_CONNECT_BOOTSTRAP_SERVERS',
+    default='kafka:9092',
+)
+KAFKA_CONNECT_URL = env(
+    'KAFKA_CONNECT_URL',
+    default='http://debezium-connect:8083',
+)
 
 # Explicit Task Routing Map
 CELERY_TASK_ROUTES = {

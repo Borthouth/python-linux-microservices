@@ -211,10 +211,33 @@ echo "⏳ Waiting for databases to accept connections and auto-importing schemas
 # Wait for PostgreSQL
 wait_for_service "PostgreSQL" 90 2 \
     docker exec reporthub-postgres-test pg_isready -U test_user -d chinook
+postgres_wal_level="$(
+    docker exec reporthub-postgres-test psql -U test_user -d chinook -tAc "SHOW wal_level"
+)"
+if [ "$postgres_wal_level" != "logical" ]; then
+    echo "   - Enabling PostgreSQL logical replication..."
+    docker exec reporthub-postgres-test psql -U test_user -d chinook \
+        -c "ALTER SYSTEM SET wal_level = 'logical';" >/dev/null
+    docker compose -f "$COMPOSE_FILE" restart postgres-test >/dev/null
+    wait_for_service "PostgreSQL restart" 90 2 \
+        docker exec reporthub-postgres-test pg_isready -U test_user -d chinook
+    postgres_wal_level="$(
+        docker exec reporthub-postgres-test psql -U test_user -d chinook -tAc "SHOW wal_level"
+    )"
+fi
+if [ "$postgres_wal_level" != "logical" ]; then
+    echo "   ❌ PostgreSQL wal_level is '$postgres_wal_level', expected 'logical'." >&2
+    exit 1
+fi
+echo "   ✅ PostgreSQL logical replication is enabled."
 
 # Wait for MySQL
 wait_for_service "MySQL" 90 2 \
     docker exec reporthub-mysql-test mysqladmin ping -h localhost -u test_user -p'test_password' --silent
+echo "   - Ensuring MySQL CDC snapshot and replication privileges..."
+docker exec reporthub-mysql-test mysql -uroot -proot_password \
+    -e "GRANT RELOAD, REPLICATION CLIENT, REPLICATION SLAVE ON *.* TO 'test_user'@'%';"
+echo "   ✅ MySQL CDC snapshot and replication privileges are ready."
 mysql_customers_table="$(
     docker exec reporthub-mysql-test mysql -u test_user -ptest_password -N -s \
         -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='northwind' AND table_name='customers'" \

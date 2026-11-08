@@ -11,6 +11,16 @@ def clickhouse_final_clause(table):
     return " FINAL" if table.clickhouse_uses_replacing_merge_tree else ""
 
 
+def clickhouse_table_reference(table, physical_name, alias):
+    quoted_name = quote_clickhouse_identifier(physical_name)
+    if table.cdc_managed:
+        return (
+            f"(SELECT * FROM {quoted_name} FINAL "
+            f"WHERE {quote_clickhouse_identifier('_cdc_deleted')} = 0) AS {alias}"
+        )
+    return f"{quoted_name} AS {alias}{clickhouse_final_clause(table)}"
+
+
 def quote_clickhouse_identifier(identifier):
     return f"`{str(identifier).replace('`', '``')}`"
 
@@ -95,8 +105,8 @@ def build_clickhouse_report_query(report, selected_columns):
             report.source_id, related_table.schema_name, related_table.table_name
         )
         join_clauses.append(
-            f"LEFT JOIN {quote_clickhouse_identifier(physical_name)}"
-            f" AS {alias}{clickhouse_final_clause(related_table)} "
+            f"LEFT JOIN "
+            f"{clickhouse_table_reference(related_table, physical_name, alias)} "
             f"ON {' AND '.join(conditions)}"
         )
 
@@ -150,8 +160,7 @@ def build_clickhouse_report_query(report, selected_columns):
     )
     query = (
         f"SELECT {', '.join(select_parts)} "
-        f"FROM {quote_clickhouse_identifier(base_physical_name)}"
-        f" AS t0{clickhouse_final_clause(base_table)}"
+        f"FROM {clickhouse_table_reference(base_table, base_physical_name, 't0')}"
     )
     if join_clauses:
         query += " " + " ".join(join_clauses)

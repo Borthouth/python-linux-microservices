@@ -4,22 +4,61 @@ from django.contrib.auth.decorators import login_required, user_passes_test
 from django.shortcuts import render, get_object_or_404, redirect
 from django.utils.dateparse import parse_datetime
 from django.core.paginator import Paginator
-from django.db.models import Q
-from django.http import Http404, FileResponse, JsonResponse
+from django.db.models import Case, CharField, F, Q, Value, When
+from django.http import Http404, HttpResponseBadRequest, FileResponse, JsonResponse
 from control_plane.models import (
+    CdcExecutionFailure,
     SourceProfile, 
     UserSourceAccess, 
     SyncStatus,
     UserWidgetPreference
 )
 from control_plane.utils import get_redis_client, get_task_progress
+from etl.progress import PIPELINE_STEPS
 from reports.models import ReportExecution
+from reports.progress import REPORT_RUNNING_STEPS
 
 logger = logging.getLogger(__name__)
 
 
 def is_admin(user):
     return user.is_staff or user.is_superuser
+
+
+def _active_pipeline_executions(redis_client):
+    executions = []
+    for key in redis_client.keys("task:progress:*"):
+        key_text = key.decode("utf-8") if isinstance(key, bytes) else key
+        task_id = key_text.rsplit(":", 1)[-1]
+        data = get_task_progress(task_id)
+        if data.get("status") != "RUNNING" or (
+            "current_step" in data and "current_table" not in data
+        ):
+            continue
+        started_at = parse_datetime(data["started_at"]) if data.get("started_at") else None
+        executions.append({
+            "task_id": task_id,
+            "current_table": data.get("current_table", "Processing..."),
+            "name": data.get("source_name", "Running Pipeline"),
+            "db_type": data.get("db_type", "ETL"),
+            "started_at": started_at,
+        })
+    executions.sort(
+        key=lambda item: (
+            item["started_at"].timestamp() if item["started_at"] else float("-inf"),
+            item["task_id"],
+        ),
+        reverse=True,
+    )
+    return executions
+
+
+def _active_report_generations():
+    return (
+        ReportExecution.objects.filter(status="running")
+        .select_related("report")
+        .order_by(F("created_at").desc(nulls_last=True), "-pk")
+    )
 
 
 @login_required
@@ -30,26 +69,12 @@ def dashboard_view(request):
     
     # Pipelines: Scan Redis DB for active running tasks
     r = get_redis_client()
-    keys = r.keys("task:progress:*")
-    active_running_sources = []
-    
-    for key in keys:
-        task_id = key.decode('utf-8').split(":")[-1]
-        data = get_task_progress(task_id)
-        if data.get("status") == "RUNNING":
-            active_running_sources.append({
-                "task_id": task_id,
-                "percentage": int(data.get("percentage", 0)),
-                "current_table": data.get("current_table", "Processing..."),
-                "name": data.get("source_name", "Running Pipeline"),
-                "db_type": data.get("db_type", "ETL"),
-                "started_at": parse_datetime(data["started_at"]) if data.get("started_at") else None,
-            })
+    active_running_sources = _active_pipeline_executions(r)
 
     recent_jobs = SourceProfile.objects.exclude(last_sync_status=SyncStatus.RUNNING).order_by('-updated_at')[:5]
 
     # Active Report Generations
-    active_running_reports = ReportExecution.objects.filter(status='running')
+    active_running_reports = _active_report_generations()[:5]
 
     # Dead Letter Queue Tasks & Count
     dlq_keys = r.keys("dlq:task:*")
@@ -82,12 +107,16 @@ def dashboard_view(request):
         },
         'total_sources': total_sources,
         'user_access_count': user_access_count,
-        'active_running_sources': active_running_sources,
+        'active_running_sources': active_running_sources[:5],
         'active_running_reports': active_running_reports,
         'recent_jobs': recent_jobs,
         'widget_prefs': prefs,
         'dlq_count': len(dlq_tasks),
         'dlq_tasks': dlq_tasks[:5],  # Pass recent failed tasks to the dashboard widget
+        'cdc_failures': (
+            CdcExecutionFailure.objects.select_related("source").order_by("-failed_at", "-pk")[:5]
+            if is_admin(request.user) else []
+        ),
     }
     return render(request, 'control_plane/dashboard.html', context)
 
@@ -96,33 +125,83 @@ def dashboard_view(request):
 def active_pipelines_fragment(request):
     """HTMX polling fragment for active pipelines widget."""
     r = get_redis_client()
-    keys = r.keys("task:progress:*")
-    active_running_sources = []
-    
-    for key in keys:
-        task_id = key.decode('utf-8').split(":")[-1]
-        data = get_task_progress(task_id)
-        if data.get("status") == "RUNNING":
-            active_running_sources.append({
-                "task_id": task_id,
-                "percentage": int(data.get("percentage", 0)),
-                "current_table": data.get("current_table", "Processing..."),
-                "name": data.get("source_name", "Running Pipeline"),
-                "started_at": parse_datetime(data["started_at"]) if data.get("started_at") else None
-            })
-            
-    context = {"active_running_sources": active_running_sources}
+    active_running_sources = _active_pipeline_executions(r)
+    context = {"active_running_sources": active_running_sources[:5]}
     # Updated path to match your dashboard/components/ structure
     return render(request, 'control_plane/dashboard/components/active_pipelines.html', context)
 
 
 @login_required
+def active_pipeline_executions_view(request):
+    search_query = request.GET.get("q", "").strip()
+    step_filter = request.GET.get("step", "")
+    executions = _active_pipeline_executions(get_redis_client())
+    if step_filter:
+        executions = [
+            execution for execution in executions
+            if execution["current_table"] == step_filter
+        ]
+    if search_query:
+        query = search_query.casefold()
+        executions = [
+            execution for execution in executions
+            if any(
+                query in str(execution[field]).casefold()
+                for field in ("name", "task_id", "current_table", "db_type")
+            )
+        ]
+    page_obj = Paginator(executions, 10).get_page(request.GET.get("page"))
+    return render(request, "control_plane/active_pipeline_executions.html", {
+        "page_obj": page_obj,
+        "search_query": search_query,
+        "step_filter": step_filter,
+        "unlisted_step": bool(step_filter and step_filter not in PIPELINE_STEPS),
+        "filter_options": [
+            {"value": step, "label": step}
+            for step in PIPELINE_STEPS
+        ],
+    })
+
+
+@login_required
 def active_reports_fragment(request):
     """HTMX polling fragment for active reports widget."""
-    active_running_reports = ReportExecution.objects.filter(status='running').select_related('report')
+    active_running_reports = _active_report_generations()[:5]
     context = {"active_running_reports": active_running_reports}
     # Updated path to match your dashboard/components/ structure
     return render(request, 'control_plane/dashboard/components/active_reports.html', context)
+
+
+@login_required
+def active_report_generations_view(request):
+    search_query = request.GET.get("q", "").strip()
+    step_filter = request.GET.get("step", "")
+    step_values = {key: value for key, _, value in REPORT_RUNNING_STEPS}
+    if step_filter and step_filter not in step_values and step_filter != "unknown":
+        return HttpResponseBadRequest("Invalid report progress step.")
+    reports = _active_report_generations().annotate(
+        step_label=Case(
+            *(When(progress_percentage=value, then=Value(label))
+              for _, label, value in REPORT_RUNNING_STEPS),
+            default=Value("Unknown"),
+            output_field=CharField(),
+        )
+    )
+    if step_filter == "unknown":
+        reports = reports.exclude(progress_percentage__in=step_values.values())
+    elif step_filter:
+        reports = reports.filter(progress_percentage=step_values[step_filter])
+    if search_query:
+        reports = reports.filter(report__name__icontains=search_query)
+    page_obj = Paginator(reports, 10).get_page(request.GET.get("page"))
+    return render(request, "control_plane/active_report_generations.html", {
+        "page_obj": page_obj,
+        "search_query": search_query,
+        "step_filter": step_filter,
+        "filter_options": [
+            {"value": key, "label": label} for key, label, _ in REPORT_RUNNING_STEPS
+        ] + [{"value": "unknown", "label": "Unknown"}],
+    })
 
 
 @login_required
@@ -158,6 +237,9 @@ def pipeline_history_view(request):
         'query': query,
         'search_query': query,
         'status_filter': status_filter,
+        'cdc_failures': CdcExecutionFailure.objects.select_related(
+            "source"
+        ).order_by("-failed_at", "-pk")[:25],
         'filter_options': [
             {'value': 'SUCCESS', 'label': 'Success'},
             {'value': 'RUNNING', 'label': 'Running'},
@@ -250,6 +332,8 @@ def update_widget_preferences(request):
                 prefs.show_history = is_visible
             elif widget_key == 'dlq':
                 prefs.show_dlq = is_visible
+            elif widget_key == 'cdc_failures':
+                prefs.show_cdc_failures = is_visible
                 
             prefs.save()
             return JsonResponse({'status': 'success'})

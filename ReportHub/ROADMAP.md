@@ -2,17 +2,28 @@
 
 Track the development phases, architectural milestones, and codebase optimization tasks for `ReportHub`.
 
+## Suggested next priorities
+
+1. Make CDC snapshot, rebuild, and mode transitions recoverable; verify source permissions and operational monitoring.
+2. Add the failed/bounced email dashboard widget using the existing delivery audit.
+3. Enforce source and tenant access before introducing cross-source linking references and linked reports.
+4. Evaluate explicit incremental strategies and S3/Parquet sources where their source guarantees and operational costs justify them.
+5. Extend AI layouts or diagnostics and dashboard navigation where they improve the existing workflows.
+
+The unchecked items below are proposals, not implemented capabilities. Existing CDC and AI features have the limitations described in [README.md](./README.md).
+
 ## Phase 1: Infrastructure, Networking & Decoupled Architecture
 - [x] Initialize repository structure (`README.md`, `ROADMAP.md`, `.gitignore`).
 - [x] Configure `Dockerfile`, `requirements.txt` (including `pyodbc` and Microsoft ODBC Driver 18 dependencies), and entrypoint scripts.
-- [x] Set up `docker-compose.yml` orchestrating PostgreSQL (tuned for analytics), Redis (with AOF persistence), Django Web, and Celery workers.
-- [x] Set up **Polyglot Test Database Environment (`docker-compose.test.yml`)** supporting PostgreSQL (`5433`), MySQL (`3307`), and Microsoft SQL Server (`1434`) simultaneously on non-conflicting local ports with isolated persistent volumes.
-- [x] Configure environment variables (`.env.example`) and verify local container startup.
+- [x] Set up `docker-compose.yml` orchestrating PostgreSQL, Redis (with AOF persistence), Django Web, and Celery workers.
+- [x] Set up **Polyglot Test Database Environment (`tests/docker-compose.test.yml`)** supporting PostgreSQL (`5433`), MySQL (`3307`), Microsoft SQL Server (`1434`), MongoDB (`27018`), and Oracle (`1522`) on local ports with persistent volumes.
+- [x] Configure environment-driven settings for the local Compose stack.
+- [ ] Provide and maintain a safe `.env.example` with documented non-production defaults; no example file is currently present.
 - [ ] **Hyper-V LAN Network Bridging:** Confirm the external Hyper-V bridge (`HomeLAN_Bridge`) and access to LAN targets; this machine-level setup cannot be verified from the repository.
 - [x] **Decoupled Architecture & Warehouse Engine:** Established dual-database design:
   - **Control Plane (Operational DB):** Django database for configuration, user-source access assignments, and target metadata.
-  - **Analytical Warehouse (Warehouse DB):** Standalone PostgreSQL / ClickHouse database setup using dynamic schema reflection.
-- [x] **Alembic Warehouse Migration Engine:** Fully configured standalone Alembic setup in virtual environment; validated transactional DDL execution (`alembic upgrade head`).
+  - **Analytical Warehouse:** ClickHouse tables provisioned from reflected source metadata.
+- [x] **Alembic scaffolding:** A standalone Alembic configuration and initial empty revision exist; ClickHouse ingestion currently provisions and alters its own tables rather than using these revisions.
 - [x] **MinIO S3-Compatible Object Storage Architecture:**
   - [x] Deploy MinIO container in `docker-compose.yml` with data persisted to the host-mounted `./docker/minio_data` directory.
   - [x] Configure `django-storages` and `boto3` pointing to internal Docker S3 endpoints (`AWS_S3_ENDPOINT_URL = 'http://minio:9000'`).
@@ -33,7 +44,7 @@ Track the development phases, architectural milestones, and codebase optimizatio
   - [x] Installed and configured `django-auto-logout` with environment-driven idle timeout management (`SESSION_IDLE_MINUTES` via `.env`) and flash notification integration.
   - [x] Avoided combining auto-logout with `SESSION_SAVE_EVERY_REQUEST = True` to eliminate unnecessary session table writes.
 - [x] Set up user authentication and RBAC roles (*Viewer, Analyst/Builder, System Admin*).
-- [x] Build control plane models for **Target Connections (`SourceProfile` / `DbChoice`)** supporting MySQL, PostgreSQL, and Microsoft SQL Server, alongside the **User-Source Access Matrix** (Layer 1 security).
+- [x] Build control plane models for **Target Connections (`SourceProfile` / `DbChoice`)** supporting MySQL, PostgreSQL, Microsoft SQL Server, MongoDB, and Oracle, alongside user-source access assignments. Enforcement across operations remains incomplete (Phase 5).
 - [x] Implement **Self-Service User Profile Management** (nav-bar linked account view for users to update their details, first/last name, email, and password).
 - [x] **Unified Audit Trail Engine & Scheduled Task Governance:**
   - Integrated history auditing across selected control plane models, `TrackedUser`, and the standalone `PipelineAutomationAuditLog` model (with `changes_data` JSON diff tracking).
@@ -62,7 +73,7 @@ Track the development phases, architectural milestones, and codebase optimizatio
   - Developed `WarehouseDatasetMapping` domain model for fine-grained table and field synchronization control.
   - Built master-detail mapping interface (`/control-plane/warehouse/`) featuring a searchable, scrollable table navigator on the left and a column selection panel on the right.
   - Implemented live table/column search filtering, quick "Select All / Deselect All" batch toggles, and data type badges optimized for high-density database schemas.
-  - Persist warehouse field selections as the ingestion source of truth and configure an optional modified-at field per table.
+  - Persist warehouse field selections as the ingestion source of truth; CDC-managed tables require a discovered primary key.
 - [x] Validate schema discovery and persistent field selection against target databases over local LAN and test containers.
 
 ---
@@ -72,15 +83,27 @@ Track the development phases, architectural milestones, and codebase optimizatio
   - [x] Deploy ClickHouse alongside PostgreSQL/Redis in Docker and configure Django/Celery connections.
   - [ ] Restrict host-published ports `9000`/`8123` and replace development credential defaults for production deployments.
 - [x] **Data Model & Performance Optimization:**
-  - [x] Establish isolated ClickHouse table namespacing (`source_{pk}__{schema}_{table}`), using `ReplacingMergeTree` for primary-key incremental tables and `MergeTree` otherwise.
+  - [x] Establish ClickHouse table namespacing (`source_{pk}__{schema}_{table}`), using versioned `ReplacingMergeTree` tables for CDC-managed tables and `MergeTree` for normal batch refreshes.
   - [x] Implement robust type mapping (`map_to_clickhouse_type`) and ISO string casting for temporal/complex types to prevent driver struct-packing crashes.
 - [x] **Ingestion Engine & High-Volume Flushing:**
-  - [x] Build bounded Celery ingestion tasks (`ingest_source_to_clickhouse_task`) using keyset pagination where primary keys exist; enqueue continuations after at most `DEFAULT_ETL_BATCH_SIZE` rows so other queued work can run.
-  - [x] Incrementally capture inserts and updates for tables with an introspected primary key and configured modified-at field; persist per-table watermarks and use ClickHouse `ReplacingMergeTree` deduplication for reports.
-  - [x] Fall back to bounded full refreshes for tables without safe incremental metadata; rebuild full selected history after warehouse-field changes.
+  - [x] Route keyed relational tables in CDC mode through Debezium and Kafka Connect for PostgreSQL, MySQL, SQL Server, and Oracle; consume bounded event batches and enqueue continuations so other queued work can run.
+  - [x] Apply CDC inserts, updates, and delete tombstones to versioned ClickHouse `ReplacingMergeTree` tables; commit Kafka offsets only after successful warehouse writes.
+  - [x] Use bounded full-refresh batches for MongoDB and tables without a discovered primary key; reject unsafe full-refresh backfills for sources containing keyed CDC tables.
   - [x] Add a scheduled/manual Pipeline Automation backfill dispatcher (`trigger_all_active_clickhouse_backfill_task`) on the dedicated `queue_backfill` queue.
   - [x] Implement active-source guard checks (`is_active=True`), set the default batch limit to 10,000 rows via `DEFAULT_ETL_BATCH_SIZE`, and set Celery worker prefetch to 1.
   - [x] Configure periodic dispatch tasks (`trigger_all_active_clickhouse_ingestion_task`) and dedicated worker queue routing (`queue_hot`, `queue_backfill`, `queue_periodic`, and other application queues).
+- [x] Configure optional Oracle CDB/PDB and separate LogMiner credentials; verify insert, update, and delete CDC flows for the local Oracle and PostgreSQL test sources.
+- [ ] **Safe CDC transition and recovery:**
+  - [ ] Implement a coordinated initial snapshot with fresh connector/offset generation, durable snapshot-completion checkpoints, and isolated staging tables; retain the existing warehouse until cutover is safe.
+  - [ ] Define source-specific snapshot barriers and Kafka partition/offset handling, including schema changes, tombstones, concurrent source writes, retention, retries, and recovery after interruption.
+  - [ ] Implement an atomic or recoverable cutover and rollback; support explicit batch-to-CDC and CDC-to-batch transitions, CDC rebuilds, and new-column backfills only after their consistency is verified.
+  - [ ] Add end-to-end multi-database tests and operational guidance for snapshot completion, lag, restart/replay, and failed cutovers. The local test-only rebuild is not a reusable cutover implementation.
+- [ ] **Alternative incremental loading strategies:**
+  - [ ] Design explicit per-table strategies and validation; do not infer safety from a numeric type or automatically switch strategies. Retain full refresh where guarantees are absent.
+  - [ ] Evaluate monotonic ID/sequence watermarks for explicitly append-only sources, with initial-load checkpoints, stable paging, retry safety, concurrent transaction ordering, and a documented policy for late or lower IDs. Updates and deletes require another mechanism or reconciliation.
+  - [ ] Evaluate SQL Server `rowversion` and other source-specific change tokens with correct binary/type handling, transaction visibility and safe high-water marks; updates and inserts can be captured, but deletes require separate tracking or reconciliation.
+  - [ ] Provide strategy-aware backend validation and a warehouse configuration selector only after source semantics are supported and tested; document timestamp ties, precision, nulls, backfills, and delete behavior.
+- [ ] **S3/Parquet sources:** Design source configuration, access controls, file/schema discovery, incremental file/version tracking, and ClickHouse ingestion or query integration; test failure recovery and credential handling before adding this source type.
 
 ---
 
@@ -100,6 +123,7 @@ Track the development phases, architectural milestones, and codebase optimizatio
   - [x] Build `EmailAuditLog` data model storing delivery lifecycle states (`sent`, `delivered`, `failed`, `bounced`), `retry_count`, and error tracebacks.
   - [x] Implement backend views for record retrieval, webhook status transitions, and administrative actions (`Re-queue` via sky-blue action buttons, `Delete` via confirmation modals).
   - [x] Design fully responsive UI matching the Dead Letter Queue (DLQ) layout patterns, complete with error inspection modals, search filters, and status-coded badge pills.
+- [ ] Add an administrator dashboard widget summarizing failed and bounced deliveries, with links to appropriately filtered email audit views and coverage for empty/error states.
 
 ---
 
@@ -116,6 +140,7 @@ Track the development phases, architectural milestones, and codebase optimizatio
   - System Operations & Monitoring (DLQ, Task/Worker Status, Global Pipeline History)
   - Integrations & Infrastructure (Email Settings)
 - [x] **Global Cursor/Selection Optimization:** Applied a clean app-wide `select-none` approach on structural/UI chrome while targeted `select-text` preserves copy-paste usability on essential audit logs, error traces, and recipient strings.
+- [ ] Evaluate optional accessible widget navigation menus for filtered destinations where they add value; retain clear direct links for simple destinations and test keyboard, mobile, and empty-state behavior.
 
 ---
 
@@ -133,14 +158,14 @@ Track the development phases, architectural milestones, and codebase optimizatio
 - [ ] **Dependency & Configuration Pruning:**
   - [ ] Consolidate duplicate package declarations in `requirements.txt` (`celery`, `pymysql`, `psycopg2-binary`).
   - [ ] Evaluate unused stack dependencies (FastAPI, Uvicorn, AsyncPG) to trim container build overhead if not servicing separate microservice endpoints.
-  - [ ] Refactor `docker-compose.yml` to extract the repeated 12-line environment variable block across `app` and Celery worker services into an `env_file: .env` configuration.
+  - [ ] Evaluate reducing duplicated Compose environment configuration without changing variable precedence, service-specific settings, or secret exposure.
 - [ ] **Audit Trail & Encryption Hardening:**
   - [ ] Audit `changes_data` JSON serialization in `control_plane/models.py` / `admin.py` to ensure encrypted credential fields are explicitly masked before historical snapshots are persisted.
 - [ ] **Task & Memory Safety Safeguards:**
-  - [ ] Audit all Celery tasks in `etl/tasks.py` and `reports/tasks.py` to verify strict primary-key cursor pagination (`WHERE id > last_seen_id`) over raw `OFFSET` queries.
+  - [ ] Audit ingestion and report pagination for bounded memory, stable ordering, and correct results under concurrent writes. Use keyset pagination only where a suitable stable key exists; account for composite keys and keyless sources.
   - [ ] Ensure dynamic SQLAlchemy engine calls strictly utilize context managers to prevent connection pool leaks against polyglot target databases.
 - [ ] **Frontend & HTMX Polish:**
-  - [ ] Audit template event bindings to guarantee 100% CSP compliance via `htmx:afterSwap` delegated listeners.
+  - [ ] Audit templates and event bindings against the configured CSP, using delegated listeners where appropriate, and test the resulting behavior.
   - [ ] Verify clean termination on HTMX polling triggers (`hx-trigger="every 2s"`) upon reaching terminal execution states.
 
 ---
@@ -156,6 +181,10 @@ Track the development phases, architectural milestones, and codebase optimizatio
   - [x] Implement Tabular Detail and Grouped Summary queries with `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`.
   - [ ] Implement report filters and configurable ordering, including applying requested ordering from AI drafts.
   - [ ] Extend report joins to multi-hop relationship paths and configurable join types.
+  - [ ] **Cross-source linking references:** Design named business-key metadata mapping authorized source/table/field combinations, including composite keys, compatible types, normalization, null handling, duplicate keys, and join cardinality.
+  - [ ] Build a searchable linking-reference management page with dependent source, table, and field selectors; validate mappings, permissions, and audit changes.
+  - [ ] Extend the report builder with an optional linked-report flow and HTMX-driven key, related-table, and column selection. Reuse existing foreign-key joins where appropriate; validate configuration server-side.
+  - [ ] Generate constrained ClickHouse joins over linked source tables, with explicit join behavior, duplicate/row-explosion controls, and enforced source and tenant authorization. Cross-source mappings and joins are not yet implemented.
 - [ ] **Exports, Charts & Share Control:**
   - [x] Generate CSV, JSON, Excel, and PDF report artifacts; store completed artifacts in MinIO and support authenticated admin downloads.
   - [x] Support configurable bar, line, and pie charts in PDF and Excel exports.
@@ -165,3 +194,5 @@ Track the development phases, architectural milestones, and codebase optimizatio
   - [ ] Implement chunked streaming exports (CSV, Excel/pandas, ReportLab PDF) to keep Celery memory utilization low.
   - [ ] Add tokenized, time-expiring report-sharing URLs with tenant-scoped authorization.
   - [ ] Improve grouped-output labeling and calculate AI summary metrics with awareness of aggregate semantics.
+  - [ ] Evaluate richer AI-assisted report layout drafts and metadata retrieval while retaining validated structured output and the existing safe SQL builder; define permissions, prompt-injection defenses, model/network privacy boundaries, and human review before execution.
+  - [ ] Document and test backup/restore for Django PostgreSQL, ClickHouse, MinIO, Kafka state, and Ollama model storage; local deployment alone does not guarantee privacy or recovery.
