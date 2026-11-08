@@ -11,6 +11,7 @@ import pandas as pd
 import clickhouse_connect
 from bson import Decimal128, ObjectId
 from django.db.models import Q
+from django.db import transaction
 from django.conf import settings
 from django.core.cache import cache
 from celery import shared_task, Task
@@ -18,6 +19,9 @@ from django.utils import timezone
 from pymongo import MongoClient
 from control_plane.models import (
     CdcExecutionFailure,
+    CdcTableRebuild,
+    CdcToBatchTableCheckpoint,
+    CdcToBatchTransition,
     SourceProfile, 
     SourceTable, 
     SourceField, 
@@ -306,8 +310,23 @@ def introspect_source(profile, task_id, logger):
         elif profile.db_type == DbChoice.MSSQL:
             target_schemas = [
                 schema for schema in schemas
-                if schema not in {"sys", "INFORMATION_SCHEMA"}
+                if schema.casefold() not in {
+                    "sys",
+                    "information_schema",
+                    "cdc",
+                }
             ]
+            with engine.connect() as connection:
+                user_tables = {
+                    tuple(row)
+                    for row in connection.execute(sa.text(
+                        "SELECT schemas.name, tables.name "
+                        "FROM sys.tables AS tables "
+                        "JOIN sys.schemas AS schemas "
+                        "ON schemas.schema_id = tables.schema_id "
+                        "WHERE tables.is_ms_shipped = 0"
+                    ))
+                }
         elif profile.db_type == DbChoice.ORACLE:
             target_schemas = [profile.username.upper()]
         else:
@@ -318,6 +337,11 @@ def introspect_source(profile, task_id, logger):
                 tables = inspector.get_table_names(
                     schema=schema_name if profile.db_type != DbChoice.MYSQL else None
                 )
+                if profile.db_type == DbChoice.MSSQL:
+                    tables = [
+                        table for table in tables
+                        if (schema_name, table) in user_tables
+                    ]
             except Exception as exc:
                 logger.warning(f"Could not fetch tables for schema {schema_name}: {exc}")
                 continue
@@ -652,6 +676,84 @@ def trigger_all_active_source_introspection_task(self):
     return f"Successfully dispatched schema introspection for {active_sources.count()} active sources."
 
 
+def _batch_required_fields_by_table(profile):
+    required = {}
+    for relationship in SourceRelationship.objects.filter(source=profile):
+        required.setdefault(
+            (relationship.from_schema, relationship.from_table), set()
+        ).add(relationship.from_field)
+        required.setdefault(
+            (relationship.to_schema, relationship.to_table), set()
+        ).add(relationship.to_field)
+    for report in ReportDefinition.objects.filter(source=profile):
+        for column in (report.config or {}).get('selectedColumns', []):
+            if not isinstance(column, dict):
+                continue
+            table_id = column.get('table_id')
+            field_name = column.get('field_name')
+            if not table_id or not field_name:
+                continue
+            source_table = SourceTable.objects.filter(source=profile, pk=table_id).first()
+            if source_table:
+                required.setdefault(
+                    (source_table.schema_name, source_table.table_name), set()
+                ).add(field_name)
+        for field_name in report.selected_fields or []:
+            if isinstance(field_name, str):
+                required.setdefault(
+                    (report.base_table.schema_name, report.base_table.table_name), set()
+                ).add(field_name)
+    return required
+
+
+def _batch_selected_fields(profile, table, required_fields_by_table):
+    required = required_fields_by_table.get(
+        (table.schema_name, table.table_name), set()
+    )
+    mappings = WarehouseDatasetMapping.objects.filter(
+        source_profile=profile, table_name=table.table_name,
+    )
+    if mappings.exists():
+        selected = mappings.filter(is_enabled=True).values_list('field_name', flat=True)
+        return list(table.fields.filter(
+            Q(field_name__in=selected) | Q(field_name__in=required)
+        ))
+    return list(table.fields.filter(
+        Q(is_selected=True) | Q(field_name__in=required)
+    ))
+
+
+def _batch_sanitized_rows(chunk, ingestion_fields, primary_key_fields):
+    field_names = [field.field_name for field in ingestion_fields]
+    field_ch_types = {
+        field.field_name: map_to_clickhouse_type(
+            field.data_type, is_nullable=field.field_name not in primary_key_fields
+        ).lower()
+        for field in ingestion_fields
+    }
+    chunk = chunk.astype(object).where(pd.notnull(chunk), None)
+    rows = []
+    for row in chunk[field_names].values.tolist():
+        sanitized = []
+        for field_name, value in zip(field_names, row):
+            ch_type = field_ch_types[field_name]
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                sanitized.append(None)
+            elif 'string' in ch_type:
+                if hasattr(value, 'isoformat'):
+                    sanitized.append(value.isoformat())
+                elif isinstance(value, float):
+                    sanitized.append(str(int(value)) if value.is_integer() else str(value))
+                else:
+                    sanitized.append(str(value))
+            elif 'date' in ch_type or 'time' in ch_type:
+                sanitized.append(value.isoformat() if hasattr(value, 'isoformat') else str(value))
+            else:
+                sanitized.append(value)
+        rows.append(sanitized)
+    return rows
+
+
 def _ingest_source_to_clickhouse_batch(
     task,
     source_pk,
@@ -790,36 +892,7 @@ def _ingest_source_to_clickhouse_batch(
         set_task_progress(task_id, percentage=100, status="SUCCESS", current_table="Completed")
         return f"ClickHouse ingestion completed for {profile.name}"
 
-    required_fields_by_table = {}
-    source_relationships = list(SourceRelationship.objects.filter(source=profile))
-    for relationship in source_relationships:
-        required_fields_by_table.setdefault(
-            (relationship.from_schema, relationship.from_table), set()
-        ).add(relationship.from_field)
-        required_fields_by_table.setdefault(
-            (relationship.to_schema, relationship.to_table), set()
-        ).add(relationship.to_field)
-
-    for report in ReportDefinition.objects.filter(source=profile):
-        config_columns = (report.config or {}).get('selectedColumns', [])
-        for column in config_columns:
-            if not isinstance(column, dict):
-                continue
-            table_id = column.get('table_id')
-            field_name = column.get('field_name')
-            if not table_id or not field_name:
-                continue
-            source_table = SourceTable.objects.filter(source=profile, pk=table_id).first()
-            if source_table:
-                required_fields_by_table.setdefault(
-                    (source_table.schema_name, source_table.table_name), set()
-                ).add(field_name)
-
-        for field_name in report.selected_fields or []:
-            if isinstance(field_name, str):
-                required_fields_by_table.setdefault(
-                    (report.base_table.schema_name, report.base_table.table_name), set()
-                ).add(field_name)
+    required_fields_by_table = _batch_required_fields_by_table(profile)
 
     table = source_tables[table_index]
     profile.refresh_from_db()
@@ -834,29 +907,7 @@ def _ingest_source_to_clickhouse_batch(
         ch_client.close()
         return f"Ingestion cancelled for {profile.name}"
 
-    required_field_names = required_fields_by_table.get(
-        (table.schema_name, table.table_name), set()
-    )
-    mappings = WarehouseDatasetMapping.objects.filter(
-        source_profile=profile,
-        table_name=table.table_name,
-    )
-    if mappings.exists():
-        warehouse_field_names = set(
-            mappings.filter(is_enabled=True).values_list('field_name', flat=True)
-        )
-        selected_fields = list(
-            table.fields.filter(
-                Q(field_name__in=warehouse_field_names)
-                | Q(field_name__in=required_field_names)
-            )
-        )
-    else:
-        selected_fields = list(
-            table.fields.filter(
-                Q(is_selected=True) | Q(field_name__in=required_field_names)
-            )
-        )
+    selected_fields = _batch_selected_fields(profile, table, required_fields_by_table)
 
     ch_table_name = f"source_{profile.pk}__{table.schema_name}_{table.table_name}".lower()
     staging_table_name = (
@@ -887,6 +938,7 @@ def _ingest_source_to_clickhouse_batch(
                     'batch_size': batch_size,
                     'cdc_fallback_only': cdc_fallback_only,
                     'full_refresh': full_refresh,
+                    'origin_mode': profile.ingestion_mode,
                     'table_index': next_table_index,
                     'ingestion_run_id': ingestion_run_id,
                     'task_queue': task_queue,
@@ -977,7 +1029,7 @@ def _ingest_source_to_clickhouse_batch(
         if actual_schema != expected_schema:
             incremental_run = False
 
-    if not incremental_run and row_offset == 0:
+    if not incremental_run and row_offset == 0 and not last_key_values:
         column_defs = []
         for field in ingestion_fields:
             nullable = field.field_name not in table.primary_key_fields
@@ -1125,46 +1177,7 @@ def _ingest_source_to_clickhouse_batch(
                 for key in table.primary_key_fields
             ]
 
-        chunk = chunk.astype(object).where(pd.notnull(chunk), None)
-
-        # Map every field name to its expected ClickHouse type definition
-        field_ch_types = {
-            field.field_name: map_to_clickhouse_type(
-                field.data_type, 
-                is_nullable=(field.field_name not in table.primary_key_fields)
-            )
-            for field in ingestion_fields
-        }
-
-        # Force-coerce every single cell based on the ClickHouse column type
-        sanitized_rows = []
-        for row in chunk[field_names].values.tolist():
-            new_row = []
-            for field_name, val in zip(field_names, row):
-                ch_type = field_ch_types.get(field_name, '')
-                
-                # Handle nulls / NaNs
-                if val is None or (isinstance(val, float) and pd.isna(val)):
-                    new_row.append(None)
-                # If ClickHouse column is String or Nullable(String), ensure output is strictly a string or None
-                elif 'string' in ch_type.lower():
-                    if hasattr(val, 'isoformat'):
-                        new_row.append(val.isoformat())
-                    elif isinstance(val, float):
-                        new_row.append(str(int(val)) if val.is_integer() else str(val))
-                    else:
-                        new_row.append(str(val))
-                # If it's a date/time type
-                elif 'date' in ch_type.lower() or 'time' in ch_type.lower():
-                    if hasattr(val, 'isoformat'):
-                        new_row.append(val.isoformat())
-                    else:
-                        new_row.append(str(val) if val is not None else None)
-                else:
-                    new_row.append(val)
-            sanitized_rows.append(new_row)
-
-        data_rows = sanitized_rows
+        data_rows = _batch_sanitized_rows(chunk, ingestion_fields, table.primary_key_fields)
         if data_rows:
             insert_field_names = field_names
             if cdc_full_refresh:
@@ -1219,6 +1232,7 @@ def _ingest_source_to_clickhouse_batch(
                 'batch_size': batch_size,
                 'cdc_fallback_only': cdc_fallback_only,
                 'full_refresh': full_refresh,
+                'origin_mode': profile.ingestion_mode,
                 'table_index': table_index,
                 'row_offset': next_offset,
                 'last_key_values': last_key_values if use_keyset else None,
@@ -1292,6 +1306,7 @@ def _ingest_source_to_clickhouse_batch(
                 'batch_size': batch_size,
                 'cdc_fallback_only': cdc_fallback_only,
                 'full_refresh': full_refresh,
+                'origin_mode': profile.ingestion_mode,
                 'table_index': next_table_index,
                 'ingestion_run_id': ingestion_run_id,
                 'task_queue': task_queue,
@@ -1306,6 +1321,26 @@ def _ingest_source_to_clickhouse_batch(
     profile.save(update_fields=['last_synced', 'last_sync_status', 'last_sync_error'])
     set_task_progress(task_id, percentage=100, status="SUCCESS", current_table="Completed")
     return f"ClickHouse ingestion completed for {profile.name}"
+
+
+def _validate_ingestion_task_origin(profile, origin_mode):
+    if origin_mode is not None and origin_mode not in IngestionMode.values:
+        raise ValueError("Invalid ingestion task origin mode.")
+    if profile and origin_mode is not None and origin_mode != profile.ingestion_mode:
+        raise RuntimeError(
+            "The queued ingestion task originated in a different source mode."
+        )
+    if (
+        profile and origin_mode is None
+        and profile.ingestion_mode == IngestionMode.BATCH
+        and CdcToBatchTransition.objects.filter(
+            source_id=profile.pk,
+            status=CdcToBatchTransition.Status.SUCCEEDED,
+        ).exists()
+    ):
+        raise RuntimeError(
+            "An unmarked legacy ingestion task cannot run after a CDC-to-batch transition."
+        )
 
 
 @shared_task(bind=True, base=CancellableETLTask, queue='queue_hot')
@@ -1325,11 +1360,13 @@ def ingest_source_to_clickhouse_task(
     watermark_max=None,
     cdc_continue=False,
     task_queue='queue_hot',
+    origin_mode=None,
 ):
     try:
         profile = SourceProfile.objects.filter(pk=source_pk).only(
             "db_type", "ingestion_mode"
         ).first()
+        _validate_ingestion_task_origin(profile, origin_mode)
         if profile and profile.ingestion_mode == IngestionMode.BATCH:
             if cdc_continue or cdc_fallback_only:
                 raise RuntimeError(
@@ -1367,7 +1404,7 @@ def ingest_source_to_clickhouse_task(
                     self,
                     source_pk,
                     batch_size=batch_size,
-                    task_queue=task_queue,
+                    task_queue="queue_cdc",
                 )
             except Exception as exc:
                 try:
@@ -1385,22 +1422,47 @@ def ingest_source_to_clickhouse_task(
                         source_pk,
                     )
                 raise
-        return _ingest_source_to_clickhouse_batch(
-            self,
-            source_pk,
-            batch_size=batch_size,
-            cdc_fallback_only=cdc_fallback_only,
-            full_refresh=full_refresh,
-            table_index=table_index,
-            row_offset=row_offset,
-            last_key_values=last_key_values,
-            ingestion_run_id=ingestion_run_id,
-            incremental_run=incremental_run,
-            watermark_value=watermark_value,
-            watermark_upper=watermark_upper,
-            watermark_max=watermark_max,
-            task_queue=task_queue,
-        )
+        batch_options = {
+            "batch_size": batch_size,
+            "cdc_fallback_only": cdc_fallback_only,
+            "full_refresh": full_refresh,
+            "table_index": table_index,
+            "row_offset": row_offset,
+            "last_key_values": last_key_values,
+            "ingestion_run_id": ingestion_run_id,
+            "incremental_run": incremental_run,
+            "watermark_value": watermark_value,
+            "watermark_upper": watermark_upper,
+            "watermark_max": watermark_max,
+            "task_queue": task_queue,
+        }
+        if profile and profile.ingestion_mode == IngestionMode.CDC:
+            with transaction.atomic():
+                locked_source = SourceProfile.objects.select_for_update().get(pk=source_pk)
+                if locked_source.ingestion_mode != IngestionMode.CDC:
+                    raise RuntimeError(
+                        "A queued CDC refresh cannot run after the source mode changes."
+                    )
+                if CdcToBatchTransition.objects.filter(
+                    source_id=source_pk,
+                    status=CdcToBatchTransition.Status.CUTOVER_PENDING,
+                ).exists():
+                    set_task_progress(
+                        self.request.id,
+                        percentage=0,
+                        status="SKIPPED",
+                        error="CDC-to-batch cutover is pending.",
+                    )
+                    get_etl_logger().info(
+                        "Skipped CDC refresh for source %s: CDC-to-batch cutover is pending.",
+                        source_pk,
+                    )
+                    return (
+                        f"CDC refresh skipped for {locked_source.name}: "
+                        "CDC-to-batch cutover is pending."
+                    )
+                return _ingest_source_to_clickhouse_batch(self, source_pk, **batch_options)
+        return _ingest_source_to_clickhouse_batch(self, source_pk, **batch_options)
     except Exception as exc:
         status = (
             SyncStatus.CANCELLED
@@ -1420,6 +1482,22 @@ def ingest_source_to_clickhouse_task(
 
 
 def _run_scheduled_cdc_ingestion(
+    task,
+    source_pk,
+    batch_size=None,
+    task_queue='queue_hot',
+):
+    with transaction.atomic():
+        try:
+            SourceProfile.objects.select_for_update().get(pk=source_pk)
+        except SourceProfile.DoesNotExist:
+            pass
+        return _run_scheduled_cdc_ingestion_locked(
+            task, source_pk, batch_size=batch_size, task_queue=task_queue
+        )
+
+
+def _run_scheduled_cdc_ingestion_locked(
     task,
     source_pk,
     batch_size=None,
@@ -1449,9 +1527,6 @@ def _run_scheduled_cdc_ingestion(
     if batch_size is None:
         batch_size = settings.DEFAULT_ETL_BATCH_SIZE
     batch_size = max(1, int(batch_size))
-    profile.last_sync_status = SyncStatus.RUNNING
-    profile.last_sync_error = ""
-    profile.save(update_fields=["last_sync_status", "last_sync_error"])
     ch_client = clickhouse_connect.get_client(
         host=getattr(settings, 'CLICKHOUSE_HOST', 'localhost'),
         port=getattr(settings, 'CLICKHOUSE_PORT', 8123),
@@ -1472,6 +1547,7 @@ def _run_scheduled_cdc_ingestion(
             kwargs={
                 "batch_size": batch_size,
                 "cdc_continue": True,
+                "origin_mode": IngestionMode.CDC,
                 "task_queue": task_queue,
             },
             countdown=10,
@@ -1480,7 +1556,60 @@ def _run_scheduled_cdc_ingestion(
         return f"CDC ingestion for {profile.name} is already running; queued a retry."
 
     try:
-        from etl.cdc import consume_source_cdc_batch, ensure_debezium_connector
+        from etl.cdc import (
+            _clickhouse_table_uuid,
+            consume_source_cdc_batch,
+            ensure_debezium_connector,
+        )
+        from reports.query_builder import clickhouse_table_name
+
+        profile.refresh_from_db(fields=["ingestion_mode", "is_active"])
+        if profile.ingestion_mode != IngestionMode.CDC or not profile.is_active:
+            raise RuntimeError(
+                "CDC ingestion cannot continue because the source mode or "
+                "active state changed while waiting for the ingestion lock."
+            )
+
+        if CdcToBatchTransition.objects.filter(
+            source_id=source_pk,
+            status=CdcToBatchTransition.Status.CUTOVER_PENDING,
+        ).exists():
+            set_task_progress(
+                task_id,
+                percentage=0,
+                status="SKIPPED",
+                error="CDC-to-batch cutover is pending.",
+            )
+            get_etl_logger().info(
+                "Skipped CDC ingestion for source %s: CDC-to-batch cutover is pending.",
+                source_pk,
+            )
+            return f"CDC ingestion skipped for {profile.name}: CDC-to-batch cutover is pending."
+
+        profile.last_sync_status = SyncStatus.RUNNING
+        profile.last_sync_error = ""
+        profile.save(update_fields=["last_sync_status", "last_sync_error"])
+
+        pending_rebuilds = CdcTableRebuild.objects.filter(
+            source_table__source=profile,
+            status=CdcTableRebuild.Status.CUTOVER_PENDING,
+        ).select_related("source_table")
+        for recovery in pending_rebuilds:
+            table = recovery.source_table
+            active_table_name = clickhouse_table_name(
+                profile.pk, table.schema_name, table.table_name
+            )
+            if (
+                recovery.staging_uuid
+                and _clickhouse_table_uuid(ch_client, active_table_name)
+                == recovery.staging_uuid
+            ):
+                raise RuntimeError(
+                    f"CDC rebuild {recovery.pk} for "
+                    f"{table.schema_name}.{table.table_name} has exchanged "
+                    "the warehouse table but has not finished cutover. "
+                    "Resume the rebuild before restarting source ingestion."
+                )
 
         ensure_debezium_connector(profile)
         processed = consume_source_cdc_batch(
@@ -1498,9 +1627,10 @@ def _run_scheduled_cdc_ingestion(
                 kwargs={
                     "batch_size": batch_size,
                     "cdc_fallback_only": True,
-                    "task_queue": task_queue,
+                    "origin_mode": IngestionMode.CDC,
+                    "task_queue": "queue_backfill",
                 },
-                queue=task_queue,
+                queue="queue_backfill",
             )
         else:
             profile.last_synced = timezone.now()
@@ -1523,6 +1653,7 @@ def _run_scheduled_cdc_ingestion(
                 kwargs={
                     "batch_size": batch_size,
                     "cdc_continue": True,
+                    "origin_mode": IngestionMode.CDC,
                     "task_queue": task_queue,
                 },
                 queue=task_queue,
@@ -1569,14 +1700,395 @@ def trigger_all_active_clickhouse_ingestion_task(self):
     logger.info(f"Periodic Beat: Triggering ClickHouse data ingestion for {active_sources.count()} active source(s).")
     
     for source in active_sources:
-        ingest_source_to_clickhouse_task.delay(source.pk)
+        queue = (
+            "queue_cdc"
+            if source.ingestion_mode == IngestionMode.CDC
+            else "queue_backfill"
+        )
+        ingest_source_to_clickhouse_task.apply_async(
+            args=[source.pk],
+            kwargs={"task_queue": queue, "origin_mode": source.ingestion_mode},
+            queue=queue,
+        )
         
     return f"Successfully dispatched ClickHouse ingestion for {active_sources.count()} active sources."
 
 
+@shared_task(queue="queue_backfill")
+def stage_cdc_to_batch_transition_task(transition_pk, batch_size=None):
+    """Stage one table per task; revalidate all checkpoints when complete."""
+    from etl.cdc_to_batch import stage_cdc_to_batch_table
+
+    try:
+        transition = CdcToBatchTransition.objects.select_related("source").get(
+            pk=transition_pk
+        )
+        source = transition.source
+        if (
+            transition.status != CdcToBatchTransition.Status.PREPARING
+            or not source.is_active
+            or source.ingestion_mode != IngestionMode.CDC
+            or source.db_type == DbChoice.MONGODB
+        ):
+            raise RuntimeError("The transition is not eligible for batch staging.")
+
+        checkpoints = list(
+            transition.table_checkpoints.order_by("source_table_id")
+        )
+        table_ids = set(source.tables.values_list("pk", flat=True))
+        if not checkpoints or {item.source_table_id for item in checkpoints} != table_ids:
+            raise RuntimeError(
+                "The source table list changed since the transition was prepared."
+            )
+        if any(
+            item.status not in (
+                CdcToBatchTableCheckpoint.Status.PENDING,
+                CdcToBatchTableCheckpoint.Status.STAGED,
+            )
+            for item in checkpoints
+        ):
+            raise RuntimeError("A transition checkpoint is not eligible for staging.")
+
+        pending = next(
+            (item for item in checkpoints
+             if item.status == CdcToBatchTableCheckpoint.Status.PENDING),
+            None,
+        )
+        if pending:
+            stage_cdc_to_batch_table(pending.pk, batch_size=batch_size)
+            stage_cdc_to_batch_transition_task.apply_async(
+                args=[transition_pk], kwargs={"batch_size": batch_size},
+                queue="queue_backfill",
+            )
+            return f"Staged checkpoint {pending.pk}; queued the next staging task."
+
+        for checkpoint in checkpoints:
+            stage_cdc_to_batch_table(checkpoint.pk, batch_size=batch_size)
+
+        source.refresh_from_db()
+        transition.refresh_from_db()
+        if (
+            transition.status != CdcToBatchTransition.Status.PREPARING
+            or not source.is_active
+            or source.ingestion_mode != IngestionMode.CDC
+            or source.db_type == DbChoice.MONGODB
+            or {item.source_table_id for item in transition.table_checkpoints.all()}
+            != set(source.tables.values_list("pk", flat=True))
+            or transition.table_checkpoints.exclude(
+                status=CdcToBatchTableCheckpoint.Status.STAGED
+            ).exists()
+        ):
+            raise RuntimeError("The transition changed while staging was verified.")
+        CdcToBatchTransition.objects.filter(
+            pk=transition.pk, status=CdcToBatchTransition.Status.PREPARING
+        ).update(last_error="", updated_at=timezone.now())
+        return (
+            f"All {len(checkpoints)} tables staged for transition {transition.pk}; "
+            "cutover has not started."
+        )
+    except Exception as exc:
+        CdcToBatchTransition.objects.filter(
+            pk=transition_pk, status=CdcToBatchTransition.Status.PREPARING
+        ).update(last_error=(
+            f"{type(exc).__name__}: Staging failed; see ETL worker logs for details."
+        ), updated_at=timezone.now())
+        get_etl_logger().exception(
+            "CDC-to-batch staging failed for transition %s", transition_pk
+        )
+        raise
+
+
+@shared_task(bind=True, queue="queue_cdc")
+def rebuild_cdc_table_task(self, source_table_pk, rebuild_pk=None):
+    from etl.cdc import (
+        _clickhouse_table_uuid,
+        _create_cdc_table,
+        _ensure_connector_config,
+        _required_field_names,
+        consume_cdc_table_rebuild_batch,
+    )
+    from reports.query_builder import (
+        clickhouse_table_name,
+        quote_clickhouse_identifier,
+    )
+
+    active_statuses = [
+        CdcTableRebuild.Status.SNAPSHOTTING,
+        CdcTableRebuild.Status.CUTOVER_PENDING,
+    ]
+    try:
+        table = SourceTable.objects.select_related("source").get(
+            pk=source_table_pk
+        )
+    except SourceTable.DoesNotExist as exc:
+        raise ValueError(f"Source table {source_table_pk} does not exist.") from exc
+
+    profile = table.source
+    if (
+        profile.ingestion_mode != IngestionMode.CDC
+        or profile.db_type == DbChoice.MONGODB
+        or not table.primary_key_fields
+        or not table.cdc_managed
+    ):
+        raise ValueError(
+            "A safe CDC rebuild requires a CDC-managed relational table with "
+            "a discovered primary key."
+        )
+
+    with transaction.atomic():
+        profile = SourceProfile.objects.select_for_update().get(pk=profile.pk)
+        if (
+            profile.ingestion_mode != IngestionMode.CDC
+            or not profile.is_active
+        ):
+            raise ValueError("A CDC rebuild requires an active CDC source.")
+        if CdcToBatchTransition.objects.filter(
+            source=profile,
+            status__in=[
+                CdcToBatchTransition.Status.PREPARING,
+                CdcToBatchTransition.Status.CUTOVER_PENDING,
+            ],
+        ).exists():
+            raise RuntimeError(
+                "Cannot start or resume a CDC table rebuild while a "
+                "CDC-to-batch transition is active."
+            )
+        if rebuild_pk is None:
+            recovery = table.cdc_rebuilds.filter(
+                status__in=active_statuses
+            ).first()
+            if recovery is None:
+                generation = uuid4()
+                suffix = generation.hex[:12]
+                connector_name = (
+                    f"reporthub-source-{profile.pk}-table-{table.pk}-{suffix}"
+                )
+                topic_prefix = connector_name
+                active_table_name = clickhouse_table_name(
+                    profile.pk, table.schema_name, table.table_name
+                )
+                recovery = CdcTableRebuild.objects.create(
+                    source_table=table,
+                    generation=generation,
+                    connector_name=connector_name,
+                    topic_prefix=topic_prefix,
+                    notification_topic=f"{connector_name}.notifications",
+                    consumer_group=f"{connector_name}-rebuild",
+                    staging_table=f"{active_table_name}__rebuild_{suffix}",
+                    previous_connector_name=table.cdc_connector_name,
+                )
+            rebuild_pk = recovery.pk
+        else:
+            recovery = CdcTableRebuild.objects.get(
+                pk=rebuild_pk,
+                source_table=table,
+            )
+
+    if recovery.status == CdcTableRebuild.Status.SUCCEEDED:
+        return f"CDC rebuild {recovery.pk} already succeeded."
+    if recovery.status == CdcTableRebuild.Status.FAILED:
+        raise RuntimeError(
+            f"CDC rebuild {recovery.pk} failed: {recovery.last_error}"
+        )
+
+    ch_client = clickhouse_connect.get_client(
+        host=getattr(settings, "CLICKHOUSE_HOST", "localhost"),
+        port=getattr(settings, "CLICKHOUSE_PORT", 8123),
+        username=getattr(settings, "CLICKHOUSE_USER", "default"),
+        password=getattr(settings, "CLICKHOUSE_PASSWORD", ""),
+    )
+    try:
+        database_engine = ch_client.query(
+            "SELECT engine FROM system.databases "
+            "WHERE name = currentDatabase()"
+        ).result_rows
+        if not database_engine or database_engine[0][0] != "Atomic":
+            raise RuntimeError(
+                "Safe CDC table replacement requires an Atomic ClickHouse database."
+            )
+
+        active_table_name = clickhouse_table_name(
+            profile.pk, table.schema_name, table.table_name
+        )
+        active_uuid = _clickhouse_table_uuid(ch_client, active_table_name)
+        if not recovery.active_table_checked:
+            if active_uuid and not table.clickhouse_uses_replacing_merge_tree:
+                raise RuntimeError(
+                    f"{table.schema_name}.{table.table_name} is not stored in a "
+                    "CDC-compatible ReplacingMergeTree."
+                )
+            recovery.active_uuid_before = active_uuid
+            recovery.active_table_checked = True
+            recovery.save(update_fields=[
+                "active_uuid_before",
+                "active_table_checked",
+                "updated_at",
+            ])
+        elif (
+            active_uuid != recovery.active_uuid_before
+            and not (
+                recovery.status == CdcTableRebuild.Status.CUTOVER_PENDING
+                and active_uuid == recovery.staging_uuid
+            )
+        ):
+            raise RuntimeError(
+                "The active ClickHouse table changed while the CDC rebuild "
+                "was in progress."
+            )
+        cutover_already_completed = (
+            recovery.status == CdcTableRebuild.Status.CUTOVER_PENDING
+            and active_uuid == recovery.staging_uuid
+        )
+        if not cutover_already_completed:
+            field_names = sorted(_required_field_names(profile, table))
+            _create_cdc_table(
+                ch_client,
+                profile,
+                table,
+                field_names,
+                physical_table_name=recovery.staging_table,
+                staging=True,
+            )
+            if not recovery.staging_uuid:
+                recovery.staging_uuid = _clickhouse_table_uuid(
+                    ch_client, recovery.staging_table
+                )
+                if not recovery.staging_uuid:
+                    raise RuntimeError(
+                        "ClickHouse did not expose a UUID for the CDC staging table."
+                    )
+                recovery.save(update_fields=["staging_uuid", "updated_at"])
+
+            if recovery.status == CdcTableRebuild.Status.SNAPSHOTTING:
+                _ensure_connector_config(
+                    profile,
+                    [table],
+                    recovery.connector_name,
+                    recovery.topic_prefix,
+                    notification_topic=recovery.notification_topic,
+                )
+            drained = consume_cdc_table_rebuild_batch(
+                recovery,
+                profile,
+                table,
+                ch_client,
+                batch_size=getattr(settings, "DEFAULT_ETL_BATCH_SIZE", 10000),
+            )
+            recovery.refresh_from_db()
+            if (
+                recovery.status == CdcTableRebuild.Status.SNAPSHOTTING
+                or not drained
+            ):
+                rebuild_cdc_table_task.apply_async(
+                    args=[source_table_pk, recovery.pk],
+                    countdown=5,
+                    queue="queue_cdc",
+                )
+                return (
+                    f"CDC rebuild {recovery.pk} is snapshotting "
+                    f"{table.schema_name}.{table.table_name}."
+                )
+
+        lock_key = f"reporthub:cdc-ingestion:{profile.pk}"
+        lock_token = uuid4().hex
+        if not cache.add(lock_key, lock_token, timeout=900):
+            rebuild_cdc_table_task.apply_async(
+                args=[source_table_pk, recovery.pk],
+                countdown=10,
+                queue="queue_cdc",
+            )
+            return (
+                f"CDC rebuild {recovery.pk} is waiting for source ingestion "
+                "to release its lock."
+            )
+
+        try:
+            profile.refresh_from_db(fields=["ingestion_mode", "is_active"])
+            if profile.ingestion_mode != IngestionMode.CDC or not profile.is_active:
+                raise RuntimeError(
+                    "CDC rebuild cutover cannot continue because the source "
+                    "mode or active state changed while waiting for the "
+                    "ingestion lock."
+                )
+            active_uuid = _clickhouse_table_uuid(ch_client, active_table_name)
+            staging_uuid = _clickhouse_table_uuid(
+                ch_client, recovery.staging_table
+            )
+            if active_uuid != recovery.staging_uuid:
+                if staging_uuid != recovery.staging_uuid:
+                    raise RuntimeError(
+                        "CDC rebuild staging table changed unexpectedly; "
+                        "cutover was not attempted."
+                    )
+                if active_uuid == recovery.active_uuid_before:
+                    if active_uuid:
+                        ch_client.command(
+                            f"EXCHANGE TABLES "
+                            f"{quote_clickhouse_identifier(active_table_name)} "
+                            f"AND "
+                            f"{quote_clickhouse_identifier(recovery.staging_table)}"
+                        )
+                    else:
+                        ch_client.command(
+                            f"RENAME TABLE "
+                            f"{quote_clickhouse_identifier(recovery.staging_table)} "
+                            f"TO {quote_clickhouse_identifier(active_table_name)}"
+                        )
+                else:
+                    raise RuntimeError(
+                        "The active ClickHouse table changed during CDC rebuild; "
+                        "cutover was not attempted."
+                    )
+
+            table.cdc_connector_name = recovery.connector_name
+            table.cdc_topic_prefix = recovery.topic_prefix
+            table.cdc_managed = True
+            table.clickhouse_uses_replacing_merge_tree = True
+            table.save(update_fields=[
+                "cdc_connector_name",
+                "cdc_topic_prefix",
+                "cdc_managed",
+                "clickhouse_uses_replacing_merge_tree",
+            ])
+            recovery.status = CdcTableRebuild.Status.SUCCEEDED
+            recovery.last_error = ""
+            recovery.save(update_fields=[
+                "status",
+                "last_error",
+                "updated_at",
+            ])
+        finally:
+            if cache.get(lock_key) == lock_token:
+                cache.delete(lock_key)
+
+        return (
+            f"CDC rebuild {recovery.pk} completed for "
+            f"{table.schema_name}.{table.table_name}."
+        )
+    except Exception as exc:
+        recovery.refresh_from_db()
+        if recovery.status not in {
+            CdcTableRebuild.Status.SUCCEEDED,
+            CdcTableRebuild.Status.FAILED,
+        }:
+            recovery.last_error = f"{type(exc).__name__}: {exc}"
+            if recovery.status == CdcTableRebuild.Status.SNAPSHOTTING:
+                recovery.status = CdcTableRebuild.Status.FAILED
+            recovery.save(update_fields=[
+                "status",
+                "last_error",
+                "updated_at",
+            ])
+        raise
+    finally:
+        ch_client.close()
+
+
 @shared_task(bind=True, queue='queue_periodic')
-def backfill_source_to_clickhouse_task(self, source_pk, batch_size=None):
+def backfill_source_to_clickhouse_task(self, source_pk, batch_size=None, origin_mode=None):
     """Rebuild one source's ClickHouse tables using its saved warehouse field selections."""
+    source = SourceProfile.objects.get(pk=source_pk)
+    _validate_ingestion_task_origin(source, origin_mode)
     if _source_has_primary_key_tables(source_pk):
         logger = get_etl_logger()
         message = (
@@ -1591,6 +2103,7 @@ def backfill_source_to_clickhouse_task(self, source_pk, batch_size=None):
         kwargs={
             'batch_size': batch_size,
             'full_refresh': True,
+            'origin_mode': source.ingestion_mode,
             'task_queue': 'queue_backfill',
         },
         queue='queue_backfill',
@@ -1625,7 +2138,9 @@ def trigger_all_active_clickhouse_backfill_task(self, batch_size=None):
             )
             skipped_count += 1
             continue
-        backfill_source_to_clickhouse_task.delay(source.pk, batch_size=batch_size)
+        backfill_source_to_clickhouse_task.delay(
+            source.pk, batch_size=batch_size, origin_mode=source.ingestion_mode
+        )
         dispatched_count += 1
 
     return (

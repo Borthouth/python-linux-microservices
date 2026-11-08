@@ -156,7 +156,7 @@ services:
 
   celery_warm_worker:
     build: .
-    command: celery -A config worker -Q queue_warm,queue_backfill --concurrency=2 --loglevel=info -n warm_worker@%h
+    command: celery -A config worker -Q queue_warm --concurrency=2 --loglevel=info -n warm_worker@%h
     container_name: reporthub_celery_warm_worker
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
@@ -184,6 +184,58 @@ services:
       - redis
       - clickhouse
       - minio
+    restart: unless-stopped
+
+  celery_cdc_worker:
+    build: .
+    command: celery -A config worker -Q queue_cdc --concurrency=${CDC_WORKER_CONCURRENCY:-2} --loglevel=info -n cdc_worker@%h
+    container_name: reporthub_celery_cdc_worker
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=${REDIS_URL}
+      - CLICKHOUSE_HOST=clickhouse
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - shared_network
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+      - clickhouse
+    restart: unless-stopped
+
+  celery_batch_worker:
+    build: .
+    command: celery -A config worker -Q queue_backfill --concurrency=${BATCH_WORKER_CONCURRENCY:-2} --loglevel=info -n batch_worker@%h
+    container_name: reporthub_celery_batch_worker
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=${REDIS_URL}
+      - CLICKHOUSE_HOST=clickhouse
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - shared_network
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+      - clickhouse
     restart: unless-stopped
 
   celery_cold_worker:

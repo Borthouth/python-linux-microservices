@@ -117,10 +117,11 @@ CELERY_TIMEZONE = 'UTC'
 # Tells Celery Beat to read schedules dynamically from the database
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 
-# 7-Tier Queue Architecture Configuration
+# Celery queue configuration
 CELERY_TASK_QUEUES = {
     'queue_ux': {'exchange': 'queue_ux', 'routing_key': 'queue_ux'},
     'queue_hot': {'exchange': 'queue_hot', 'routing_key': 'queue_hot'},
+    'queue_cdc': {'exchange': 'queue_cdc', 'routing_key': 'queue_cdc'},
     'queue_warm': {'exchange': 'queue_warm', 'routing_key': 'queue_warm'},
     'queue_cold': {'exchange': 'queue_cold', 'routing_key': 'queue_cold'},
     'queue_backfill': {
@@ -211,7 +212,7 @@ SESSION_IDLE_MINUTES = int(os.environ.get('SESSION_IDLE_MINUTES', 15))
 AUTO_LOGOUT = {
     'IDLE_TIME': timedelta(minutes=SESSION_IDLE_MINUTES),
     'REDIRECT_URL': '/control-plane/login/',
-    'MESSAGE': 'Your session has expired due to inactivity. Please log in again.',
+    'MESSAGE': 'Your previous session expired due to inactivity.',
     'WARNING_MESSAGE': 'Your session is about to expire.',
 }
 

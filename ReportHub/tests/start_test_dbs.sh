@@ -285,6 +285,52 @@ else
     echo "   ✅ MSSQL Northwind already exists; keeping its data."
 fi
 
+wait_for_service "Microsoft SQL Server Agent" 90 2 \
+    docker exec reporthub-mssql-test /opt/mssql-tools18/bin/sqlcmd \
+        -S localhost -U sa -P 'YourStrongPassword123!' -C -b \
+        -Q "IF NOT EXISTS (SELECT 1 FROM sys.dm_server_services WHERE servicename LIKE '%SQL Server Agent%' AND status_desc = 'Running') THROW 51000, 'SQL Server Agent is not running', 1;"
+echo "   - Enabling SQL Server CDC for Northwind and its primary-key tables..."
+docker exec -i reporthub-mssql-test /opt/mssql-tools18/bin/sqlcmd \
+    -S localhost -U sa -P 'YourStrongPassword123!' -C -b -d northwind <<'SQL'
+SET NOCOUNT ON;
+IF NOT EXISTS (
+    SELECT 1
+    FROM sys.databases
+    WHERE name = DB_NAME() AND is_cdc_enabled = 1
+)
+    EXEC sys.sp_cdc_enable_db;
+
+DECLARE @schema_name sysname;
+DECLARE @table_name sysname;
+DECLARE cdc_tables CURSOR LOCAL FAST_FORWARD FOR
+    SELECT schemas.name, tables.name
+    FROM sys.tables AS tables
+    JOIN sys.schemas AS schemas ON schemas.schema_id = tables.schema_id
+    WHERE tables.is_ms_shipped = 0
+      AND tables.is_tracked_by_cdc = 0
+      AND EXISTS (
+          SELECT 1
+          FROM sys.indexes AS indexes
+          WHERE indexes.object_id = tables.object_id
+            AND indexes.is_primary_key = 1
+      );
+
+OPEN cdc_tables;
+FETCH NEXT FROM cdc_tables INTO @schema_name, @table_name;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    EXEC sys.sp_cdc_enable_table
+        @source_schema = @schema_name,
+        @source_name = @table_name,
+        @role_name = NULL,
+        @supports_net_changes = 0;
+    FETCH NEXT FROM cdc_tables INTO @schema_name, @table_name;
+END;
+CLOSE cdc_tables;
+DEALLOCATE cdc_tables;
+SQL
+echo "   ✅ SQL Server CDC is enabled for Northwind primary-key tables."
+
 # Wait for MongoDB
 wait_for_service "MongoDB" 90 2 \
     docker exec reporthub-mongo-test mongosh -u "test_user" -p "test_password" \

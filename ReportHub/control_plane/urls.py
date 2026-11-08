@@ -21,6 +21,7 @@ urlpatterns = [
     path('', dashboard.dashboard_view, name='dashboard'),
     path('api/widgets/update/', dashboard.update_widget_preferences, name='update_widget_preferences'),
     path('pipelines/history/', dashboard.pipeline_history_view, name='pipeline_history'),
+    path('cdc/failures/', dashboard.cdc_failure_history_view, name='cdc_failure_history'),
     path('pipelines/active/', dashboard.active_pipeline_executions_view, name='active_pipeline_executions'),
     path('reports/active/', dashboard.active_report_generations_view, name='active_report_generations'),
     path('sources/<int:source_pk>/cancel/', dashboard.cancel_pipeline_view, name='cancel_pipeline'),

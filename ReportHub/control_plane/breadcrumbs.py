@@ -8,7 +8,13 @@ BREADCRUMB_REGISTRY = {
     ],
     'pipeline_history': [
         {'name': 'Dashboard', 'url': 'control_plane:dashboard'},
+        {'name': 'Administration', 'url': ''},
         {'name': 'Pipeline History', 'url': ''}
+    ],
+    'cdc_failure_history': [
+        {'name': 'Dashboard', 'url': 'control_plane:dashboard'},
+        {'name': 'Administration', 'url': ''},
+        {'name': 'CDC Execution Failures', 'url': ''}
     ],
     'active_pipeline_executions': [
         {'name': 'Dashboard', 'url': 'control_plane:dashboard'},
@@ -113,6 +119,7 @@ BREADCRUMB_REGISTRY = {
         {'name': 'Audit Logs', 'url': ''}
     ],
     'email_audit_logs': [
+        {'name': 'Dashboard', 'url': 'control_plane:dashboard'},
         {'name': 'Administration', 'url': ''},
         {'name': 'Email Delivery Audit', 'url': ''}
     ],

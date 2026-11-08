@@ -35,14 +35,14 @@
                 </div>
 
                 <!-- RIGHT PANEL: Field Selection Detail View for Active Table -->
-                <div class="lg:col-span-8 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
+                <div class="min-w-0 lg:col-span-8 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
                     {% for source_table in tables_qs %}
                     <div id="table-panel-{{ source_table.table_name }}" class="table-panel space-y-4 {% if not forloop.first %}hidden{% endif %}">
                         
-                        <div class="flex items-center justify-between border-b border-slate-800 pb-4">
-                            <div>
-                                <h2 class="text-lg font-bold text-white font-mono uppercase">📦 {{ source_table.table_name }}</h2>
-                                <p class="text-xs text-slate-400 mt-0.5">Schema: <span class="text-slate-300">{{ source_table.schema_name }}</span></p>
+                        <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
+                            <div class="min-w-0">
+                                <h2 class="text-lg font-bold text-white font-mono uppercase break-all">📦 {{ source_table.table_name }}</h2>
+                                <p class="text-xs text-slate-400 mt-0.5 break-all">Schema: <span class="text-slate-300">{{ source_table.schema_name }}</span></p>
                             </div>
                             <div class="flex space-x-2 text-xs">
                                 <button type="button" onclick="toggleTableFields('{{ source_table.table_name }}', true)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 transition-all">Select All</button>
@@ -68,18 +68,20 @@
                         <div class="slate-scrollbar grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[calc(100vh-380px)] overflow-y-auto pr-2">
                             {% for field in source_table.fields.all %}
                             {% with field_key=source_table.table_name|add:"."|add:field.field_name %}
-                            <div class="column-item flex items-center justify-between bg-slate-800/40 p-3 rounded-xl border {% if field.field_name in source_table.primary_key_fields %}border-amber-500/40 hover:border-amber-400/60{% else %}border-slate-800 hover:border-slate-700{% endif %} transition-all" data-colname="{{ field.field_name|lower }}">
-                                <div class="flex items-center space-x-3">
+                            <div class="column-item min-w-0 bg-slate-800/40 p-3 rounded-xl border {% if field.field_name in source_table.primary_key_fields %}border-amber-500/40 hover:border-amber-400/60{% else %}border-slate-800 hover:border-slate-700{% endif %} transition-all" data-colname="{{ field.field_name|lower }}">
+                                <div class="flex min-w-0 items-start gap-3">
                                     <input type="checkbox" name="selected_fields" value="{{ field_key }}" id="field-{{ field_key }}"
-                                           class="table-field-{{ source_table.table_name }} rounded border-slate-700 bg-slate-800 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                                           class="table-field-{{ source_table.table_name }} shrink-0 rounded border-slate-700 bg-slate-800 text-indigo-600 focus:ring-indigo-500 h-4 w-4 mt-0.5"
                                            {% if field_key in enabled_set or field_key not in mapped_field_keys %}checked{% endif %}>
-                                    <label for="field-{{ field_key }}" class="text-sm {% if field.field_name in source_table.primary_key_fields %}text-amber-200{% else %}text-slate-300{% endif %} font-mono cursor-pointer truncate" title="{{ field.field_name }}">{{ field.field_name }}</label>
-                                </div>
-                                <div class="flex items-center gap-1.5 shrink-0">
-                                    {% if field.field_name in source_table.primary_key_fields %}
-                                    <span class="text-[9px] uppercase font-bold tracking-wide px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30" title="Part of this table's primary key">Primary Key</span>
-                                    {% endif %}
-                                    <span class="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-500 border border-slate-700/50" title="{{ field.data_type }}">{{ field.data_type }}</span>
+                                    <div class="min-w-0 flex-1">
+                                        <div class="flex flex-wrap items-center gap-1.5">
+                                            <label for="field-{{ field_key }}" class="min-w-0 text-sm {% if field.field_name in source_table.primary_key_fields %}text-amber-200{% else %}text-slate-300{% endif %} font-mono cursor-pointer break-all" title="{{ field.field_name }}">{{ field.field_name }}</label>
+                                            {% if field.field_name in source_table.primary_key_fields %}
+                                            <span class="text-[9px] uppercase font-bold tracking-wide px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30" title="Part of this table's primary key">Primary Key</span>
+                                            {% endif %}
+                                        </div>
+                                        <span class="block mt-1 text-[10px] uppercase font-mono text-slate-500 break-all" title="{{ field.data_type }}">{{ field.data_type }}</span>
+                                    </div>
                                 </div>
                             </div>
                             {% endwith %}

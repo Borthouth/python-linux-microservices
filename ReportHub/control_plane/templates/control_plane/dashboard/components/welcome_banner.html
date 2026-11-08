@@ -59,6 +59,12 @@
                     <span>CDC Failures</span>
                 </label>
                 {% endif %}
+                {% if request.user.is_active and request.user.is_staff %}
+                <label class="flex items-center space-x-2 px-2 py-1.5 hover:bg-slate-800/60 rounded-lg cursor-pointer text-xs text-slate-300 transition">
+                    <input type="checkbox" {% if widget_prefs.show_email_audit %}checked{% endif %} @change="toggleEmailAuditWidget($event.target, '{{ csrf_token }}')" class="rounded border-slate-700 bg-slate-950 text-indigo-500 focus:ring-0">
+                    <span>Email Delivery Audit</span>
+                </label>
+                {% endif %}
             </div>
         </div>
     </div>

@@ -1,4 +1,5 @@
 import json
+import hashlib
 import re
 import time
 from datetime import (
@@ -14,9 +15,10 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 from django.utils import timezone
-from kafka import KafkaConsumer
+from kafka import KafkaConsumer, TopicPartition
 
 from control_plane.models import (
+    CdcTableRebuild,
     DbChoice,
     SourceField,
     SourceProfile,
@@ -43,35 +45,60 @@ def _connector_name(profile):
     return f"reporthub-source-{profile.pk}"
 
 
+def _table_cdc_generation(table):
+    connector_name = getattr(table, "cdc_connector_name", "")
+    topic_prefix = getattr(table, "cdc_topic_prefix", "")
+    if bool(connector_name) != bool(topic_prefix):
+        raise RuntimeError(
+            f"CDC generation metadata is incomplete for "
+            f"{table.schema_name}.{table.table_name}."
+        )
+    return connector_name, topic_prefix
+
+
+def _connector_suffix(connector_name):
+    return hashlib.sha256(connector_name.encode("utf-8")).hexdigest()[:12]
+
+
 def _oracle_identifier(identifier):
     if isinstance(identifier, str) and identifier == identifier.lower():
         return identifier.upper()
     return identifier
 
 
-def _topic_name(profile, table):
-    prefix = _connector_name(profile)
+def _topic_component(value):
+    return re.sub(r"[^a-zA-Z0-9._-]", "_", str(value))
+
+
+def _topic_name(profile, table, topic_prefix=None):
+    topic_prefix = topic_prefix or getattr(table, "cdc_topic_prefix", "") or _connector_name(profile)
     if profile.db_type == DbChoice.MSSQL:
-        return (
-            f"{prefix}.{profile.database_name}.{table.schema_name}."
-            f"{table.table_name}"
+        components = (
+            topic_prefix,
+            profile.database_name,
+            table.schema_name,
+            table.table_name,
         )
-    if profile.db_type == DbChoice.ORACLE:
-        return (
-            f"{prefix}.{_oracle_identifier(table.schema_name)}."
-            f"{_oracle_identifier(table.table_name)}"
+    elif profile.db_type == DbChoice.ORACLE:
+        components = (
+            topic_prefix,
+            _oracle_identifier(table.schema_name),
+            _oracle_identifier(table.table_name),
         )
-    return f"{prefix}.{table.schema_name}.{table.table_name}"
+    else:
+        components = (
+            topic_prefix,
+            table.schema_name,
+            table.table_name,
+        )
+    return ".".join(_topic_component(component) for component in components)
 
 
 def _qualified_table_name(profile, table):
     if profile.db_type == DbChoice.MYSQL:
         return f"{profile.database_name}.{table.table_name}"
     if profile.db_type == DbChoice.MSSQL:
-        return (
-            f"{profile.database_name}.{table.schema_name}."
-            f"{table.table_name}"
-        )
+        return f"{table.schema_name}.{table.table_name}"
     if profile.db_type == DbChoice.MONGODB:
         return f"{profile.database_name}.{table.table_name}"
     if profile.db_type == DbChoice.ORACLE:
@@ -89,7 +116,14 @@ def _connector_table_list(profile, tables):
     )
 
 
-def build_debezium_connector_config(profile, tables=None):
+def build_debezium_connector_config(
+    profile,
+    tables=None,
+    *,
+    connector_name=None,
+    topic_prefix=None,
+    notification_topic=None,
+):
     """Build a Debezium connector config without logging source credentials."""
     tables = list(
         tables if tables is not None
@@ -101,15 +135,23 @@ def build_debezium_connector_config(profile, tables=None):
             "CDC requires at least one source table with an introspected primary key."
         )
 
+    connector_name = connector_name or _connector_name(profile)
+    topic_prefix = topic_prefix or connector_name
+    connector_suffix = _connector_suffix(connector_name)
     common = {
         "tasks.max": "1",
-        "topic.prefix": _connector_name(profile),
+        "topic.prefix": topic_prefix,
         "key.converter": "org.apache.kafka.connect.json.JsonConverter",
         "key.converter.schemas.enable": "false",
         "value.converter": "org.apache.kafka.connect.json.JsonConverter",
         "value.converter.schemas.enable": "false",
         "snapshot.mode": "initial",
     }
+    if notification_topic:
+        common.update({
+            "notification.enabled.channels": "sink",
+            "notification.sink.topic.name": notification_topic,
+        })
     host = profile.host
     port = str(profile.port)
     username = profile.username
@@ -126,7 +168,11 @@ def build_debezium_connector_config(profile, tables=None):
             "database.port": port,
             "database.user": username,
             "database.password": password,
-            "database.server.id": str(50000 + profile.pk),
+            "database.server.id": str(
+                50000 + profile.pk
+                if connector_name == _connector_name(profile)
+                else 1 + int(connector_suffix[:8], 16) % (2**32 - 1)
+            ),
             "database.include.list": profile.database_name,
             "table.include.list": table_list,
         }
@@ -146,8 +192,16 @@ def build_debezium_connector_config(profile, tables=None):
             ),
             "table.include.list": table_list,
             "plugin.name": "pgoutput",
-            "slot.name": f"reporthub_{profile.pk}",
-            "publication.name": f"reporthub_{profile.pk}",
+            "slot.name": (
+                f"reporthub_{profile.pk}"
+                if connector_name == _connector_name(profile)
+                else f"rh_{profile.pk}_{connector_suffix}"
+            ),
+            "publication.name": (
+                f"reporthub_{profile.pk}"
+                if connector_name == _connector_name(profile)
+                else f"rh_{profile.pk}_{connector_suffix}"
+            ),
             "publication.autocreate.mode": "filtered",
             "slot.drop.on.stop": "false",
         }
@@ -234,6 +288,8 @@ def build_debezium_connector_config(profile, tables=None):
             ),
             "schema.history.internal.kafka.topic": (
                 f"reporthub.schema-history.{profile.pk}"
+                if connector_name == _connector_name(profile)
+                else f"reporthub.schema-history.{profile.pk}.{connector_suffix}"
             ),
         })
     return config
@@ -253,7 +309,11 @@ def _connect_request(method, path, body=None):
             response_body = response.read()
             return json.loads(response_body) if response_body else None
     except HTTPError as exc:
-        if exc.code == 404:
+        if (
+            exc.code == 404
+            and method == "GET"
+            and path.endswith(("/config", "/status"))
+        ):
             return None
         response_body = exc.read().decode("utf-8", errors="replace")
         detail = _connect_error_detail(response_body, body)
@@ -320,19 +380,25 @@ def _connector_configs_match(existing, desired):
         if existing_value != value:
             return False
     return all(
-        key in desired or key in _SENSITIVE_CONNECTOR_CONFIGS
+        key in desired or key == "name" or key in _SENSITIVE_CONNECTOR_CONFIGS
         for key in existing
     )
 
 
-def ensure_debezium_connector(profile):
-    tables = list(profile.tables.all())
-    keyed_tables = [table for table in tables if table.primary_key_fields]
-    if not keyed_tables:
-        return None
-
-    name = _connector_name(profile)
-    config = build_debezium_connector_config(profile, keyed_tables)
+def _ensure_connector_config(
+    profile,
+    tables,
+    name,
+    topic_prefix,
+    notification_topic=None,
+):
+    config = build_debezium_connector_config(
+        profile,
+        tables,
+        connector_name=name,
+        topic_prefix=topic_prefix,
+        notification_topic=notification_topic,
+    )
     existing = _connect_request("GET", f"/connectors/{name}/config")
     if existing is None:
         _connect_request(
@@ -343,26 +409,71 @@ def ensure_debezium_connector(profile):
     elif not _connector_configs_match(existing, config):
         _connect_request("PUT", f"/connectors/{name}/config", config)
     deadline = time.monotonic() + 30
+    restart_attempted = False
     while time.monotonic() < deadline:
         status = _connect_request("GET", f"/connectors/{name}/status")
         if status:
             connector_state = status.get("connector", {}).get("state")
-            task_states = [
-                task.get("state") for task in status.get("tasks", [])
-            ]
+            tasks = status.get("tasks", [])
+            task_states = [task.get("state") for task in tasks]
             if connector_state == "FAILED" or "FAILED" in task_states:
-                raise RuntimeError(
-                    f"Debezium connector {name} failed to start. "
-                    "Check Kafka Connect and source database logs."
-                )
+                if not restart_attempted:
+                    if connector_state == "FAILED":
+                        _connect_request("POST", f"/connectors/{name}/restart")
+                    for task in tasks:
+                        if task.get("state") == "FAILED":
+                            _connect_request(
+                                "POST", f"/connectors/{name}/tasks/{task['id']}/restart"
+                            )
+                    restart_attempted = True
             if connector_state == "RUNNING" and task_states and all(
                 state == "RUNNING" for state in task_states
             ):
                 return name
         time.sleep(1)
+    if restart_attempted:
+        raise RuntimeError(
+            f"Debezium connector {name} failed to start after a restart. "
+            "Check Kafka Connect and source database logs."
+        )
     raise RuntimeError(
         f"Debezium connector {name} did not become ready within 30 seconds."
     )
+
+
+def ensure_debezium_connector(profile):
+    tables = list(profile.tables.all())
+    keyed_tables = [table for table in tables if table.primary_key_fields]
+    main_tables = [
+        table for table in keyed_tables
+        if not _table_cdc_generation(table)[0]
+    ]
+    main_name = _connector_name(profile)
+    if main_tables:
+        _ensure_connector_config(
+            profile,
+            main_tables,
+            main_name,
+            main_name,
+        )
+
+    generation_names = []
+    for table in keyed_tables:
+        name, topic_prefix = _table_cdc_generation(table)
+        if not name:
+            continue
+        _ensure_connector_config(
+            profile,
+            [table],
+            name,
+            topic_prefix,
+            notification_topic=f"{name}.notifications",
+        )
+        generation_names.append(name)
+
+    if main_tables:
+        return main_name
+    return generation_names[0] if generation_names else None
 
 
 def _required_field_names(profile, table):
@@ -517,29 +628,37 @@ def _oracle_field_value(values, field_name):
     return None, False
 
 
-def _create_cdc_table(ch_client, profile, table, field_names):
+def _create_cdc_table(
+    ch_client,
+    profile,
+    table,
+    field_names,
+    *,
+    physical_table_name=None,
+    staging=False,
+):
     from etl.tasks import map_to_clickhouse_type
 
-    physical_name = clickhouse_table_name(
+    physical_name = physical_table_name or clickhouse_table_name(
         profile.pk, table.schema_name, table.table_name
     )
     quoted_name = quote_clickhouse_identifier(physical_name)
     existing = ch_client.query(
         f"EXISTS TABLE {quoted_name}"
     ).result_rows[0][0]
-    if not existing and table.cdc_managed:
+    if not staging and not existing and table.cdc_managed:
         raise RuntimeError(
             f"Cannot resume CDC for {table.schema_name}.{table.table_name}: "
             "its warehouse table is missing. A fresh coordinated CDC snapshot "
             "is required before ingestion can resume."
         )
-    if existing and not table.cdc_managed:
+    if not staging and existing and not table.cdc_managed:
         raise RuntimeError(
             f"Cannot switch {table.schema_name}.{table.table_name} to CDC: "
             "its existing warehouse table must remain available until a "
             "coordinated CDC snapshot is ready."
         )
-    if existing and table.cdc_managed:
+    if existing and (staging or table.cdc_managed):
         actual_columns = {
             row[0] for row in ch_client.query(
                 f"DESCRIBE TABLE {quoted_name}"
@@ -596,13 +715,169 @@ def _create_cdc_table(ch_client, profile, table, field_names):
         f"ENGINE = ReplacingMergeTree({CDC_VERSION_COLUMN}, {CDC_DELETED_COLUMN}) "
         f"ORDER BY ({order_by})"
     )
-    table.cdc_managed = True
-    table.clickhouse_uses_replacing_merge_tree = True
-    table.save(update_fields=[
-        "cdc_managed",
-        "clickhouse_uses_replacing_merge_tree",
-    ])
+    if not staging:
+        table.cdc_managed = True
+        table.clickhouse_uses_replacing_merge_tree = True
+        table.save(update_fields=[
+            "cdc_managed",
+            "clickhouse_uses_replacing_merge_tree",
+        ])
     return quoted_name, all_fields
+
+
+def _clickhouse_table_uuid(ch_client, table_name):
+        result = ch_client.query(
+            "SELECT toString(uuid) FROM system.tables "
+            "WHERE database = currentDatabase() AND name = {table_name:String}",
+            parameters={"table_name": table_name},
+        ).result_rows
+        return result[0][0] if result else ""
+
+
+def consume_cdc_table_rebuild_batch(
+        recovery,
+        profile,
+        table,
+        ch_client,
+        batch_size,
+):
+        topic = _topic_name(profile, table, recovery.topic_prefix)
+        target_offsets = recovery.snapshot_end_offsets or {}
+        consumer = KafkaConsumer(
+            bootstrap_servers=[
+                server.strip()
+                for server in settings.KAFKA_BOOTSTRAP_SERVERS.split(",")
+                if server.strip()
+            ],
+            group_id=recovery.consumer_group,
+            enable_auto_commit=False,
+            auto_offset_reset="earliest",
+            key_deserializer=lambda value: (
+                json.loads(value.decode("utf-8")) if value is not None else None
+            ),
+            value_deserializer=lambda value: (
+                json.loads(value.decode("utf-8")) if value is not None else None
+            ),
+            consumer_timeout_ms=1000,
+        )
+        try:
+            consumer.subscribe([topic, recovery.notification_topic])
+            required_fields = _required_field_names(profile, table)
+            physical_name, field_names = _create_cdc_table(
+                ch_client,
+                profile,
+                table,
+                sorted(required_fields),
+                physical_table_name=recovery.staging_table,
+                staging=True,
+            )
+            field_types = {
+                field.field_name: field.data_type
+                for field in table.fields.all()
+            }
+            records = consumer.poll(timeout_ms=10000, max_records=batch_size)
+            if not consumer.assignment():
+                raise RuntimeError(
+                    f"Kafka consumer for CDC rebuild {recovery.pk} did not receive "
+                    "a partition assignment."
+                )
+
+            inserts = []
+            snapshot_completed = recovery.status == recovery.Status.CUTOVER_PENDING
+            for partition_records in records.values():
+                for message in partition_records:
+                    if message.topic == topic:
+                        partition_target = target_offsets.get(str(message.partition))
+                        if (
+                            partition_target is not None
+                            and message.offset >= int(partition_target)
+                        ):
+                            continue
+                        row = _record_from_message(
+                            message,
+                            table,
+                            field_names,
+                            normalize_identifiers=profile.db_type == DbChoice.ORACLE,
+                        )
+                        if row is not None:
+                            inserts.append(
+                                _coerce_cdc_row(row, table, field_types)
+                            )
+                    elif message.topic == recovery.notification_topic:
+                        event = message.value
+                        if not isinstance(event, dict):
+                            continue
+                        details = event.get("additional_data") or {}
+                        if details.get("connector_name") != recovery.connector_name:
+                            continue
+                        if (
+                            event.get("type") == "TABLE_SCAN_COMPLETED"
+                            and details.get("status") != "SUCCEEDED"
+                        ):
+                            raise RuntimeError(
+                                "Debezium reported a failed table scan for the "
+                                f"CDC rebuild of {table.schema_name}.{table.table_name}."
+                            )
+                        if (
+                            event.get("type") == "COMPLETED"
+                            and event.get("aggregate_type") == "Initial Snapshot"
+                        ):
+                            snapshot_completed = True
+
+            if inserts:
+                ch_client.insert(
+                    physical_name,
+                    [
+                        [row.get(field) for field in field_names]
+                        + [row[CDC_VERSION_COLUMN], row[CDC_DELETED_COLUMN]]
+                        for row in inserts
+                    ],
+                    column_names=field_names + [
+                        CDC_VERSION_COLUMN,
+                        CDC_DELETED_COLUMN,
+                    ],
+                )
+
+            if (
+                snapshot_completed
+                and recovery.status == recovery.Status.SNAPSHOTTING
+            ):
+                partitions = consumer.partitions_for_topic(topic) or set()
+                end_offsets = consumer.end_offsets({
+                    TopicPartition(topic, partition)
+                    for partition in partitions
+                }) if partitions else {}
+                recovery.snapshot_end_offsets = {
+                    str(partition.partition): offset
+                    for partition, offset in end_offsets.items()
+                }
+                recovery.status = recovery.Status.CUTOVER_PENDING
+                recovery.save(update_fields=[
+                    "snapshot_end_offsets",
+                    "status",
+                    "updated_at",
+                ])
+
+            if records:
+                consumer.commit()
+
+            if recovery.status != recovery.Status.CUTOVER_PENDING:
+                return False
+            if not target_offsets and recovery.snapshot_end_offsets:
+                target_offsets = recovery.snapshot_end_offsets
+            if not target_offsets:
+                return True
+
+            assignment = consumer.assignment()
+            for partition_number, target in target_offsets.items():
+                partition = TopicPartition(topic, int(partition_number))
+                if partition not in assignment:
+                    return False
+                if consumer.position(partition) < int(target):
+                    return False
+            return True
+        finally:
+            consumer.close()
 
 
 def _record_from_message(message, table, field_names, normalize_identifiers=False):
@@ -648,14 +923,65 @@ def consume_source_cdc_batch(profile, ch_client, batch_size=None):
         return 0
     if batch_size is None:
         batch_size = settings.DEFAULT_ETL_BATCH_SIZE
-    topic_tables = {_topic_name(profile, table): table for table in tables}
+    main_tables = []
+    generation_tables = []
+    for table in tables:
+        connector_name, _ = _table_cdc_generation(table)
+        if connector_name:
+            generation_tables.append(table)
+        else:
+            main_tables.append(table)
+    processed = _consume_source_cdc_group(
+        profile,
+        ch_client,
+        main_tables,
+        batch_size,
+        _connector_name(profile),
+    )
+    for table in generation_tables:
+        connector_name, topic_prefix = _table_cdc_generation(table)
+        recovery = CdcTableRebuild.objects.filter(
+            source_table=table,
+            connector_name=connector_name,
+            status=CdcTableRebuild.Status.SUCCEEDED,
+        ).order_by("-created_at").first()
+        if recovery is None:
+            raise RuntimeError(
+                f"CDC generation for {table.schema_name}.{table.table_name} "
+                "has no successful rebuild checkpoint."
+            )
+        processed += _consume_source_cdc_group(
+            profile,
+            ch_client,
+            [table],
+            batch_size,
+            f"{connector_name}-active",
+            initial_offsets=recovery.snapshot_end_offsets,
+        )
+    return processed
+
+
+def _consume_source_cdc_group(
+    profile,
+    ch_client,
+    tables,
+    batch_size,
+    group_id,
+    initial_offsets=None,
+):
+    if not tables:
+        return 0
+    topic_tables = {
+        _topic_name(profile, table, getattr(table, "cdc_topic_prefix", "") or None): table
+        for table in tables
+    }
     consumer = KafkaConsumer(
         bootstrap_servers=[
             server.strip()
             for server in settings.KAFKA_BOOTSTRAP_SERVERS.split(",")
             if server.strip()
         ],
-        group_id=_connector_name(profile),
+        group_id=group_id,
         enable_auto_commit=False,
         auto_offset_reset="earliest",
         key_deserializer=lambda value: (
@@ -692,9 +1018,27 @@ def consume_source_cdc_batch(profile, ch_client, batch_size=None):
         records = consumer.poll(timeout_ms=10000, max_records=batch_size)
         if not consumer.assignment():
             raise RuntimeError(
-                f"Kafka consumer for {_connector_name(profile)} did not receive "
+                f"Kafka consumer for {group_id} did not receive "
                 "a partition assignment; CDC progress was not checked."
             )
+        if initial_offsets is not None:
+            seek_to_checkpoint = False
+            for partition in consumer.assignment():
+                if consumer.committed(partition) is not None:
+                    continue
+                offset = initial_offsets.get(str(partition.partition))
+                if offset is None:
+                    consumer.seek_to_beginning(partition)
+                else:
+                    consumer.seek(partition, int(offset))
+                seek_to_checkpoint = True
+            if seek_to_checkpoint:
+                records = consumer.poll(timeout_ms=10000, max_records=batch_size)
+                if not consumer.assignment():
+                    raise RuntimeError(
+                        f"Kafka consumer for {group_id} lost its partition "
+                        "assignment while initializing offsets."
+                    )
         for partition_records in records.values():
             messages.extend(partition_records)
         messages.sort(key=lambda message: (message.topic, message.partition, message.offset))

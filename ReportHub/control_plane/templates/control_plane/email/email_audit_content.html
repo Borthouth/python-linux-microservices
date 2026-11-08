@@ -67,7 +67,9 @@
                         <div class="inline-flex items-center space-x-1.5 justify-end">
                             {% if log.error_message %}
                                 <button type="button" 
-                                        @click="activeErrorTitle = '{{ log.recipients }}'; activeErrorMessage = `{{ log.error_message|escapejs }}`; inspectModalOpen = true;"
+                                        data-recipients="{{ log.recipients }}"
+                                        data-error-message="{{ log.error_message }}"
+                                        @click="activeErrorTitle = $el.dataset.recipients; activeErrorMessage = $el.dataset.errorMessage; inspectModalOpen = true;"
                                         class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-all">
                                     Inspect
                                 </button>
@@ -82,7 +84,9 @@
 
                             <!-- Delete Button Triggering Confirmation Modal -->
                             <button type="button"
-                                    @click="deleteUrl = '{% url 'control_plane:email_audit_delete' log.pk %}'; deleteTargetName = '{{ log.recipients }}'; deleteModalOpen = true;"
+                                    data-delete-url="{% url 'control_plane:email_audit_delete' log.pk %}"
+                                    data-recipients="{{ log.recipients }}"
+                                    @click="deleteUrl = $el.dataset.deleteUrl; deleteTargetName = $el.dataset.recipients; deleteModalOpen = true;"
                                     class="px-2.5 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-medium rounded-lg border border-red-500/20 transition-all">
                                 Delete
                             </button>

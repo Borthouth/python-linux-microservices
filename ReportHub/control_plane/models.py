@@ -1,4 +1,7 @@
+import uuid
+
 from django.db import models
+from django.db.models import Q
 from django.urls import reverse
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -202,6 +205,8 @@ class SourceTable(TimeStampedAuditedModel):
     incremental_ready = models.BooleanField(default=False)
     clickhouse_uses_replacing_merge_tree = models.BooleanField(default=False)
     cdc_managed = models.BooleanField(default=False)
+    cdc_connector_name = models.CharField(max_length=255, blank=True, default="")
+    cdc_topic_prefix = models.CharField(max_length=255, blank=True, default="")
     
     last_synced_at = models.DateTimeField(blank=True, null=True)
 
@@ -215,6 +220,119 @@ class SourceTable(TimeStampedAuditedModel):
 
     def get_audit_display_name(self):
         return f"Table: {self.schema_name}.{self.table_name}"
+
+
+class CdcTableRebuild(models.Model):
+    class Status(models.TextChoices):
+        SNAPSHOTTING = "SNAPSHOTTING", "Snapshotting"
+        CUTOVER_PENDING = "CUTOVER_PENDING", "Cutover pending"
+        SUCCEEDED = "SUCCEEDED", "Succeeded"
+        FAILED = "FAILED", "Failed"
+
+    source_table = models.ForeignKey(
+        SourceTable,
+        on_delete=models.CASCADE,
+        related_name="cdc_rebuilds",
+    )
+    generation = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    connector_name = models.CharField(max_length=255, unique=True)
+    topic_prefix = models.CharField(max_length=255, unique=True)
+    notification_topic = models.CharField(max_length=255, unique=True)
+    consumer_group = models.CharField(max_length=255, unique=True)
+    staging_table = models.CharField(max_length=255, unique=True)
+    previous_connector_name = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.SNAPSHOTTING,
+    )
+    snapshot_end_offsets = models.JSONField(default=dict, blank=True)
+    staging_uuid = models.CharField(max_length=64, blank=True, default="")
+    active_uuid_before = models.CharField(max_length=64, blank=True, default="")
+    active_table_checked = models.BooleanField(default=False)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source_table"],
+                condition=Q(
+                    status__in=["SNAPSHOTTING", "CUTOVER_PENDING"]
+                ),
+                name="uniq_active_cdc_table_rebuild",
+            ),
+        ]
+
+
+class CdcToBatchTransition(models.Model):
+    class Status(models.TextChoices):
+        PREPARING = "PREPARING", "Preparing"
+        CUTOVER_PENDING = "CUTOVER_PENDING", "Cutover pending"
+        SUCCEEDED = "SUCCEEDED", "Succeeded"
+        FAILED = "FAILED", "Failed"
+
+    source = models.ForeignKey(
+        SourceProfile,
+        on_delete=models.CASCADE,
+        related_name="cdc_to_batch_transitions",
+    )
+    generation = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PREPARING,
+    )
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source"],
+                condition=Q(status__in=["PREPARING", "CUTOVER_PENDING"]),
+                name="uniq_active_cdc_batch_transition",
+            ),
+        ]
+
+
+class CdcToBatchTableCheckpoint(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        STAGED = "STAGED", "Staged"
+        CUTOVER = "CUTOVER", "Cutover complete"
+
+    transition = models.ForeignKey(
+        CdcToBatchTransition,
+        on_delete=models.CASCADE,
+        related_name="table_checkpoints",
+    )
+    source_table = models.ForeignKey(
+        SourceTable,
+        on_delete=models.CASCADE,
+        related_name="cdc_to_batch_checkpoints",
+    )
+    staging_table = models.CharField(max_length=255)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+    active_uuid_before = models.CharField(max_length=64, blank=True, default="")
+    active_table_checked = models.BooleanField(default=False)
+    staging_uuid = models.CharField(max_length=64, blank=True, default="")
+    staging_schema = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["transition", "source_table"],
+                name="uniq_cdc_batch_table_checkpoint",
+            ),
+        ]
 
 
 class SourceField(TimeStampedAuditedModel):
@@ -297,6 +415,7 @@ class UserWidgetPreference(models.Model):
     show_history = models.BooleanField(default=True)
     show_dlq = models.BooleanField(default=True)
     show_cdc_failures = models.BooleanField(default=True)
+    show_email_audit = models.BooleanField(default=True)
 
     def __str__(self):
         return f"Widget Preferences for {self.user.username}"

@@ -39,6 +39,7 @@ services:
       - ACCEPT_EULA=Y
       - MSSQL_SA_PASSWORD=YourStrongPassword123!
       - MSSQL_PID=Developer
+      - MSSQL_AGENT_ENABLED=true
     ports:
       - "1434:1433"
     networks:

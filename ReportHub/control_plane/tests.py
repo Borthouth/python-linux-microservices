@@ -3,13 +3,18 @@ from datetime import timedelta
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError, transaction
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
 from control_plane.models import (
     CdcExecutionFailure,
+    CdcTableRebuild,
+    CdcToBatchTableCheckpoint,
+    CdcToBatchTransition,
     DbChoice,
+    IngestionMode,
     SourceField,
     SourceProfile,
     SourceTable,
@@ -20,8 +25,152 @@ from control_plane.models import (
 from control_plane.views.dlq import dlq_requeue_view
 from control_plane.views.dashboard import update_widget_preferences
 from etl.progress import PIPELINE_STEPS, PREPARING_INGESTION
-from reports.models import ReportDefinition, ReportExecution
+from reports.models import EmailAuditLog, ReportDefinition, ReportExecution
 from reports.progress import REPORT_RUNNING_STEPS, ReportProgress
+
+
+class CdcToBatchCheckpointTests(TestCase):
+    def setUp(self):
+        self.source = SourceProfile.objects.create(
+            name="Transition checkpoint source",
+            db_type=DbChoice.POSTGRESQL,
+            host="localhost",
+            port=5432,
+            database_name="test_db",
+            username="test_user",
+            ingestion_mode=IngestionMode.CDC,
+        )
+        self.table = SourceTable.objects.create(
+            source=self.source,
+            schema_name="public",
+            table_name="events",
+            primary_key_fields=["id"],
+            cdc_managed=True,
+        )
+
+    def test_only_one_active_transition_per_source(self):
+        transition = CdcToBatchTransition.objects.create(source=self.source)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            CdcToBatchTransition.objects.create(source=self.source)
+
+        transition.status = CdcToBatchTransition.Status.CUTOVER_PENDING
+        transition.save(update_fields=["status"])
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            CdcToBatchTransition.objects.create(source=self.source)
+
+        transition.status = CdcToBatchTransition.Status.SUCCEEDED
+        transition.save(update_fields=["status"])
+        self.assertIsNotNone(CdcToBatchTransition.objects.create(source=self.source).pk)
+
+    def test_one_durable_checkpoint_per_transition_and_table(self):
+        transition = CdcToBatchTransition.objects.create(source=self.source)
+        checkpoint = CdcToBatchTableCheckpoint.objects.create(
+            transition=transition,
+            source_table=self.table,
+            staging_table="source_events_batch_stage",
+            active_uuid_before="old-uuid",
+            staging_uuid="stage-uuid",
+            status=CdcToBatchTableCheckpoint.Status.STAGED,
+        )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            CdcToBatchTableCheckpoint.objects.create(
+                transition=transition,
+                source_table=self.table,
+                staging_table="duplicate_stage",
+            )
+        checkpoint.refresh_from_db()
+        self.assertEqual(checkpoint.status, CdcToBatchTableCheckpoint.Status.STAGED)
+        self.assertEqual(checkpoint.active_uuid_before, "old-uuid")
+        self.assertEqual(checkpoint.staging_uuid, "stage-uuid")
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+
+
+class CdcTableRebuildAdminTests(TestCase):
+    def setUp(self):
+        user = get_user_model().objects.create_user(
+            username="cdc-admin", is_staff=True, is_superuser=True,
+        )
+        self.client.force_login(user)
+        self.source = SourceProfile.objects.create(
+            name="CDC admin source",
+            db_type=DbChoice.POSTGRESQL,
+            host="localhost",
+            port=5432,
+            database_name="test_db",
+            username="test_user",
+            ingestion_mode=IngestionMode.CDC,
+        )
+        self.table = SourceTable.objects.create(
+            source=self.source,
+            schema_name="public",
+            table_name="events",
+            primary_key_fields=["id"],
+            cdc_managed=True,
+        )
+
+    @patch("control_plane.admin.rebuild_cdc_table_task.delay")
+    def test_action_queues_eligible_and_skips_ineligible_tables(self, delay):
+        keyless = SourceTable.objects.create(
+            source=self.source,
+            schema_name="public",
+            table_name="keyless",
+            cdc_managed=True,
+        )
+        response = self.client.post(
+            reverse("admin:control_plane_sourcetable_changelist"),
+            {
+                "action": "rebuild_selected_cdc_tables",
+                "_selected_action": [self.table.pk, keyless.pk],
+            },
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Queued 1 CDC table rebuild(s).")
+        self.assertContains(response, "Skipped 1 ineligible table(s).")
+        delay.assert_called_once_with(self.table.pk)
+
+    def test_rebuild_checkpoint_is_visible_but_cannot_be_added_or_deleted(self):
+        recovery = CdcTableRebuild.objects.create(
+            source_table=self.table,
+            connector_name="admin-test-generation",
+            topic_prefix="admin-test-generation",
+            notification_topic="admin-test-generation.notifications",
+            consumer_group="admin-test-generation-group",
+            staging_table="source_events_admin_test",
+            status=CdcTableRebuild.Status.CUTOVER_PENDING,
+            last_error="Cutover needs attention",
+        )
+        response = self.client.get(
+            reverse("admin:control_plane_cdctablerebuild_changelist")
+        )
+        self.assertContains(response, "Cutover pending")
+        response = self.client.get(
+            reverse("admin:control_plane_cdctablerebuild_change", args=[recovery.pk])
+        )
+        self.assertContains(response, "Cutover needs attention")
+        self.assertNotContains(response, 'class="deletelink"')
+        self.assertEqual(
+            self.client.post(reverse("admin:control_plane_cdctablerebuild_add")).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post(
+                reverse("admin:control_plane_cdctablerebuild_change", args=[recovery.pk]),
+                {"status": CdcTableRebuild.Status.SUCCEEDED},
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.post(
+                reverse("admin:control_plane_cdctablerebuild_delete", args=[recovery.pk]),
+                {"post": "yes"},
+            ).status_code,
+            403,
+        )
+        recovery.refresh_from_db()
+        self.assertEqual(recovery.status, CdcTableRebuild.Status.CUTOVER_PENDING)
 
 
 class DlqRequeueViewTests(SimpleTestCase):
@@ -146,10 +295,81 @@ class CdcFailureDashboardTests(TestCase):
         )
         self.client.force_login(self.admin)
 
-    def test_history_displays_persisted_cdc_failures(self):
+    def test_pipeline_history_does_not_display_cdc_failures(self):
         response = self.client.get(reverse("control_plane:pipeline_history"))
         self.assertContains(response, "CDC warehouse source")
+        self.assertNotContains(response, "cdc-task-123")
+        self.assertNotContains(response, "Recent CDC Execution Failures")
+        self.assertEqual(response.context["breadcrumbs"], [
+            {"name": "Dashboard", "url": reverse("control_plane:dashboard")},
+            {"name": "Administration", "url": ""},
+            {"name": "Pipeline History", "url": ""},
+        ])
+
+    def test_cdc_history_displays_persisted_failures(self):
+        response = self.client.get(reverse("control_plane:cdc_failure_history"))
+        self.assertContains(response, "CDC warehouse source")
         self.assertContains(response, "cdc-task-123")
+        self.assertContains(response, "RuntimeError: CDC execution failed.")
+        self.assertEqual(response.context["breadcrumbs"], [
+            {"name": "Dashboard", "url": reverse("control_plane:dashboard")},
+            {"name": "Administration", "url": ""},
+            {"name": "CDC Execution Failures", "url": ""},
+        ])
+
+    def test_cdc_history_searches_source_database_task_and_error(self):
+        url = reverse("control_plane:cdc_failure_history")
+        for query in ("warehouse", "MYSQL", "TASK-123", "runtimeerror"):
+            with self.subTest(query=query):
+                response = self.client.get(url, {"q": query})
+                self.assertContains(response, "cdc-task-123")
+        response = self.client.get(url, {"q": "not found"})
+        self.assertNotContains(response, "cdc-task-123")
+        self.assertContains(response, "No CDC execution failures match your search.")
+
+    def test_cdc_history_paginates_all_results_and_preserves_search(self):
+        for number in range(25):
+            CdcExecutionFailure.objects.create(
+                source=self.source, task_id=f"matching-{number:02}",
+                error_message="search & test",
+            )
+        url = reverse("control_plane:cdc_failure_history")
+        response = self.client.get(url, {"q": "search & test"})
+        self.assertEqual(response.context["page_obj"].paginator.count, 25)
+        self.assertEqual(len(response.context["page_obj"]), 10)
+        self.assertContains(response, "matching-24")
+        self.assertNotContains(response, "matching-00")
+        self.assertContains(response, "page=2&q=search%20%26%20test")
+        response = self.client.get(url, {"q": "search & test", "page": 3})
+        self.assertEqual(len(response.context["page_obj"]), 5)
+        self.assertContains(response, "matching-00")
+        self.assertContains(response, "page=2&q=search%20%26%20test")
+        response = self.client.get(url, {"page": "not-a-page"})
+        self.assertEqual(response.context["page_obj"].number, 1)
+
+    def test_cdc_history_requires_admin(self):
+        url = reverse("control_plane:cdc_failure_history")
+        self.client.logout()
+        self.assertEqual(self.client.get(url).status_code, 302)
+        user = get_user_model().objects.create_user(username="cdc-history-viewer")
+        self.client.force_login(user)
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 302)
+        self.assertNotContains(response, "cdc-task-123", status_code=302)
+
+    def test_admin_navigation_includes_cdc_failures(self):
+        self.admin.is_superuser = True
+        self.admin.save(update_fields=["is_superuser"])
+        response = self.client.get(reverse("control_plane:pipeline_history"))
+        self.assertContains(
+            response,
+            f'href="{reverse("control_plane:cdc_failure_history")}"',
+        )
+        response = self.client.get(reverse("control_plane:cdc_failure_history"))
+        self.assertContains(
+            response,
+            'border-indigo-500 text-white">\n                            <span>Administration</span>',
+        )
 
     @patch("control_plane.views.dashboard.get_redis_client")
     def test_dashboard_and_widget_preference(self, redis_client):
@@ -157,6 +377,8 @@ class CdcFailureDashboardTests(TestCase):
         response = self.client.get(reverse("control_plane:dashboard"))
         self.assertContains(response, "cdc-task-123")
         self.assertContains(response, "CDC Failures")
+        self.assertContains(response, reverse("control_plane:cdc_failure_history"))
+        self.assertContains(response, reverse("control_plane:pipeline_history"))
         response = self.client.post(
             reverse("control_plane:update_widget_preferences"),
             data=json.dumps({"widget": "cdc_failures", "visible": False}),
@@ -175,6 +397,129 @@ class CdcFailureDashboardTests(TestCase):
         response = self.client.get(reverse("control_plane:dashboard"))
         self.assertNotContains(response, "cdc-task-123")
         self.assertNotContains(response, "CDC Failures")
+
+
+class EmailAuditDashboardTests(TestCase):
+    def setUp(self):
+        self.admin = get_user_model().objects.create_user(
+            username="email-widget-admin", is_staff=True
+        )
+        self.client.force_login(self.admin)
+
+    @patch("control_plane.views.dashboard.get_redis_client")
+    def test_latest_five_records_and_link(self, redis_client):
+        redis_client.return_value.keys.return_value = []
+        logs = [
+            EmailAuditLog.objects.create(
+                recipients=f"recipient-{number}@example.com",
+                status="bounced" if number == 5 else "sent",
+            )
+            for number in range(6)
+        ]
+        timestamp = timezone.now()
+        EmailAuditLog.objects.update(created_at=timestamp)
+
+        response = self.client.get(reverse("control_plane:dashboard"))
+        self.assertEqual(list(response.context["recent_email_audits"]), logs[::-1][:5])
+        self.assertContains(response, "Recent Email Deliveries")
+        self.assertContains(response, "recipient-5@example.com")
+        self.assertNotContains(response, "recipient-0@example.com")
+        self.assertContains(response, "Bounced")
+        self.assertContains(response, "Standalone")
+        self.assertContains(response, reverse("control_plane:email_audit_logs"))
+        self.assertContains(response, "toggleEmailAuditWidget(")
+
+    @patch("control_plane.views.dashboard.get_redis_client")
+    def test_empty_and_persisted_visibility_per_user(self, redis_client):
+        redis_client.return_value.keys.return_value = []
+        url = reverse("control_plane:dashboard")
+        response = self.client.get(url)
+        self.assertContains(response, "No email delivery audit records found.")
+        self.assertContains(response, 'id="widget-email_audit-wrapper"')
+        preference_url = reverse("control_plane:update_widget_preferences")
+        for visible in (False, True):
+            response = self.client.post(
+                preference_url,
+                data=json.dumps({"widget": "email_audit", "visible": visible}),
+                content_type="application/json",
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                UserWidgetPreference.objects.get(user=self.admin).show_email_audit,
+                visible,
+            )
+            response = self.client.get(url)
+            expected_class = " mb-6" if visible else "hidden mb-6"
+            self.assertContains(
+                response, f'class="{expected_class}" id="widget-email_audit-wrapper"'
+            )
+            if not visible:
+                other_admin = get_user_model().objects.create_user(
+                    username="other-email-widget-admin", is_staff=True
+                )
+                self.client.force_login(other_admin)
+                self.assertTrue(self.client.get(url).context["widget_prefs"].show_email_audit)
+                self.client.force_login(self.admin)
+
+    @patch("control_plane.views.dashboard.get_redis_client")
+    def test_audit_details_and_control_require_staff(self, redis_client):
+        redis_client.return_value.keys.return_value = []
+        EmailAuditLog.objects.create(recipients="private@example.com")
+        for is_superuser in (False, True):
+            with self.subTest(is_superuser=is_superuser):
+                user = get_user_model().objects.create_user(
+                    username=f"email-nonstaff-{is_superuser}",
+                    is_staff=False,
+                    is_superuser=is_superuser,
+                )
+                self.client.force_login(user)
+                response = self.client.get(reverse("control_plane:dashboard"))
+                self.assertEqual(list(response.context["recent_email_audits"]), [])
+                self.assertNotContains(response, "private@example.com")
+                self.assertNotContains(response, "Recent Email Deliveries")
+                self.assertNotContains(response, "toggleEmailAuditWidget(")
+                self.assertEqual(
+                    self.client.get(reverse("control_plane:email_audit_logs")).status_code,
+                    302,
+                )
+
+
+class EmailAuditBreadcrumbTests(TestCase):
+    def test_email_audit_breadcrumb_includes_dashboard(self):
+        admin = get_user_model().objects.create_user(
+            username="email-audit-admin", is_staff=True
+        )
+        self.client.force_login(admin)
+        response = self.client.get(reverse("control_plane:email_audit_logs"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["breadcrumbs"], [
+            {"name": "Dashboard", "url": reverse("control_plane:dashboard")},
+            {"name": "Administration", "url": ""},
+            {"name": "Email Delivery Audit", "url": ""},
+        ])
+
+    def test_audit_controls_use_escaped_data_without_missing_script(self):
+        admin = get_user_model().objects.create_user(
+            username="email-control-admin", is_staff=True
+        )
+        self.client.force_login(admin)
+        log = EmailAuditLog.objects.create(
+            recipients='test\'"${danger}<tag>',
+            status="failed",
+            error_message='Error: `${danger}` <script>alert("x")</script>',
+        )
+        response = self.client.get(reverse("control_plane:email_audit_logs"))
+        self.assertNotContains(response, "control_plane/js/email_audit.js")
+        self.assertContains(response, 'data-recipients="test&#x27;&quot;${danger}&lt;tag&gt;"')
+        self.assertContains(
+            response,
+            'data-error-message="Error: `${danger}` &lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;"',
+        )
+        self.assertContains(
+            response, f'data-delete-url="{reverse("control_plane:email_audit_delete", args=[log.pk])}"'
+        )
+        self.assertContains(response, "$el.dataset.errorMessage")
+        self.assertContains(response, "$el.dataset.recipients")
 
 
 class ActivePipelineExecutionsTests(TestCase):

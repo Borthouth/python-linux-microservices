@@ -15,7 +15,7 @@ from control_plane.models import (
 )
 from control_plane.utils import get_redis_client, get_task_progress
 from etl.progress import PIPELINE_STEPS
-from reports.models import ReportExecution
+from reports.models import EmailAuditLog, ReportExecution
 from reports.progress import REPORT_RUNNING_STEPS
 
 logger = logging.getLogger(__name__)
@@ -116,6 +116,10 @@ def dashboard_view(request):
         'cdc_failures': (
             CdcExecutionFailure.objects.select_related("source").order_by("-failed_at", "-pk")[:5]
             if is_admin(request.user) else []
+        ),
+        'recent_email_audits': (
+            EmailAuditLog.objects.select_related("report").order_by("-created_at", "-pk")[:5]
+            if request.user.is_active and request.user.is_staff else []
         ),
     }
     return render(request, 'control_plane/dashboard.html', context)
@@ -237,9 +241,6 @@ def pipeline_history_view(request):
         'query': query,
         'search_query': query,
         'status_filter': status_filter,
-        'cdc_failures': CdcExecutionFailure.objects.select_related(
-            "source"
-        ).order_by("-failed_at", "-pk")[:25],
         'filter_options': [
             {'value': 'SUCCESS', 'label': 'Success'},
             {'value': 'RUNNING', 'label': 'Running'},
@@ -248,6 +249,27 @@ def pipeline_history_view(request):
         ],
     }
     return render(request, 'control_plane/pipeline_history.html', context)
+
+
+@login_required
+@user_passes_test(is_admin)
+def cdc_failure_history_view(request):
+    query = request.GET.get("q", "").strip()
+    failures = CdcExecutionFailure.objects.select_related("source").order_by(
+        "-failed_at", "-pk"
+    )
+    if query:
+        failures = failures.filter(
+            Q(source__name__icontains=query)
+            | Q(source__db_type__icontains=query)
+            | Q(task_id__icontains=query)
+            | Q(error_message__icontains=query)
+        )
+    page_obj = Paginator(failures, 10).get_page(request.GET.get("page"))
+    return render(request, "control_plane/cdc_failure_history.html", {
+        "page_obj": page_obj,
+        "search_query": query,
+    })
 
 
 @login_required
@@ -334,6 +356,8 @@ def update_widget_preferences(request):
                 prefs.show_dlq = is_visible
             elif widget_key == 'cdc_failures':
                 prefs.show_cdc_failures = is_visible
+            elif widget_key == 'email_audit':
+                prefs.show_email_audit = is_visible
                 
             prefs.save()
             return JsonResponse({'status': 'success'})

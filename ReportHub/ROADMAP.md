@@ -4,7 +4,7 @@ Track the development phases, architectural milestones, and codebase optimizatio
 
 ## Suggested next priorities
 
-1. Make CDC snapshot, rebuild, and mode transitions recoverable; verify source permissions and operational monitoring.
+1. Implement safe source-wide CDC-to-batch switching, then add control-plane rebuild monitoring and administrator-initiated resource cleanup. Continue validating CDC permissions, concurrent snapshot writes, and interruption recovery.
 2. Add the failed/bounced email dashboard widget using the existing delivery audit.
 3. Enforce source and tenant access before introducing cross-source linking references and linked reports.
 4. Evaluate explicit incremental strategies and S3/Parquet sources where their source guarantees and operational costs justify them.
@@ -92,12 +92,47 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [x] Add a scheduled/manual Pipeline Automation backfill dispatcher (`trigger_all_active_clickhouse_backfill_task`) on the dedicated `queue_backfill` queue.
   - [x] Implement active-source guard checks (`is_active=True`), set the default batch limit to 10,000 rows via `DEFAULT_ETL_BATCH_SIZE`, and set Celery worker prefetch to 1.
   - [x] Configure periodic dispatch tasks (`trigger_all_active_clickhouse_ingestion_task`) and dedicated worker queue routing (`queue_hot`, `queue_backfill`, `queue_periodic`, and other application queues).
-- [x] Configure optional Oracle CDB/PDB and separate LogMiner credentials; verify insert, update, and delete CDC flows for the local Oracle and PostgreSQL test sources.
-- [ ] **Safe CDC transition and recovery:**
-  - [ ] Implement a coordinated initial snapshot with fresh connector/offset generation, durable snapshot-completion checkpoints, and isolated staging tables; retain the existing warehouse until cutover is safe.
-  - [ ] Define source-specific snapshot barriers and Kafka partition/offset handling, including schema changes, tombstones, concurrent source writes, retention, retries, and recovery after interruption.
-  - [ ] Implement an atomic or recoverable cutover and rollback; support explicit batch-to-CDC and CDC-to-batch transitions, CDC rebuilds, and new-column backfills only after their consistency is verified.
-  - [ ] Add end-to-end multi-database tests and operational guidance for snapshot completion, lag, restart/replay, and failed cutovers. The local test-only rebuild is not a reusable cutover implementation.
+- [x] Configure optional Oracle CDB/PDB and separate LogMiner credentials; verify insert, update, and delete CDC flows for the local PostgreSQL, MySQL, Oracle, and SQL Server test sources.
+- [x] Exercise the scheduled-ingestion dispatcher and task through a temporary Celery Beat schedule; the actual hourly tick was not observed directly.
+- [x] **Safe single-table CDC rebuild:** Create a dedicated connector/topic generation, snapshot into a staging table, checkpoint snapshot completion and offsets, and cut over under the source-ingestion lock using ClickHouse `Atomic` table exchange/rename. Expose durable status and an admin action.
+- [x] Test the admin rebuild action and read-only status view; prevent administrators from creating, editing, or deleting rebuild checkpoints through the admin.
+- [ ] Add source-authorized control-plane rebuild monitoring showing source, table, status, last update, and required attention; let authorized administrators resume pending rebuilds while keeping checkpoint internals in Django admin.
+- [x] Route post-cutover changes through a dedicated consumer group initialized at the snapshot end offsets; verify local SQL Server `northwind.dbo.Categories`, PostgreSQL `chinook.public.artist`, MySQL `northwind.customers`, and Oracle `APP_USER.invoices` rebuilds plus insert/update/delete propagation.
+- [x] Test a paused MySQL rebuild with a snapshot backlog and source writes before cutover; verify continuation drains the checkpoint before replacement.
+- [x] Inject a MySQL cutover failure after table exchange; block normal ingestion until manual resume finishes metadata updates without repeating the exchange.
+- [x] Inject a MySQL cutover failure after connector routing is saved but before rebuild status is saved; verify ingestion is blocked and manual resume does not repeat the exchange.
+- [x] Terminate an isolated MySQL rebuild worker after table exchange, wait for a shortened test lock to expire, and verify manual resume and subsequent CDC ingestion.
+- [x] Terminate an isolated MySQL rebuild worker after snapshot checkpoint persistence but before Kafka offset commit; manually resume and verify replay, subsequent changes, and source/warehouse values.
+- [ ] Add manual cleanup to the control plane: authorized administrators review retained connector generations, PostgreSQL slots/publications, Kafka resources, and ClickHouse tables, then confirm cleanup. Recheck that resources are obsolete and not needed by active or unfinished rebuilds; record outcomes and support retries. Do not automatically delete retained resources.
+  - [x] Stop automatically deleting superseded and failed rebuild connectors; retain them for operator review. The administrator-initiated cleanup workflow remains to be implemented.
+  - [ ] After administrator confirmation, run cleanup in a Celery task on a dedicated maintenance queue, separate from the UX and CDC workers.
+  - [ ] Recheck each resource's eligibility at execution time, including active connectors and unfinished rebuilds or transitions; reject resources that cannot be safely verified.
+  - [ ] Persist per-resource progress, outcomes, and errors; expose queued, running, completed, and failed states with results in the control plane.
+  - [ ] Make retries and interruption recovery safe and idempotent, without repeating completed deletions; require explicit administrator initiation rather than automatic cleanup.
+- [ ] Validate source-specific snapshot behavior and permissions, including schema changes, concurrent source writes, retention, retries, and recovery after interruption.
+- [ ] Add end-to-end multi-database tests and operational guidance for lag, restart/replay, and failed cutovers.
+- [ ] Implement a manually initiated source-wide CDC-to-batch transition with coordinated refresh and cutover, safe handling of active rebuilds and queued work, failure recovery, and tests for ongoing writes and deletes.
+  - [x] Isolate scheduled CDC ingestion and rebuilds on a CDC worker, and batch/keyless refreshes on a batch worker, with separate configurable concurrency.
+  - [x] Preserve staging tables across keyset-paginated batch refresh continuations and reject continuations whose staging table is missing.
+  - [x] Recheck source mode and active state under the CDC source lock before ingestion or rebuild cutover; reject stale work if either changed.
+  - [x] Skip new CDC ingestion batches when a CDC-to-batch transition is cutover pending, after acquiring the source lock; continue normal CDC during staging. This is not sufficient fencing for in-flight work, lock expiry, or keyless refreshes.
+  - [x] Hold the control-plane source row lock across each CDC ingestion batch and recheck cutover state while locked. Tests verify a future cutover waits for an in-flight batch and a second ingestion waits even when Redis permits another lock acquisition. Database connection loss and external side effects still need fencing and recovery; this does not implement cutover.
+  - [x] Serialize CDC-mode batch refresh tasks using a control-plane source row lock and recheck cutover status and source mode under the lock. A future executor must acquire this same lock before marking cutover pending; in-flight work completes before it can proceed, and queued keyless refreshes are skipped. The lock holds a database transaction over each bounded refresh and does not by itself fence CDC lock expiry.
+  - [x] Carry source-mode provenance through ingestion and backfill dispatch, retries and continuations; reject mismatched work and ambiguous unmarked work after a successful CDC-to-batch transition. The future executor must atomically commit source mode and transition success under the source lock, retain successful transition records, and require upgraded producers and workers before switching. Future mode-switch cycles need a generation fence; these checks do not complete cutover fencing.
+  - [x] Add durable transition and per-table checkpoint models with uniqueness constraints; these records are not yet used to execute a transition.
+  - [x] Add an internal preparation operation that creates table checkpoints atomically and serializes transition preparation against CDC rebuild creation. It is not exposed as a user-facing switch.
+  - [x] Add internal per-table batch staging into separate ClickHouse tables, with chunked reads, UUID and schema checkpoints, and fresh-table retries after interruption. Interrupted staging tables are retained for manual cleanup. Staging alone does not switch the source.
+  - [x] Queue internal staging one table at a time on the batch worker; validate all checkpoints and table membership after staging. Failures require explicit retry; staging does not trigger cutover.
+  - [x] Add an automated concurrency regression that pauses staging while CDC ingestion processes simulated insert, update, and delete events against a separate live table. Kafka and ClickHouse are mocked and the source is SQLite; live infrastructure still needs validation.
+  - [x] Add a durable active-table-checked checkpoint field and tested UUID decision logic for pending and already-completed table exchanges or renames.
+  - [x] Add an internal operation to record and revalidate the initial active-table UUID against a staged checkpoint, including missing-table and changed-identity checks. Observations can become stale during normal operation and must be revalidated under a complete cutover fence; execution and recovery orchestration remain unimplemented.
+  - [x] Validate actual ClickHouse staged column names, order, types and defaults after staging, on retry and during active-table observation; reject mismatches without automatically changing tables. Cutover must revalidate and separately address row completeness and concurrent changes.
+  - [x] Validate that the staged ClickHouse table retains its expected MergeTree engine and empty sorting, partition, primary and sampling keys at those same checkpoints. This does not protect against subsequent changes.
+  - [ ] Validate staging and interruption recovery across all relational connectors. Local isolated staging matched source rows for PostgreSQL, MySQL, SQL Server, and Oracle. A PostgreSQL two-table run completed through the batch worker; an isolated worker exited after an insert and manual retry staged a fresh table with matching rows. PostgreSQL writes during staging produced an earlier staged snapshot; a further test paused staging after an actual insert and confirmed the live CDC worker applied insert, update, and delete events before staging resumed, without changing the live UUID or source mode. Staging in the overlap test ran in a separate application process. Other connectors, batch-worker overlap, other interruption boundaries, and source-specific worker recovery remain to be tested.
+  - [ ] Validate source-driver streaming and large-table performance; the current staging primitive holds a checkpoint database transaction for the whole table and restarts that table after interruption.
+  - [ ] Coordinate all refresh and CDC work, persist and validate checkpoint progress, and implement resumable transition execution before exposing a switch.
+- [ ] Design safe source-wide batch-to-CDC transitions; the single-table rebuild does not perform mode transitions or new-column backfills.
+- [ ] Decide whether and how to support automatic batch fallback after CDC failures; it is not currently implemented.
 - [ ] **Alternative incremental loading strategies:**
   - [ ] Design explicit per-table strategies and validation; do not infer safety from a numeric type or automatically switch strategies. Retain full refresh where guarantees are absent.
   - [ ] Evaluate monotonic ID/sequence watermarks for explicitly append-only sources, with initial-load checkpoints, stable paging, retry safety, concurrent transaction ordering, and a documented policy for late or lower IDs. Updates and deletes require another mechanism or reconciliation.
