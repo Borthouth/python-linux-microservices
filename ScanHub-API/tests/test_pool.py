@@ -169,7 +169,7 @@ def test_health_reports_failed_scanner():
     ][0]
 
     assert failed["ok"] is False
-    assert "scanner unavailable" in failed["error"]
+    assert failed["error"] == "Scanner health check failed"
 
 
 def test_unknown_strategy_raises_value_error():

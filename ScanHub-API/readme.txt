@@ -831,6 +831,10 @@ Run metrics tests:
 
 pytest -v tests/test_metrics.py
 
+Tests use isolated temporary upload and metrics directories and do not require
+write access to /var/lib/scanhub. For deployment, SCANHUB_TEMP_DIR can override
+the default upload directory /var/lib/scanhub/tmp.
+
 ===============================================================================
 NOTES
 ===============================================================================

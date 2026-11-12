@@ -1,6 +1,10 @@
+import logging
 import threading
 from contextlib import contextmanager
 from typing import List, Dict, Any, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 class ScannerPool:
@@ -199,9 +203,13 @@ class ScannerPool:
 
                 instances.append(result)
 
-            except Exception as exc:
+            except Exception:
 
                 overall_ok = False
+                logger.exception(
+                    "Scanner health check failed instance=%s",
+                    scanner_name
+                )
 
                 instances.append({
                     "ok": False,
@@ -210,7 +218,7 @@ class ScannerPool:
                         scanner_name,
                         0
                     ),
-                    "error": str(exc),
+                    "error": "Scanner health check failed",
                 })
 
         return {

@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import logging
 import tempfile
@@ -32,10 +33,16 @@ VERSION = "1.0.0"
 # Paths / local settings
 # -----------------------------------------------------------------------------
 
-TEMP_DIR = "/var/lib/scanhub/tmp"
+TEMP_DIR = os.getenv("SCANHUB_TEMP_DIR", "/var/lib/scanhub/tmp")
 
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "scan_api.log")
+
+
+def safe_upload_suffix(filename: Optional[str]) -> str:
+    suffix = os.path.splitext(filename or "")[1]
+    return suffix if re.fullmatch(r"\.[A-Za-z0-9_-]{1,32}", suffix) else ""
+
 
 METRICS_DB = os.getenv(
     "SCANHUB_METRICS_DB",
@@ -397,7 +404,7 @@ async def scan(
     upload_start = time.time()
 
     try:
-        suffix = os.path.splitext(file.filename or "")[1]
+        suffix = safe_upload_suffix(file.filename)
 
         with tempfile.NamedTemporaryFile(
             mode="w+b",
@@ -526,7 +533,7 @@ async def scan_stream(
     upload_start = time.time()
 
     try:
-        suffix = os.path.splitext(x_filename or "")[1]
+        suffix = safe_upload_suffix(x_filename)
 
         with tempfile.NamedTemporaryFile(
             mode="w+b",

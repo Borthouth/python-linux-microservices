@@ -4,8 +4,11 @@ import tempfile
 
 os.environ["API_KEY"] = "replace-with-a-real-secret"
 
+TEST_DIRECTORY = tempfile.TemporaryDirectory(prefix="scanhub-tests-")
+os.environ["SCANHUB_TEMP_DIR"] = os.path.join(TEST_DIRECTORY.name, "uploads")
+
 TEST_METRICS_DB = os.path.join(
-    tempfile.gettempdir(),
+    TEST_DIRECTORY.name,
     "scanhub_test_metrics.db"
 )
 
@@ -25,3 +28,5 @@ def pytest_sessionfinish(session, exitstatus):
     ):
         if os.path.exists(path):
             os.remove(path)
+
+    TEST_DIRECTORY.cleanup()

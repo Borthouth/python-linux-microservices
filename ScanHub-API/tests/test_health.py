@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
 
+import scan_api
 from scan_api import app, scanner_pool
+from scanners.pool import ScannerPool
 
 
 client = TestClient(app)
@@ -55,3 +57,28 @@ def test_health_success(monkeypatch):
     assert len(data["instances"]) == 2
     assert data["instances"][0]["scanner_instance"] == "clamav_scan_1"
     assert data["instances"][1]["scanner_instance"] == "clamav_scan_2"
+
+
+def test_health_does_not_expose_scanner_exception(monkeypatch):
+    sensitive_detail = "Unable to connect to /run/private/clamd.sock"
+
+    class BrokenScanner:
+        instance_name = "clamav_scan_1"
+
+        def health(self):
+            raise RuntimeError(sensitive_detail)
+
+    monkeypatch.setattr(
+        scan_api,
+        "scanner_pool",
+        ScannerPool(scanners=[BrokenScanner()])
+    )
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert data["instances"][0]["ok"] is False
+    assert data["instances"][0]["error"] == "Scanner health check failed"
+    assert sensitive_detail not in response.text
