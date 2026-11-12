@@ -27,8 +27,8 @@ from control_plane.models import (
 )
 from reports.models import ReportDefinition
 from reports.query_builder import (
-    clickhouse_table_name,
     quote_clickhouse_identifier,
+    source_table_clickhouse_name,
 )
 
 
@@ -639,9 +639,7 @@ def _create_cdc_table(
 ):
     from etl.tasks import map_to_clickhouse_type
 
-    physical_name = physical_table_name or clickhouse_table_name(
-        profile.pk, table.schema_name, table.table_name
-    )
+    physical_name = physical_table_name or source_table_clickhouse_name(table)
     quoted_name = quote_clickhouse_identifier(physical_name)
     existing = ch_client.query(
         f"EXISTS TABLE {quoted_name}"

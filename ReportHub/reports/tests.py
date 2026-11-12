@@ -1,29 +1,312 @@
 import io
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import RequestFactory, TestCase, override_settings
+from django.db import close_old_connections, connection, transaction
+from django.test import RequestFactory, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from openpyxl import load_workbook
 from reportlab.platypus import SimpleDocTemplate
 
 from control_plane.models import (
+    CdcSourceExternalOperation,
+    CdcToBatchTransition,
+    IngestionMode,
     SourceField,
     SourceProfile,
     SourceRelationship,
     SourceTable,
 )
+from etl.cdc_external_operations import (
+    _cdc_external_operation_barrier,
+    _complete_cdc_external_operation,
+)
 from reports.ai_design import validate_report_design
 from reports.ai_summary import build_summary_metrics, generate_report_summary
 from reports.charting import build_chart_data, build_pdf_chart
+from reports.cutover_guard import acquire_report_cutover_lock, report_query_guard
 from reports.exporters import build_json_report, build_xlsx_report
 from reports.models import EmailAuditLog, ReportDefinition, ReportExecution
 from reports.ollama import OllamaUnavailable
 from reports.pdf_export import build_pdf_report
 from reports.query_builder import build_clickhouse_report_query
+from reports.tasks import execute_report_task
 from reports.views import email_webhook_receiver
+
+
+class ReportCutoverGuardTests(TransactionTestCase):
+    def setUp(self):
+        self.source = SourceProfile.objects.create(
+            name="Report cutover source", host="localhost", port=5432,
+            database_name="test_db", username="test_user", ingestion_mode=IngestionMode.CDC,
+        )
+        table = SourceTable.objects.create(
+            source=self.source, schema_name="public", table_name="events"
+        )
+        SourceField.objects.create(table=table, field_name="id", data_type="INTEGER")
+        self.report = ReportDefinition.objects.create(
+            name="Cutover report", source=self.source, base_table=table,
+            selected_fields=["id"],
+        )
+        self.transition = CdcToBatchTransition.objects.create(source=self.source)
+
+    @patch("reports.tasks.clickhouse_connect.get_client")
+    @patch("reports.tasks.set_task_progress")
+    def test_pending_cutover_fails_report_without_query(self, progress, client):
+        self.transition.status = CdcToBatchTransition.Status.CUTOVER_PENDING
+        self.transition.save(update_fields=["status"])
+        with self.assertRaisesRegex(RuntimeError, "cutover is pending"):
+            execute_report_task.apply(args=[self.report.pk], throw=True)
+        client.assert_not_called()
+        execution = ReportExecution.objects.get(report=self.report)
+        self.assertEqual(execution.status, "failed")
+        self.assertIn("cutover is pending", execution.error_message)
+
+    def test_preparing_transition_allows_report(self):
+        with report_query_guard(self.report) as report:
+            self.assertEqual(report.pk, self.report.pk)
+
+    @patch("reports.tasks.Minio")
+    @patch("reports.tasks.clickhouse_connect.get_client")
+    @patch("reports.tasks.set_task_progress")
+    def test_preparing_transition_report_completes(self, progress, client, minio):
+        client.return_value.query.return_value.result_rows = [(42,)]
+        result = execute_report_task.apply(args=[self.report.pk], throw=True).get()
+        self.assertIn("successfully executed", result)
+        execution = ReportExecution.objects.get(report=self.report)
+        self.assertEqual(execution.status, "completed")
+        self.assertEqual(execution.row_count, 1)
+        client.return_value.close.assert_called_once()
+        self.assertEqual(
+            client.return_value.query.call_args.kwargs["settings"],
+            {"join_use_nulls": 1, "query_id": f"report_{execution.pk}"},
+        )
+        self.assertNotIn("transport_settings", client.return_value.query.call_args.kwargs)
+        minio.return_value.put_object.assert_called_once()
+
+    def test_report_guards_are_shared_and_exclusive_cutover_waits(self):
+        first_entered, release = Event(), Event()
+        second_entered, exclusive_entered = Event(), Event()
+
+        def guarded(first):
+            close_old_connections()
+            try:
+                with report_query_guard(self.report):
+                    (first_entered if first else second_entered).set()
+                    if first and not release.wait(10):
+                        raise TimeoutError("Report guard test timed out.")
+            finally:
+                close_old_connections()
+
+        def cutover():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    acquire_report_cutover_lock(self.source.pk)
+                    exclusive_entered.set()
+                    CdcToBatchTransition.objects.filter(pk=self.transition.pk).update(
+                        status=CdcToBatchTransition.Status.CUTOVER_PENDING
+                    )
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            first = pool.submit(guarded, True)
+            try:
+                self.assertTrue(first_entered.wait(10))
+                second = pool.submit(guarded, False)
+                self.assertTrue(second_entered.wait(10))
+                second.result(timeout=10)
+                pending = pool.submit(cutover)
+                self.assertFalse(exclusive_entered.wait(0.5))
+            finally:
+                release.set()
+            first.result(timeout=10)
+            pending.result(timeout=10)
+        self.assertTrue(exclusive_entered.is_set())
+        with self.assertRaisesRegex(RuntimeError, "cutover is pending"):
+            with report_query_guard(self.report):
+                self.fail("A report must not run while cutover is pending.")
+
+    def test_exclusive_guard_requires_transaction(self):
+        with self.assertRaisesRegex(RuntimeError, "requires a PostgreSQL transaction"):
+            acquire_report_cutover_lock(self.source.pk)
+
+    def test_waiting_report_reloads_table_metadata_after_cutover(self):
+        SourceTable.objects.filter(pk=self.report.base_table_id).update(cdc_managed=True)
+        waiting = Event()
+
+        def watch_queries(execute, sql, params, many, context):
+            if "pg_advisory_xact_lock_shared" in sql:
+                waiting.set()
+            return execute(sql, params, many, context)
+
+        def run_report():
+            close_old_connections()
+            try:
+                with connection.execute_wrapper(watch_queries):
+                    with report_query_guard(self.report) as report:
+                        return build_clickhouse_report_query(report, ["id"])[0]
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with transaction.atomic():
+                acquire_report_cutover_lock(self.source.pk)
+                running = pool.submit(run_report)
+                self.assertTrue(waiting.wait(10))
+                SourceTable.objects.filter(pk=self.report.base_table_id).update(cdc_managed=False)
+                SourceProfile.objects.filter(pk=self.source.pk).update(ingestion_mode=IngestionMode.BATCH)
+                CdcToBatchTransition.objects.filter(pk=self.transition.pk).update(
+                    status=CdcToBatchTransition.Status.SUCCEEDED
+                )
+            query = running.result(timeout=10)
+        self.assertNotIn("_cdc_deleted", query)
+
+    def test_source_scoped_exclusive_lock_does_not_block_other_source(self):
+        other = SourceProfile.objects.create(
+            name="Other source", host="localhost", port=5432,
+            database_name="test_db", username="test_user",
+        )
+        table = SourceTable.objects.create(source=other, schema_name="public", table_name="items")
+        report = ReportDefinition.objects.create(name="Other report", source=other, base_table=table)
+        entered = Event()
+
+        def run_other():
+            close_old_connections()
+            try:
+                with report_query_guard(report):
+                    entered.set()
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with transaction.atomic():
+                acquire_report_cutover_lock(self.source.pk)
+                running = pool.submit(run_other)
+                self.assertTrue(entered.wait(10))
+                running.result(timeout=10)
+
+
+@override_settings(CDC_EXTERNAL_OPERATION_TRACKING=True)
+class TrackedReportCutoverGuardTests(TransactionTestCase):
+    def setUp(self):
+        self.source = SourceProfile.objects.create(
+            name="Tracked report source", host="localhost", port=5432,
+            database_name="test_db", username="test_user", ingestion_mode=IngestionMode.CDC,
+        )
+        table = SourceTable.objects.create(
+            source=self.source, schema_name="public", table_name="events"
+        )
+        SourceField.objects.create(table=table, field_name="id", data_type="INTEGER")
+        self.report = ReportDefinition.objects.create(
+            name="Tracked report", source=self.source, base_table=table,
+            selected_fields=["id"],
+        )
+        self.transition = CdcToBatchTransition.objects.create(source=self.source)
+
+    def test_record_visible_before_query_and_cleared_on_success(self):
+        def verify():
+            close_old_connections()
+            try:
+                record = CdcSourceExternalOperation.objects.get(source=self.source)
+                self.assertEqual(record.kind, CdcSourceExternalOperation.Kind.REPORT)
+                self.assertEqual(record.task_id, "report-task")
+            finally:
+                close_old_connections()
+
+        with report_query_guard(self.report, task_id="report-task"):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(verify).result(timeout=10)
+        self.assertFalse(CdcSourceExternalOperation.objects.exists())
+
+    def test_failure_retains_record_and_blocks_cutover(self):
+        with self.assertRaisesRegex(RuntimeError, "query response lost"):
+            with report_query_guard(self.report):
+                raise RuntimeError("query response lost")
+        record = CdcSourceExternalOperation.objects.get(source=self.source)
+        self.assertEqual(record.kind, CdcSourceExternalOperation.Kind.REPORT)
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            with _cdc_external_operation_barrier(self.source.pk):
+                pass
+        _complete_cdc_external_operation(self.source.pk, record.pk)
+
+    def test_connection_loss_leaves_record_after_report_lock_is_released(self):
+        disconnected, release = Event(), Event()
+
+        def query():
+            close_old_connections()
+            try:
+                with report_query_guard(self.report):
+                    connection.close()
+                    disconnected.set()
+                    if not release.wait(timeout=10):
+                        raise TimeoutError("Report release timed out.")
+                    raise RuntimeError("query response lost")
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            worker = pool.submit(query)
+            try:
+                self.assertTrue(disconnected.wait(timeout=10))
+                with transaction.atomic():
+                    acquire_report_cutover_lock(self.source.pk)
+                with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+                    with _cdc_external_operation_barrier(self.source.pk):
+                        pass
+            finally:
+                release.set()
+            with self.assertRaisesRegex(RuntimeError, "query response lost"):
+                worker.result(timeout=10)
+        self.assertTrue(CdcSourceExternalOperation.objects.filter(source=self.source).exists())
+
+    def test_pending_cutover_rejects_report_without_creating_record(self):
+        self.transition.status = CdcToBatchTransition.Status.CUTOVER_PENDING
+        self.transition.save(update_fields=["status"])
+        with self.assertRaisesRegex(RuntimeError, "cutover is pending"):
+            with report_query_guard(self.report):
+                self.fail("A pending cutover must block reports.")
+        self.assertFalse(CdcSourceExternalOperation.objects.exists())
+
+    def test_inactive_and_batch_sources_still_allow_reports(self):
+        self.source.is_active = False
+        self.source.ingestion_mode = IngestionMode.BATCH
+        self.source.save(update_fields=["is_active", "ingestion_mode"])
+        with report_query_guard(self.report):
+            self.assertTrue(CdcSourceExternalOperation.objects.filter(
+                source=self.source, kind=CdcSourceExternalOperation.Kind.REPORT
+            ).exists())
+        self.assertFalse(CdcSourceExternalOperation.objects.exists())
+
+    @patch("reports.tasks.Minio")
+    @patch("reports.tasks.clickhouse_connect.get_client")
+    @patch("reports.tasks.set_task_progress")
+    def test_report_task_keeps_record_when_clickhouse_response_is_lost(
+        self, progress, client, minio
+    ):
+        client.return_value.query.side_effect = RuntimeError("query response lost")
+        with self.assertRaisesRegex(RuntimeError, "query response lost"):
+            execute_report_task.apply(args=[self.report.pk], throw=True)
+        record = CdcSourceExternalOperation.objects.get(source=self.source)
+        self.assertEqual(record.kind, CdcSourceExternalOperation.Kind.REPORT)
+        self.assertTrue(record.task_id)
+        self.assertEqual(ReportExecution.objects.get(report=self.report).status, "failed")
+        client.return_value.close.assert_called_once()
+        minio.assert_not_called()
+
+    @patch("reports.tasks.Minio")
+    @patch("reports.tasks.clickhouse_connect.get_client")
+    @patch("reports.tasks.set_task_progress")
+    def test_report_task_clears_record_after_successful_query(self, progress, client, minio):
+        client.return_value.query.return_value.result_rows = [(42,)]
+        execute_report_task.apply(args=[self.report.pk], throw=True).get()
+        self.assertFalse(CdcSourceExternalOperation.objects.filter(source=self.source).exists())
+        self.assertEqual(ReportExecution.objects.get(report=self.report).status, "completed")
 
 
 class EmailWebhookTests(TestCase):
@@ -114,6 +397,43 @@ class ReportManagementDownloadTests(TestCase):
             source=source,
             base_table=table,
         )
+
+    def test_pending_cutover_blocks_report_metadata_writes(self):
+        CdcToBatchTransition.objects.create(
+            source=self.report.source, status=CdcToBatchTransition.Status.CUTOVER_PENDING
+        )
+        cases = [
+            (self.client.post, reverse("reports:report_create"), {"source": self.report.source_id}),
+            (self.client.post, reverse("reports:report_edit", args=[self.report.pk]), {}),
+            (self.client.get, reverse("reports:report_toggle", args=[self.report.pk]), {}),
+            (self.client.post, reverse("reports:report_delete", args=[self.report.pk]), {}),
+        ]
+        for method, url, data in cases:
+            with self.subTest(url=url):
+                response = method(url, data, follow=True)
+                self.assertContains(
+                    response,
+                    "Source metadata cannot be changed while CDC-to-batch cutover is pending.",
+                )
+                self.report.refresh_from_db()
+                self.assertEqual(self.report.name, "Download test report")
+                self.assertTrue(self.report.is_active)
+
+    def test_report_move_to_pending_source_is_rejected(self):
+        other = SourceProfile.objects.create(
+            name="Pending report destination", host="localhost", port=5432,
+            database_name="test_db", username="test_user",
+        )
+        CdcToBatchTransition.objects.create(
+            source=other, status=CdcToBatchTransition.Status.CUTOVER_PENDING
+        )
+        response = self.client.post(
+            reverse("reports:report_edit", args=[self.report.pk]),
+            {"source": other.pk}, follow=True,
+        )
+        self.assertContains(response, "cutover is pending")
+        self.report.refresh_from_db()
+        self.assertNotEqual(self.report.source_id, other.pk)
 
     def post_ai_design(self):
         return self.client.post(
@@ -701,6 +1021,25 @@ class ClickHouseReportQueryTests(TestCase):
         self.assertIn("t1.`display``name` AS `column_1`", query)
         self.assertEqual(headers, ["Order ID", "Customer"])
         self.assertEqual(aggregates, ["", "COUNT"])
+
+    def test_uses_physical_generations_for_base_and_joined_tables(self):
+        self.orders.clickhouse_physical_table = "rh_generation_orders"
+        self.orders.save(update_fields=["clickhouse_physical_table"])
+        self.customers.clickhouse_physical_table = "rh_generation_customers"
+        self.customers.save(update_fields=["clickhouse_physical_table"])
+        report = self.make_report(self.orders, [str(self.customer_relationship.pk)])
+        query, _, _ = build_clickhouse_report_query(report, [
+            {"table_key": "base", "field_name": "id"},
+            {"table_key": str(self.customer_relationship.pk), "field_name": "id"},
+        ])
+        self.assertIn("FROM `rh_generation_orders` AS t0", query)
+        self.assertIn("LEFT JOIN `rh_generation_customers` AS t1", query)
+
+    def test_invalid_physical_generation_is_rejected(self):
+        self.orders.clickhouse_physical_table = "invalid-name"
+        report = self.make_report(self.orders, [])
+        with self.assertRaisesRegex(ValueError, "Invalid ClickHouse physical table name"):
+            build_clickhouse_report_query(report, ["id"])
 
     def test_incremental_tables_use_final_for_deduplicated_rows(self):
         self.orders.clickhouse_uses_replacing_merge_tree = True

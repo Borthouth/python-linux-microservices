@@ -1,30 +1,39 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from uuid import uuid4
 from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError, transaction
-from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
+from django.db import IntegrityError, close_old_connections, transaction
+from django.test import (
+    Client, RequestFactory, SimpleTestCase, TestCase, TransactionTestCase, override_settings,
+    skipUnlessDBFeature,
+)
 from django.urls import reverse
 from django.utils import timezone
 
 from control_plane.models import (
     CdcExecutionFailure,
+    CdcSourceExternalOperation,
     CdcTableRebuild,
     CdcToBatchTableCheckpoint,
     CdcToBatchTransition,
     DbChoice,
     IngestionMode,
+    Role,
     SourceField,
     SourceProfile,
     SourceTable,
     TrackedUser,
+    UserSourceAccess,
     WarehouseDatasetMapping,
     UserWidgetPreference,
 )
 from control_plane.views.dlq import dlq_requeue_view
 from control_plane.views.dashboard import update_widget_preferences
 from etl.progress import PIPELINE_STEPS, PREPARING_INGESTION
+from etl.tasks import stage_cdc_to_batch_transition_task
 from reports.models import EmailAuditLog, ReportDefinition, ReportExecution
 from reports.progress import REPORT_RUNNING_STEPS, ReportProgress
 
@@ -84,6 +93,547 @@ class CdcToBatchCheckpointTests(TestCase):
         self.assertEqual(checkpoint.staging_uuid, "stage-uuid")
         self.source.refresh_from_db()
         self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+
+
+class CdcToBatchSourceStatusTests(TestCase):
+    def setUp(self):
+        self.admin = get_user_model().objects.create_user(username="transition-admin", is_staff=True)
+        self.viewer = get_user_model().objects.create_user(username="transition-viewer")
+        self.source = SourceProfile.objects.create(
+            name="Transition source", db_type=DbChoice.POSTGRESQL,
+            host="localhost", port=5432, database_name="test_db",
+            username="test_user", ingestion_mode=IngestionMode.CDC,
+        )
+        self.table = SourceTable.objects.create(
+            source=self.source, schema_name="public", table_name="events",
+            primary_key_fields=["id"], cdc_managed=True,
+        )
+        self.url = reverse("control_plane:source_cdc_to_batch_status", args=[self.source.pk])
+        self.staging_url = reverse("control_plane:source_cdc_to_batch_staging", args=[self.source.pk])
+        self.client.force_login(self.admin)
+
+    def test_edit_page_offers_staging_status_not_a_switch(self):
+        response = self.client.get(reverse("control_plane:source_edit", args=[self.source.pk]))
+        self.assertContains(response, "Switch to batch (not available)")
+        self.assertContains(response, "No CDC-to-batch transition")
+        self.assertContains(response, self.staging_url)
+        self.assertContains(self.client.get(self.url), "No CDC-to-batch transition")
+        self.assertEqual(self.client.post(self.url).status_code, 405)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+
+    def test_pending_cutover_blocks_source_edit_toggle_and_delete(self):
+        CdcToBatchTransition.objects.create(
+            source=self.source, status=CdcToBatchTransition.Status.CUTOVER_PENDING
+        )
+        for name, method in (
+            ("source_edit", self.client.post),
+            ("source_toggle_active", self.client.get),
+            ("source_delete", self.client.post),
+        ):
+            with self.subTest(name=name):
+                response = method(reverse(f"control_plane:{name}", args=[self.source.pk]), follow=True)
+                self.assertContains(
+                    response,
+                    "Source metadata cannot be changed while CDC-to-batch cutover is pending.",
+                )
+                self.source.refresh_from_db()
+                self.assertTrue(self.source.is_active)
+                self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+
+    def test_pending_cutover_blocks_django_admin_metadata_mutations(self):
+        admin = get_user_model().objects.create_superuser(
+            username="transition-superuser", password="test-password"
+        )
+        self.client.force_login(admin)
+        CdcToBatchTransition.objects.create(
+            source=self.source, status=CdcToBatchTransition.Status.CUTOVER_PENDING
+        )
+        cases = [
+            ("admin:control_plane_sourceprofile_change", [self.source.pk], {}),
+            ("admin:control_plane_sourceprofile_delete", [self.source.pk], {"post": "yes"}),
+            ("admin:control_plane_sourcetable_change", [self.table.pk], {}),
+            ("admin:control_plane_sourcetable_delete", [self.table.pk], {"post": "yes"}),
+            ("admin:control_plane_sourceprofile_changelist", [], {
+                "action": "delete_selected", "_selected_action": str(self.source.pk),
+            }),
+            ("admin:control_plane_sourcetable_changelist", [], {
+                "action": "delete_selected", "_selected_action": str(self.table.pk),
+            }),
+        ]
+        for name, args, data in cases:
+            with self.subTest(name=name):
+                response = self.client.post(reverse(name, args=args), data, follow=True)
+                self.assertContains(response, "cutover is pending")
+                self.source.refresh_from_db()
+                self.table.refresh_from_db()
+                self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+
+    def test_django_admin_existing_source_mode_is_read_only(self):
+        admin = get_user_model().objects.create_superuser(
+            username="mode-superuser", password="test-password"
+        )
+        self.client.force_login(admin)
+        response = self.client.get(reverse("admin:control_plane_sourceprofile_change", args=[self.source.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'name="ingestion_mode"')
+        self.assertContains(response, "Change data capture (CDC)")
+
+    def test_django_admin_rejects_select_across_for_guarded_sources(self):
+        admin = get_user_model().objects.create_superuser(
+            username="selection-superuser", password="test-password"
+        )
+        self.client.force_login(admin)
+        response = self.client.post(
+            reverse("admin:control_plane_sourceprofile_changelist"),
+            {"action": "delete_selected", "_selected_action": str(self.source.pk), "select_across": "1"},
+            follow=True,
+        )
+        self.assertContains(response, "Select the source records explicitly for this action.")
+        self.assertTrue(SourceProfile.objects.filter(pk=self.source.pk).exists())
+
+    def test_status_distinguishes_staged_tables_from_verified_staging(self):
+        transition = CdcToBatchTransition.objects.create(source=self.source)
+        CdcToBatchTableCheckpoint.objects.create(
+            transition=transition, source_table=self.table, staging_table="internal-stage",
+            status=CdcToBatchTableCheckpoint.Status.STAGED,
+        )
+        response = self.client.get(self.url)
+        self.assertContains(response, "Staging verification has not completed.")
+        self.assertNotContains(response, "Staging last verified:")
+        transition.staging_verified_at = timezone.now()
+        transition.save(update_fields=["staging_verified_at"])
+        response = self.client.get(self.url)
+        self.assertContains(response, "Staging last verified:")
+        self.assertContains(response, "Revalidation is required before cutover.")
+
+    def test_status_explains_legacy_staging_requires_restaging(self):
+        transition = CdcToBatchTransition.objects.create(
+            source=self.source, staging_verified_at=timezone.now()
+        )
+        checkpoint = CdcToBatchTableCheckpoint.objects.create(
+            transition=transition, source_table=self.table, staging_table="old-stage",
+            status=CdcToBatchTableCheckpoint.Status.STAGED, staging_schema={"username": "test_user"},
+        )
+        response = self.client.get(self.url)
+        self.assertContains(response, "1 staged table must be restaged")
+        self.assertContains(response, "Retry staging to create fresh tables")
+        checkpoint.staging_schema["synchronous_inserts"] = True
+        checkpoint.save(update_fields=["staging_schema"])
+        self.assertNotContains(self.client.get(self.url), "must be restaged")
+
+    @patch("control_plane.views.cdc_transition.stage_cdc_to_batch_transition_task.apply_async")
+    def test_admin_can_prepare_and_queue_staging_only(self, enqueue):
+        response = self.client.post(
+            self.staging_url, {"action": "start", "confirm": "yes"}, follow=True
+        )
+        self.assertContains(response, "Batch staging queued")
+        transition = CdcToBatchTransition.objects.get(source=self.source)
+        self.assertEqual(transition.status, CdcToBatchTransition.Status.PREPARING)
+        self.assertEqual(transition.table_checkpoints.count(), 1)
+        enqueue.assert_called_once_with(args=[transition.pk], queue="queue_backfill")
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+        self.assertContains(self.client.get(self.url), "Retry staging")
+
+    @patch("control_plane.views.cdc_transition.stage_cdc_to_batch_transition_task.apply_async")
+    def test_repeated_start_is_rejected_but_retry_uses_existing_transition(self, enqueue):
+        self.client.post(self.staging_url, {"action": "start", "confirm": "yes"})
+        response = self.client.post(
+            self.staging_url, {"action": "start", "confirm": "yes"}, follow=True
+        )
+        self.assertContains(response, "A transition is already active")
+        self.assertEqual(enqueue.call_count, 1)
+        transition = CdcToBatchTransition.objects.get(source=self.source)
+        self.client.post(self.staging_url, {
+            "action": "retry", "confirm": "yes", "transition": str(transition.generation),
+        })
+        self.assertEqual(enqueue.call_count, 2)
+        self.assertEqual(enqueue.call_args.kwargs["args"], [transition.pk])
+
+    @patch("control_plane.views.cdc_transition.logger")
+    @patch("control_plane.views.cdc_transition.stage_cdc_to_batch_transition_task.apply_async")
+    def test_publish_failure_retains_transition_and_displays_error(self, enqueue, logger):
+        enqueue.side_effect = RuntimeError("sensitive broker details")
+        response = self.client.post(
+            self.staging_url, {"action": "start", "confirm": "yes"}, follow=True
+        )
+        self.assertContains(response, "Staging dispatch could not be confirmed")
+        self.assertNotContains(response, "sensitive broker details")
+        transition = CdcToBatchTransition.objects.get(source=self.source)
+        self.assertIn("dispatch could not be confirmed", transition.last_error)
+        self.assertEqual(transition.status, CdcToBatchTransition.Status.PREPARING)
+        self.assertEqual(self.client.get(self.url).status_code, 200)
+        self.assertContains(self.client.get(self.url), "Retry staging")
+        logger.exception.assert_called_once()
+
+    @patch("control_plane.views.cdc_transition.stage_cdc_to_batch_transition_task.apply_async")
+    def test_cancel_staging_retains_checkpoints_and_allows_later_start(self, enqueue):
+        self.client.post(self.staging_url, {"action": "start", "confirm": "yes"})
+        old = CdcToBatchTransition.objects.get(source=self.source)
+        response = self.client.post(
+            self.staging_url, {
+                "action": "cancel", "confirm": "yes", "transition": str(old.generation),
+            }, follow=True
+        )
+        self.assertContains(response, "Staging cancelled")
+        old.refresh_from_db()
+        self.assertEqual(old.status, CdcToBatchTransition.Status.FAILED)
+        self.assertEqual(old.table_checkpoints.count(), 1)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+        self.client.post(self.staging_url, {"action": "start", "confirm": "yes"})
+        self.assertEqual(self.source.cdc_to_batch_transitions.count(), 2)
+        self.assertEqual(enqueue.call_count, 2)
+
+    @patch("control_plane.views.cdc_transition.stage_cdc_to_batch_transition_task.apply_async")
+    def test_stale_confirmation_cannot_cancel_or_retry_a_new_transition(self, enqueue):
+        self.client.post(self.staging_url, {"action": "start", "confirm": "yes"})
+        old = CdcToBatchTransition.objects.get(source=self.source)
+        self.client.post(self.staging_url, {
+            "action": "cancel", "confirm": "yes", "transition": str(old.generation),
+        })
+        self.client.post(self.staging_url, {"action": "start", "confirm": "yes"})
+        current = self.source.cdc_to_batch_transitions.get(status=CdcToBatchTransition.Status.PREPARING)
+        for action in ("retry", "cancel"):
+            response = self.client.post(self.staging_url, {
+                "action": action, "confirm": "yes", "transition": str(old.generation),
+            }, follow=True)
+            self.assertContains(response, "The staging transition changed.")
+        current.refresh_from_db()
+        self.assertEqual(current.status, CdcToBatchTransition.Status.PREPARING)
+        self.assertEqual(enqueue.call_count, 2)
+
+    @patch("control_plane.views.cdc_transition.stage_cdc_to_batch_transition_task.apply_async")
+    def test_missing_or_invalid_transition_cannot_retry_or_cancel(self, enqueue):
+        transition = CdcToBatchTransition.objects.create(source=self.source)
+        for action in ("retry", "cancel"):
+            for value in ("", "not-a-uuid"):
+                response = self.client.post(self.staging_url, {
+                    "action": action, "confirm": "yes", "transition": value,
+                }, follow=True)
+                self.assertContains(response, "The staging transition changed or is missing.")
+        transition.refresh_from_db()
+        self.assertEqual(transition.status, CdcToBatchTransition.Status.PREPARING)
+        enqueue.assert_not_called()
+
+    @patch("control_plane.views.cdc_transition._clickhouse_table_uuid", return_value="old-uuid")
+    @patch("control_plane.views.cdc_transition.clickhouse_connect.get_client")
+    def test_abandon_pending_retains_resources_and_source_mode(self, get_client, table_uuid):
+        transition = CdcToBatchTransition.objects.create(
+            source=self.source, status=CdcToBatchTransition.Status.CUTOVER_PENDING,
+            staging_verified_at=timezone.now(),
+        )
+        checkpoint = CdcToBatchTableCheckpoint.objects.create(
+            transition=transition, source_table=self.table, staging_table="stage",
+            status=CdcToBatchTableCheckpoint.Status.STAGED,
+            active_table_checked=True, active_uuid_before="old-uuid",
+            generation_table="pending-copy",
+        )
+        data = {"action": "abandon_pending", "transition": str(transition.generation)}
+        response = self.client.post(self.staging_url, data)
+        self.assertContains(response, "Abandon the pending cutover")
+        self.assertContains(response, f'name="transition" value="{transition.generation}"')
+        response = self.client.post(self.staging_url, {**data, "confirm": "yes"}, follow=True)
+        self.assertContains(response, "Pending cutover abandoned")
+        transition.refresh_from_db()
+        checkpoint.refresh_from_db()
+        self.source.refresh_from_db()
+        self.assertEqual(transition.status, CdcToBatchTransition.Status.FAILED)
+        self.assertIsNone(transition.staging_verified_at)
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+        self.assertEqual(checkpoint.generation_table, "pending-copy")
+        get_client.return_value.close.assert_called_once()
+
+    @patch("control_plane.views.cdc_transition._clickhouse_table_uuid", return_value="changed")
+    @patch("control_plane.views.cdc_transition.clickhouse_connect.get_client")
+    def test_abandon_pending_refuses_exchanged_or_uncertain_tables(self, get_client, table_uuid):
+        transition = CdcToBatchTransition.objects.create(
+            source=self.source, status=CdcToBatchTransition.Status.CUTOVER_PENDING,
+        )
+        checkpoint = CdcToBatchTableCheckpoint.objects.create(
+            transition=transition, source_table=self.table, staging_table="stage",
+            status=CdcToBatchTableCheckpoint.Status.STAGED,
+            active_table_checked=True, active_uuid_before="old-uuid",
+        )
+        data = {
+            "action": "abandon_pending", "transition": str(transition.generation), "confirm": "yes",
+        }
+        response = self.client.post(self.staging_url, data, follow=True)
+        self.assertContains(response, "an active table changed")
+        for status, inflight, checked in (
+            (CdcToBatchTableCheckpoint.Status.STAGED, True, True),
+            (CdcToBatchTableCheckpoint.Status.CUTOVER, False, True),
+            (CdcToBatchTableCheckpoint.Status.STAGED, False, False),
+        ):
+            checkpoint.status, checkpoint.cutover_command_inflight, checkpoint.active_table_checked = (
+                status, inflight, checked
+            )
+            checkpoint.save(update_fields=["status", "cutover_command_inflight", "active_table_checked"])
+            response = self.client.post(self.staging_url, data, follow=True)
+            self.assertContains(response, "a table exchange may have occurred")
+        transition.refresh_from_db()
+        self.assertEqual(transition.status, CdcToBatchTransition.Status.CUTOVER_PENDING)
+
+    @patch("control_plane.views.cdc_transition.logger")
+    @patch("control_plane.views.cdc_transition.clickhouse_connect.get_client", side_effect=RuntimeError("secret"))
+    def test_abandon_pending_fails_closed_when_clickhouse_unavailable(self, get_client, logger):
+        transition = CdcToBatchTransition.objects.create(
+            source=self.source, status=CdcToBatchTransition.Status.CUTOVER_PENDING,
+        )
+        CdcToBatchTableCheckpoint.objects.create(
+            transition=transition, source_table=self.table, staging_table="stage",
+            status=CdcToBatchTableCheckpoint.Status.STAGED,
+            active_table_checked=True, active_uuid_before="old-uuid",
+        )
+        response = self.client.post(self.staging_url, {
+            "action": "abandon_pending", "transition": str(transition.generation), "confirm": "yes",
+        }, follow=True)
+        self.assertContains(response, "Could not verify active tables")
+        self.assertNotContains(response, "secret")
+        transition.refresh_from_db()
+        self.assertEqual(transition.status, CdcToBatchTransition.Status.CUTOVER_PENDING)
+        logger.exception.assert_called_once()
+
+    @patch("control_plane.views.cdc_transition.stage_cdc_to_batch_transition_task.apply_async")
+    def test_pending_cutover_cannot_be_cancelled_retried_or_restarted(self, enqueue):
+        transition = CdcToBatchTransition.objects.create(
+            source=self.source, status=CdcToBatchTransition.Status.CUTOVER_PENDING
+        )
+        for action in ("start", "retry", "cancel"):
+            self.client.post(self.staging_url, {
+                "action": action, "confirm": "yes", "transition": str(transition.generation),
+            })
+        transition.refresh_from_db()
+        self.assertEqual(transition.status, CdcToBatchTransition.Status.CUTOVER_PENDING)
+        enqueue.assert_not_called()
+
+    @patch("control_plane.views.cdc_transition.stage_cdc_to_batch_transition_task.apply_async")
+    def test_confirmation_permissions_and_post_are_required(self, enqueue):
+        self.assertEqual(self.client.get(self.staging_url).status_code, 405)
+        for action in ("start", "retry", "cancel"):
+            generation = uuid4()
+            response = self.client.post(self.staging_url, {
+                "action": action, "transition": str(generation),
+            })
+            self.assertContains(response, "Confirm staging action")
+            self.assertContains(response, f'name="action" value="{action}"')
+            self.assertContains(response, 'name="confirm" value="yes"')
+            if action != "start":
+                self.assertContains(response, f'name="transition" value="{generation}"')
+        self.assertFalse(CdcToBatchTransition.objects.exists())
+        self.client.force_login(self.viewer)
+        self.assertEqual(
+            self.client.post(self.staging_url, {"action": "start", "confirm": "yes"}).status_code,
+            302,
+        )
+        self.assertFalse(CdcToBatchTransition.objects.exists())
+        enqueue.assert_not_called()
+
+    def test_edit_page_renders_status_and_confirmation_forms_without_javascript(self):
+        response = self.client.get(reverse("control_plane:source_edit", args=[self.source.pk]))
+        self.assertContains(response, "No CDC-to-batch transition")
+        self.assertContains(response, 'name="action" value="start"')
+        self.assertNotContains(response, 'name="confirm" value="yes"')
+        self.assertNotContains(response, "onsubmit=")
+
+        CdcToBatchTransition.objects.create(source=self.source)
+        response = self.client.get(reverse("control_plane:source_edit", args=[self.source.pk]))
+        self.assertContains(response, "Preparing")
+        self.assertContains(response, 'name="action" value="retry"')
+        self.assertContains(response, 'name="action" value="cancel"')
+        self.assertContains(response, 'hx-trigger="every 5s"')
+
+    @patch("control_plane.views.cdc_transition.stage_cdc_to_batch_transition_task.apply_async")
+    def test_ineligible_source_does_not_queue(self, enqueue):
+        self.source.is_active = False
+        self.source.save(update_fields=["is_active"])
+        response = self.client.post(
+            self.staging_url, {"action": "start", "confirm": "yes"}, follow=True
+        )
+        self.assertContains(response, "requires an active relational CDC source")
+        self.assertFalse(CdcToBatchTransition.objects.exists())
+        enqueue.assert_not_called()
+
+    @patch("control_plane.views.cdc_transition.stage_cdc_to_batch_transition_task.apply_async")
+    def test_active_rebuild_prevents_staging(self, enqueue):
+        CdcTableRebuild.objects.create(
+            source_table=self.table, connector_name="active-connector",
+            topic_prefix="active-prefix", notification_topic="active-notification",
+            consumer_group="active-group", staging_table="active-stage",
+        )
+        response = self.client.post(
+            self.staging_url, {"action": "start", "confirm": "yes"}, follow=True
+        )
+        self.assertContains(response, "Finish or resolve active CDC table rebuilds")
+        self.assertFalse(CdcToBatchTransition.objects.exists())
+        enqueue.assert_not_called()
+
+    @patch("control_plane.views.cdc_transition.stage_cdc_to_batch_transition_task.apply_async")
+    def test_csrf_is_required(self, enqueue):
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.admin)
+        self.assertEqual(
+            client.post(self.staging_url, {"action": "start", "confirm": "yes"}).status_code,
+            403,
+        )
+        enqueue.assert_not_called()
+
+    @patch("etl.tasks.get_etl_logger")
+    @patch("etl.cdc_to_batch.stage_cdc_to_batch_table")
+    @patch("control_plane.views.cdc_transition.stage_cdc_to_batch_transition_task.apply_async")
+    def test_queued_staging_task_after_cancellation_cannot_stage(self, enqueue, stage, logger):
+        self.client.post(self.staging_url, {"action": "start", "confirm": "yes"})
+        transition = CdcToBatchTransition.objects.get(source=self.source)
+        self.client.post(self.staging_url, {
+            "action": "cancel", "confirm": "yes", "transition": str(transition.generation),
+        })
+        with self.assertRaisesRegex(RuntimeError, "not eligible for batch staging"):
+            stage_cdc_to_batch_transition_task.apply(args=[transition.pk], throw=True)
+        stage.assert_not_called()
+        transition.refresh_from_db()
+        self.assertEqual(transition.status, CdcToBatchTransition.Status.FAILED)
+        self.assertIn("cancelled", transition.last_error)
+
+    @override_settings(
+        CDC_TO_BATCH_EXECUTOR_ENABLED=True,
+        CDC_TO_BATCH_GENERATION_EXECUTOR_ENABLED=True,
+        CDC_EXTERNAL_OPERATION_TRACKING=True,
+    )
+    def test_experimental_executor_flags_do_not_enable_source_page_switch(self):
+        response = self.client.get(reverse("control_plane:source_edit", args=[self.source.pk]))
+        self.assertContains(response, "Switch to batch (not available)")
+        self.assertEqual(self.client.post(self.url).status_code, 405)
+
+    def test_status_shows_latest_transition(self):
+        CdcToBatchTransition.objects.create(
+            source=self.source, status=CdcToBatchTransition.Status.FAILED,
+            last_error="older error",
+        )
+        CdcToBatchTransition.objects.create(source=self.source)
+        response = self.client.get(self.url)
+        self.assertContains(response, "Preparing")
+        self.assertNotContains(response, "older error")
+
+    def test_status_shows_progress_and_sanitized_error_without_exposing_other_sources(self):
+        transition = CdcToBatchTransition.objects.create(
+            source=self.source, status=CdcToBatchTransition.Status.CUTOVER_PENDING,
+            last_error="<unsafe> transition failed",
+        )
+        CdcToBatchTableCheckpoint.objects.create(
+            transition=transition, source_table=self.table, staging_table="internal-stage",
+            status=CdcToBatchTableCheckpoint.Status.STAGED, cutover_command_inflight=True,
+        )
+        response = self.client.get(self.url)
+        self.assertContains(response, "Cutover pending")
+        self.assertContains(response, "Staged: 1 / 1 tables; cut over: 0 / 1 tables.")
+        self.assertContains(response, "public.events")
+        self.assertContains(response, "command outcome uncertain")
+        self.assertContains(response, "&lt;unsafe&gt; transition failed", html=False)
+        self.assertContains(response, "Reports for this source are blocked")
+        self.assertContains(response, 'hx-trigger="every 5s"')
+        self.assertNotContains(response, "internal-stage")
+
+    def test_status_shows_generation_progress_and_unresolved_operations(self):
+        transition = CdcToBatchTransition.objects.create(
+            source=self.source, status=CdcToBatchTransition.Status.CUTOVER_PENDING,
+        )
+        checkpoint = CdcToBatchTableCheckpoint.objects.create(
+            transition=transition, source_table=self.table, staging_table="internal-stage",
+            status=CdcToBatchTableCheckpoint.Status.STAGED,
+            generation_table="private-generation",
+        )
+        CdcSourceExternalOperation.objects.create(
+            source=self.source, kind=CdcSourceExternalOperation.Kind.INGESTION,
+            task_id="worker-task-123",
+        )
+        response = self.client.get(self.url)
+        self.assertContains(response, "Generation copies verified: 0 / 1 tables.")
+        self.assertContains(response, "copy started; completion unconfirmed")
+        self.assertContains(response, "active or have an unresolved outcome")
+        self.assertContains(response, "CDC ingestion")
+        self.assertContains(response, "worker-task-123")
+        self.assertNotContains(response, "private-generation")
+        checkpoint.generation_uuid = "generation-uuid"
+        checkpoint.save(update_fields=["generation_uuid"])
+        response = self.client.get(self.url)
+        self.assertContains(response, "Generation copies verified: 1 / 1 tables.")
+        self.assertNotContains(response, "copy started; completion unconfirmed")
+
+    def test_completed_transition_is_visible_for_batch_source_without_polling(self):
+        transition = CdcToBatchTransition.objects.create(
+            source=self.source, status=CdcToBatchTransition.Status.SUCCEEDED,
+        )
+        CdcToBatchTableCheckpoint.objects.create(
+            transition=transition, source_table=self.table, staging_table="internal-stage",
+            status=CdcToBatchTableCheckpoint.Status.CUTOVER,
+        )
+        self.source.ingestion_mode = IngestionMode.BATCH
+        self.source.save(update_fields=["ingestion_mode"])
+        self.assertContains(
+            self.client.get(reverse("control_plane:source_edit", args=[self.source.pk])),
+            "CDC to batch transition",
+        )
+        response = self.client.get(self.url)
+        self.assertContains(response, "Succeeded")
+        self.assertContains(response, "cut over: 1 / 1 tables")
+        self.assertNotContains(response, 'hx-trigger="every 5s"')
+
+    def test_regular_batch_source_has_no_transition_panel(self):
+        self.source.ingestion_mode = IngestionMode.BATCH
+        self.source.save(update_fields=["ingestion_mode"])
+        response = self.client.get(reverse("control_plane:source_edit", args=[self.source.pk]))
+        self.assertNotContains(response, "CDC to batch transition")
+
+    def test_status_requires_admin_and_existing_source(self):
+        self.client.force_login(self.viewer)
+        self.assertEqual(self.client.get(self.url).status_code, 302)
+        self.client.logout()
+        self.assertEqual(self.client.get(self.url).status_code, 302)
+        self.client.force_login(self.admin)
+        self.assertEqual(
+            self.client.get(reverse("control_plane:source_cdc_to_batch_status", args=[999999])).status_code,
+            404,
+        )
+
+
+@skipUnlessDBFeature("has_select_for_update_nowait")
+class CdcToBatchCancellationConcurrencyTests(TransactionTestCase):
+    def test_busy_staging_checkpoint_cannot_be_cancelled(self):
+        admin = get_user_model().objects.create_user(username="cancel-admin", is_staff=True)
+        source = SourceProfile.objects.create(
+            name="Busy staging source", db_type=DbChoice.POSTGRESQL,
+            host="localhost", port=5432, database_name="test_db",
+            username="test_user", ingestion_mode=IngestionMode.CDC,
+        )
+        table = SourceTable.objects.create(
+            source=source, schema_name="public", table_name="events"
+        )
+        transition = CdcToBatchTransition.objects.create(source=source)
+        checkpoint = CdcToBatchTableCheckpoint.objects.create(
+            transition=transition, source_table=table, staging_table="busy-stage"
+        )
+        self.client.force_login(admin)
+
+        def cancel():
+            close_old_connections()
+            try:
+                return self.client.post(
+                    reverse("control_plane:source_cdc_to_batch_staging", args=[source.pk]),
+                    {"action": "cancel", "confirm": "yes", "transition": str(transition.generation)},
+                )
+            finally:
+                close_old_connections()
+
+        with patch("control_plane.views.cdc_transition.logger"), \
+             ThreadPoolExecutor(max_workers=1) as pool:
+            with transaction.atomic():
+                CdcToBatchTableCheckpoint.objects.select_for_update().get(pk=checkpoint.pk)
+                self.assertEqual(pool.submit(cancel).result(timeout=10).status_code, 302)
+                transition.refresh_from_db()
+                self.assertEqual(transition.status, CdcToBatchTransition.Status.PREPARING)
+        transition.refresh_from_db()
+        self.assertEqual(transition.status, CdcToBatchTransition.Status.PREPARING)
 
 
 class CdcTableRebuildAdminTests(TestCase):
@@ -171,6 +721,151 @@ class CdcTableRebuildAdminTests(TestCase):
         )
         recovery.refresh_from_db()
         self.assertEqual(recovery.status, CdcTableRebuild.Status.CUTOVER_PENDING)
+
+
+class CdcRebuildMonitorTests(TestCase):
+    def setUp(self):
+        self.source = SourceProfile.objects.create(
+            name="Monitored CDC source",
+            db_type=DbChoice.POSTGRESQL,
+            host="localhost",
+            port=5432,
+            database_name="test_db",
+            username="test_user",
+            ingestion_mode=IngestionMode.CDC,
+        )
+        self.table = SourceTable.objects.create(
+            source=self.source,
+            schema_name="public",
+            table_name="events",
+            primary_key_fields=["id"],
+            cdc_managed=True,
+        )
+        self.rebuild = CdcTableRebuild.objects.create(
+            source_table=self.table,
+            connector_name="monitor-generation",
+            topic_prefix="monitor-generation",
+            notification_topic="monitor-generation.notifications",
+            consumer_group="monitor-generation-group",
+            staging_table="source_events_monitor_generation",
+            status=CdcTableRebuild.Status.CUTOVER_PENDING,
+            last_error="Cutover needs attention",
+        )
+        self.url = reverse("control_plane:cdc_rebuild_list")
+
+    def test_staff_monitor_shows_rebuild_attention_and_resume_action(self):
+        admin = get_user_model().objects.create_user(
+            username="rebuild-monitor-staff", is_staff=True
+        )
+        self.client.force_login(admin)
+
+        response = self.client.get(self.url)
+        self.assertContains(response, self.source.name)
+        self.assertContains(response, "public.events")
+        self.assertContains(response, "Cutover needs attention")
+        self.assertContains(response, "Resume cutover")
+        self.assertContains(response, "CDC Table Rebuilds")
+        self.assertContains(response, self.url)
+
+    def test_source_access_limits_visibility_and_admin_role_controls_resume(self):
+        other_source = SourceProfile.objects.create(
+            name="Unassigned CDC source",
+            db_type=DbChoice.POSTGRESQL,
+            host="localhost",
+            port=5432,
+            database_name="other_db",
+            username="test_user",
+            ingestion_mode=IngestionMode.CDC,
+        )
+        other_table = SourceTable.objects.create(
+            source=other_source,
+            schema_name="public",
+            table_name="private_events",
+            primary_key_fields=["id"],
+            cdc_managed=True,
+        )
+        CdcTableRebuild.objects.create(
+            source_table=other_table,
+            connector_name="other-monitor-generation",
+            topic_prefix="other-monitor-generation",
+            notification_topic="other-monitor-generation.notifications",
+            consumer_group="other-monitor-generation-group",
+            staging_table="source_private_events_monitor_generation",
+            status=CdcTableRebuild.Status.CUTOVER_PENDING,
+        )
+        admin = get_user_model().objects.create_user(username="source-rebuild-admin")
+        UserSourceAccess.objects.create(
+            user=admin, source=self.source, role=Role.ADMIN
+        )
+        self.client.force_login(admin)
+
+        response = self.client.get(self.url)
+        self.assertContains(response, self.source.name)
+        self.assertNotContains(response, other_source.name)
+        self.assertContains(response, "Resume cutover")
+        self.assertContains(response, reverse("control_plane:cdc_rebuild_list"))
+
+        with patch("control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async") as apply_async:
+            response = self.client.post(
+                reverse("control_plane:cdc_rebuild_resume", args=[self.rebuild.pk])
+            )
+
+        self.assertRedirects(response, self.url)
+        apply_async.assert_called_once_with(
+            args=[self.table.pk, self.rebuild.pk],
+            queue="queue_cdc",
+        )
+
+    def test_viewer_can_monitor_but_cannot_resume(self):
+        viewer = get_user_model().objects.create_user(username="source-rebuild-viewer")
+        UserSourceAccess.objects.create(
+            user=viewer, source=self.source, role=Role.VIEWER
+        )
+        self.client.force_login(viewer)
+
+        response = self.client.get(self.url)
+        self.assertContains(response, self.source.name)
+        self.assertContains(response, "CDC Rebuilds")
+        self.assertNotContains(response, "Resume cutover")
+
+        with patch("control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async") as apply_async:
+            response = self.client.post(
+                reverse("control_plane:cdc_rebuild_resume", args=[self.rebuild.pk]),
+                follow=True,
+            )
+
+        self.assertContains(response, "not authorized to resume rebuilds")
+        apply_async.assert_not_called()
+
+    def test_unassigned_user_cannot_view_or_resume_another_sources_rebuild(self):
+        user = get_user_model().objects.create_user(username="unassigned-rebuild-user")
+        self.client.force_login(user)
+
+        response = self.client.get(self.url)
+        self.assertNotContains(response, self.source.name)
+        self.assertEqual(
+            self.client.post(
+                reverse("control_plane:cdc_rebuild_resume", args=[self.rebuild.pk])
+            ).status_code,
+            404,
+        )
+
+    def test_only_cutover_pending_rebuilds_can_be_resumed(self):
+        admin = get_user_model().objects.create_superuser(
+            username="rebuild-monitor-superuser", password="test-password"
+        )
+        self.client.force_login(admin)
+        self.rebuild.status = CdcTableRebuild.Status.SNAPSHOTTING
+        self.rebuild.save(update_fields=["status"])
+
+        with patch("control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async") as apply_async:
+            response = self.client.post(
+                reverse("control_plane:cdc_rebuild_resume", args=[self.rebuild.pk]),
+                follow=True,
+            )
+
+        self.assertContains(response, "Only CDC rebuilds pending cutover")
+        apply_async.assert_not_called()
 
 
 class DlqRequeueViewTests(SimpleTestCase):
@@ -477,11 +1172,34 @@ class EmailAuditDashboardTests(TestCase):
                 self.assertEqual(list(response.context["recent_email_audits"]), [])
                 self.assertNotContains(response, "private@example.com")
                 self.assertNotContains(response, "Recent Email Deliveries")
+                self.assertNotContains(response, "Failed / Bounced Emails")
                 self.assertNotContains(response, "toggleEmailAuditWidget(")
                 self.assertEqual(
                     self.client.get(reverse("control_plane:email_audit_logs")).status_code,
                     302,
                 )
+
+    @patch("control_plane.views.dashboard.get_redis_client")
+    def test_email_audit_filters_failures_without_duplicate_widget(self, redis_client):
+        redis_client.return_value.keys.return_value = []
+        for number in range(6):
+            EmailAuditLog.objects.create(
+                recipients=f"failure-{number}@example.com",
+                status="failed" if number % 2 else "bounced",
+            )
+        EmailAuditLog.objects.create(recipients="sent@example.com", status="sent")
+        EmailAuditLog.objects.create(recipients="delivered@example.com", status="delivered")
+        EmailAuditLog.objects.update(created_at=timezone.now())
+        response = self.client.get(reverse("control_plane:dashboard"))
+        self.assertNotContains(response, "Failed / Bounced Emails")
+        self.assertContains(response, "Recent Email Deliveries")
+        audit_url = reverse("control_plane:email_audit_logs")
+        for status in ("failed", "bounced"):
+            filtered = self.client.get(audit_url, {"status": status})
+            self.assertEqual(
+                {log.status for log in filtered.context["page_obj"]},
+                {status},
+            )
 
 
 class EmailAuditBreadcrumbTests(TestCase):
@@ -921,6 +1639,18 @@ class WarehouseFieldSelectionTests(TestCase):
         )
         self.table.refresh_from_db()
         self.assertIsNone(self.table.incremental_field_name)
+
+    def test_pending_cutover_rejects_warehouse_selection_without_changes(self):
+        CdcToBatchTransition.objects.create(
+            source=self.source, status=CdcToBatchTransition.Status.CUTOVER_PENDING
+        )
+        response = self.client.post(
+            reverse("control_plane:warehouse_field_selection", args=[self.source.pk]),
+            {"selected_fields": ["events.event_id"]},
+            follow=True,
+        )
+        self.assertContains(response, "Source metadata cannot be changed while CDC-to-batch cutover is pending.")
+        self.assertFalse(self.source.warehouse_mappings.exists())
 
     def test_field_page_explains_cdc_requirements(self):
         response = self.client.get(

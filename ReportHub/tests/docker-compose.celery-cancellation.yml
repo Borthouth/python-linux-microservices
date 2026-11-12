@@ -1,0 +1,114 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: reporthub
+      POSTGRES_USER: cancellation_test
+      POSTGRES_PASSWORD: ${CANCELLATION_TEST_PASSWORD:?Required isolated test password}
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "cancellation_test", "-d", "reporthub"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_USER: cancellation_test
+      CLICKHOUSE_PASSWORD: ${CANCELLATION_TEST_PASSWORD:?Required isolated test password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    command:
+      - --
+      - --max_server_memory_usage=536870912
+      - --background_schedule_pool_size=16
+    tmpfs:
+      - /var/lib/clickhouse
+      - /var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://clickhouse:8123/ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  minio:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: cancellation_test
+      MINIO_ROOT_PASSWORD: ${CANCELLATION_TEST_PASSWORD:?Required isolated test password}
+    tmpfs:
+      - /data
+
+  clickhouse-proxy:
+    image: ${REPORTHUB_CANCELLATION_APP_IMAGE:-reporthub-app}
+    entrypoint: ["python", "tests/integration/clickhouse_fault_proxy.py"]
+    working_dir: /app
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CLICKHOUSE_UPSTREAM_HOST: clickhouse
+      CLICKHOUSE_UPSTREAM_PORT: "8123"
+    volumes:
+      - ..:/app:ro
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  probe:
+    image: ${REPORTHUB_CANCELLATION_APP_IMAGE:-reporthub-app}
+    entrypoint: ["python", "tests/integration/celery_cancellation_probe.py"]
+    working_dir: /app
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: /app
+      DJANGO_SETTINGS_MODULE: config.settings
+      SECRET_KEY: isolated-celery-cancellation-tests-only
+      FIELD_ENCRYPTION_KEY: ${CANCELLATION_TEST_FIELD_KEY:?Required isolated test encryption key}
+      POSTGRES_DB: reporthub
+      POSTGRES_USER: cancellation_test
+      POSTGRES_PASSWORD: ${CANCELLATION_TEST_PASSWORD:?Required isolated test password}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      CANCELLATION_PROXY_URL: http://clickhouse-proxy:8123
+      CLICKHOUSE_HOST: clickhouse-proxy
+      CLICKHOUSE_INSPECT_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: cancellation_test
+      CLICKHOUSE_PASSWORD: ${CANCELLATION_TEST_PASSWORD:?Required isolated test password}
+      MINIO_STORAGE_ENDPOINT: minio:9000
+      MINIO_STORAGE_ACCESS_KEY: cancellation_test
+      MINIO_STORAGE_SECRET_KEY: ${CANCELLATION_TEST_PASSWORD:?Required isolated test password}
+      MINIO_STORAGE_BUCKET_NAME: cancellation-test-reports
+      AWS_ACCESS_KEY_ID: cancellation_test
+      AWS_SECRET_ACCESS_KEY: ${CANCELLATION_TEST_PASSWORD:?Required isolated test password}
+      AWS_STORAGE_BUCKET_NAME: cancellation-test-reports
+    volumes:
+      - ..:/app:ro
+      - /dev/null:/app/.env:ro
+    tmpfs:
+      - /app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      clickhouse-proxy:
+        condition: service_started
+
+networks:
+  default:
+    internal: true

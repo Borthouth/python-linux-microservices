@@ -3,6 +3,7 @@ from django.shortcuts import render, get_object_or_404, redirect
 from django.contrib import messages
 from django.core.paginator import Paginator
 from django.db.models import Q
+from control_plane.metadata_guard import SourceMetadataCutoverPending, source_metadata_write_guard
 from control_plane.models import SourceProfile, WarehouseDatasetMapping
 
 def is_admin(user):
@@ -51,52 +52,17 @@ def warehouse_field_selection_view(request, source_pk):
     source = get_object_or_404(SourceProfile, pk=source_pk)
     
     # Fetch related tables and prefetch their fields
-    tables_qs = source.tables.prefetch_related('fields').all().order_by('table_name')
-
     if request.method == 'POST':
-        selected_fields = set(request.POST.getlist('selected_fields'))  # Format: "table_name.field_name"
-        selection_changes = {}
-        for table in tables_qs:
-            existing_mappings = source.warehouse_mappings.filter(
-                table_name=table.table_name
-            )
-            if existing_mappings.exists():
-                previously_selected = set(
-                    existing_mappings.filter(is_enabled=True)
-                    .values_list('field_name', flat=True)
-                )
-            else:
-                previously_selected = set(
-                    table.fields.filter(is_selected=True)
-                    .values_list('field_name', flat=True)
-                )
-            newly_selected = {
-                field.field_name for field in table.fields.all()
-                if f"{table.table_name}.{field.field_name}" in selected_fields
-            }
-            selection_changes[table.pk] = previously_selected != newly_selected
-        
-        # Mark all existing as disabled, then re-enable/create selected ones
-        source.warehouse_mappings.all().update(is_enabled=False)
-        
-        for table in tables_qs:
-            for field in table.fields.all():
-                field_key = f"{table.table_name}.{field.field_name}"
-                WarehouseDatasetMapping.objects.update_or_create(
-                    source_profile=source,
-                    table_name=table.table_name,
-                    field_name=field.field_name,
-                    defaults={'is_enabled': field_key in selected_fields}
-                )
-
-        for table in tables_qs:
-            if selection_changes[table.pk]:
-                table.incremental_ready = False
-                table.save(update_fields=['incremental_ready'])
-                
+        try:
+            with source_metadata_write_guard(source.pk):
+                _save_warehouse_field_selection(source, set(request.POST.getlist('selected_fields')))
+        except SourceMetadataCutoverPending as exc:
+            messages.error(request, str(exc))
+            return redirect('control_plane:warehouse_field_selection', source_pk=source.pk)
         messages.success(request, f"Warehouse schema configuration updated successfully for '{source.name}'.")
         return redirect('control_plane:warehouse_list')
 
+    tables_qs = source.tables.prefetch_related('fields').all().order_by('table_name')
     # Query currently enabled fields for pre-checking UI inputs
     mappings = source.warehouse_mappings.all()
     enabled_field_keys = set(
@@ -114,3 +80,37 @@ def warehouse_field_selection_view(request, source_pk):
         'mapped_field_keys': mapped_field_keys,
     }
     return render(request, 'control_plane/warehouse_field_selection.html', context)
+
+
+def _save_warehouse_field_selection(source, selected_fields):
+    tables = list(source.tables.prefetch_related('fields').all().order_by('table_name'))
+    selection_changes = {}
+    for table in tables:
+        existing_mappings = source.warehouse_mappings.filter(table_name=table.table_name)
+        if existing_mappings.exists():
+            previously_selected = set(
+                existing_mappings.filter(is_enabled=True).values_list('field_name', flat=True)
+            )
+        else:
+            previously_selected = set(
+                table.fields.filter(is_selected=True).values_list('field_name', flat=True)
+            )
+        newly_selected = {
+            field.field_name for field in table.fields.all()
+            if f"{table.table_name}.{field.field_name}" in selected_fields
+        }
+        selection_changes[table.pk] = previously_selected != newly_selected
+
+    source.warehouse_mappings.all().update(is_enabled=False)
+    for table in tables:
+        for field in table.fields.all():
+            field_key = f"{table.table_name}.{field.field_name}"
+            WarehouseDatasetMapping.objects.update_or_create(
+                source_profile=source,
+                table_name=table.table_name,
+                field_name=field.field_name,
+                defaults={'is_enabled': field_key in selected_fields}
+            )
+        if selection_changes[table.pk]:
+            table.incremental_ready = False
+            table.save(update_fields=['incremental_ready'])

@@ -1,5 +1,6 @@
 from django.contrib import admin
 from etl.tasks import rebuild_cdc_table_task
+from .admin_metadata import SourceMetadataAdminMixin
 from .models import (
     CdcTableRebuild,
     DbChoice,
@@ -10,14 +11,18 @@ from .models import (
 )
 
 @admin.register(SourceProfile)
-class SourceProfileAdmin(admin.ModelAdmin):
+class SourceProfileAdmin(SourceMetadataAdminMixin, admin.ModelAdmin):
     list_display = ('name', 'host', 'database_name', 'is_active', 'created_at')
     search_fields = ('name', 'host', 'database_name')
     list_filter = ('is_active',)
 
+    def get_readonly_fields(self, request, obj=None):
+        fields = super().get_readonly_fields(request, obj)
+        return (*fields, "ingestion_mode") if obj else fields
+
 
 @admin.register(SourceTable)
-class SourceTableAdmin(admin.ModelAdmin):
+class SourceTableAdmin(SourceMetadataAdminMixin, admin.ModelAdmin):
     list_display = (
         "source",
         "schema_name",

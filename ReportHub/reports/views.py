@@ -27,6 +27,7 @@ from control_plane.models import SourceRelationship
 from .query_builder import relationship_groups
 from .ai_design import OllamaUnavailable, generate_report_design
 from .email_webhooks import handle_email_webhook
+from .metadata_views import guard_report_creation, guard_report_mutation
 
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ def report_list(request):
 
 @login_required
 @user_passes_test(is_admin)
+@guard_report_creation
 def report_create(request):
     if request.method == 'POST':
         form = ReportDefinitionForm(request.POST)
@@ -127,6 +129,7 @@ def report_create(request):
 
 @login_required
 @user_passes_test(is_admin)
+@guard_report_mutation(post_only=True, may_change_source=True)
 def report_edit(request, pk):
     report = get_object_or_404(ReportDefinition, pk=pk)
     previous_active_state = report.is_active
@@ -190,6 +193,7 @@ def report_run(request, pk):
 
 @login_required
 @user_passes_test(is_admin)
+@guard_report_mutation()
 def report_toggle(request, pk):
     report = get_object_or_404(ReportDefinition, pk=pk)
     report.is_active = not report.is_active
@@ -199,6 +203,7 @@ def report_toggle(request, pk):
 
 @login_required
 @user_passes_test(is_admin)
+@guard_report_mutation(post_only=True)
 def report_delete(request, pk):
     if request.method == 'POST':
         report = get_object_or_404(ReportDefinition, pk=pk)

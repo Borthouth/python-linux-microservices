@@ -1,10 +1,19 @@
 from collections import defaultdict
+import re
 
 from control_plane.models import SourceField, SourceRelationship, SourceTable
 
 
 def clickhouse_table_name(source_id, schema_name, table_name):
     return f"source_{source_id}__{schema_name}_{table_name}".lower()
+
+
+def source_table_clickhouse_name(table):
+    if table.clickhouse_physical_table:
+        if not re.fullmatch(r"[a-z0-9_]+", table.clickhouse_physical_table):
+            raise ValueError("Invalid ClickHouse physical table name.")
+        return table.clickhouse_physical_table
+    return clickhouse_table_name(table.source_id, table.schema_name, table.table_name)
 
 
 def clickhouse_final_clause(table):
@@ -101,9 +110,7 @@ def build_clickhouse_report_query(report, selected_columns):
                 f"{alias}.{quote_clickhouse_identifier(related_field)}"
             )
 
-        physical_name = clickhouse_table_name(
-            report.source_id, related_table.schema_name, related_table.table_name
-        )
+        physical_name = source_table_clickhouse_name(related_table)
         join_clauses.append(
             f"LEFT JOIN "
             f"{clickhouse_table_reference(related_table, physical_name, alias)} "
@@ -155,9 +162,7 @@ def build_clickhouse_report_query(report, selected_columns):
     if not select_parts:
         raise ValueError("Select at least one report field before running the report.")
 
-    base_physical_name = clickhouse_table_name(
-        report.source_id, base_table.schema_name, base_table.table_name
-    )
+    base_physical_name = source_table_clickhouse_name(base_table)
     query = (
         f"SELECT {', '.join(select_parts)} "
         f"FROM {clickhouse_table_reference(base_table, base_physical_name, 't0')}"

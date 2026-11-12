@@ -77,5 +77,8 @@
                 </div>
             </form>
         </div>
+        {% if profile and profile.ingestion_mode == 'cdc' or profile and profile.cdc_to_batch_transitions.exists %}
+            {% include 'control_plane/source/cdc_to_batch_panel.html' %}
+        {% endif %}
     </div>
 </div>

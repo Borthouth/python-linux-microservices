@@ -9,6 +9,8 @@ from .views import (
     warehouse,
     dlq,
     email_audit,
+    cdc_transition,
+    cdc_rebuilds,
 )
 
 app_name = 'control_plane'
@@ -22,6 +24,8 @@ urlpatterns = [
     path('api/widgets/update/', dashboard.update_widget_preferences, name='update_widget_preferences'),
     path('pipelines/history/', dashboard.pipeline_history_view, name='pipeline_history'),
     path('cdc/failures/', dashboard.cdc_failure_history_view, name='cdc_failure_history'),
+    path('cdc/rebuilds/', cdc_rebuilds.cdc_rebuild_list_view, name='cdc_rebuild_list'),
+    path('cdc/rebuilds/<int:rebuild_pk>/resume/', cdc_rebuilds.cdc_rebuild_resume_view, name='cdc_rebuild_resume'),
     path('pipelines/active/', dashboard.active_pipeline_executions_view, name='active_pipeline_executions'),
     path('reports/active/', dashboard.active_report_generations_view, name='active_report_generations'),
     path('sources/<int:source_pk>/cancel/', dashboard.cancel_pipeline_view, name='cancel_pipeline'),
@@ -43,11 +47,13 @@ urlpatterns = [
     path('sources/', sources.source_list_view, name='source_list'),
     path('sources/add/', sources.source_create_view, name='source_add'),
     path('sources/create/', sources.source_create_view, name='source_create'),
-    path('sources/<int:pk>/edit/', sources.source_edit_view, name='source_edit'),
-    path('sources/<int:pk>/delete/', sources.source_delete_view, name='source_delete'),
-    path('sources/<int:pk>/toggle/', sources.source_toggle_active_view, name='source_toggle_active'),
+    path('sources/<int:pk>/edit/', cdc_transition.source_edit_with_metadata_guard, name='source_edit'),
+    path('sources/<int:pk>/delete/', cdc_transition.source_delete_with_metadata_guard, name='source_delete'),
+    path('sources/<int:pk>/toggle/', cdc_transition.source_toggle_with_metadata_guard, name='source_toggle_active'),
     path('sources/<int:pk>/sync/', sources.source_sync_view, name='source_sync'),
     path('sources/<int:pk>/status/', sources.source_status_view, name='source_status'),
+    path('sources/<int:pk>/cdc-to-batch/status/', cdc_transition.source_cdc_to_batch_status_view, name='source_cdc_to_batch_status'),
+    path('sources/<int:pk>/cdc-to-batch/staging/', cdc_transition.source_cdc_to_batch_staging_view, name='source_cdc_to_batch_staging'),
 
     # Audit log URL
     path('audit/', audit.audit_log_view, name='audit_log'),

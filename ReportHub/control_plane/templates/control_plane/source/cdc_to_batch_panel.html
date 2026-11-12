@@ -1,0 +1,13 @@
+{% load cdc_transition %}
+<section class="mt-6 bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-xl" aria-labelledby="cdc-to-batch-title">
+    <h2 id="cdc-to-batch-title" class="text-lg font-bold text-white">CDC to batch transition</h2>
+    <p class="text-sm text-slate-400 mt-2">
+        Switching existing sources to batch is not available yet. You can prepare batch tables
+        without switching modes; CDC remains active and staging alone does not change the source mode.
+    </p>
+    <button type="button" disabled class="mt-4 px-4 py-2 bg-slate-800 text-slate-500 border border-slate-700 rounded-lg text-sm cursor-not-allowed">
+        Switch to batch (not available)
+    </button>
+    {% cdc_to_batch_status profile %}
+    <p class="mt-3 text-xs text-slate-500">If progress does not update automatically, reload this page.</p>
+</section>

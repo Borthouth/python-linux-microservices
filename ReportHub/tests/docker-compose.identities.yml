@@ -1,0 +1,70 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: reporthub
+      POSTGRES_USER: identity_admin
+      POSTGRES_PASSWORD: ${IDENTITY_ADMIN_PASSWORD:?Required isolated test password}
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "identity_admin", "-d", "reporthub"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_USER: identity_admin
+      CLICKHOUSE_PASSWORD: ${IDENTITY_ADMIN_PASSWORD:?Required isolated test password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    command:
+      - --
+      - --max_server_memory_usage=536870912
+      - --background_schedule_pool_size=16
+    tmpfs:
+      - /var/lib/clickhouse
+      - /var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://clickhouse:8123/ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  probe:
+    image: ${REPORTHUB_IDENTITY_APP_IMAGE:-reporthub-app}
+    entrypoint: ["python", "tests/integration/service_identity_probe.py"]
+    working_dir: /app
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      DJANGO_SETTINGS_MODULE: config.settings
+      SECRET_KEY: isolated-identity-tests-only
+      FIELD_ENCRYPTION_KEY: ${IDENTITY_FIELD_KEY:?Required isolated test encryption key}
+      POSTGRES_DB: reporthub
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: identity_admin
+      POSTGRES_PASSWORD: ${IDENTITY_ADMIN_PASSWORD:?Required isolated test password}
+      IDENTITY_RUNTIME_PASSWORD: ${IDENTITY_RUNTIME_PASSWORD:?Required isolated runtime password}
+      IDENTITY_MIGRATION_PASSWORD: ${IDENTITY_MIGRATION_PASSWORD:?Required isolated migration password}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: identity_admin
+      CLICKHOUSE_PASSWORD: ${IDENTITY_ADMIN_PASSWORD:?Required isolated test password}
+      CDC_EXTERNAL_OPERATION_TRACKING: "False"
+      CDC_TO_BATCH_EXECUTOR_ENABLED: "False"
+      CDC_TO_BATCH_GENERATION_EXECUTOR_ENABLED: "False"
+    volumes:
+      - ..:/app:ro
+      - /dev/null:/app/.env:ro
+    tmpfs:
+      - /app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+networks:
+  default:
+    internal: true

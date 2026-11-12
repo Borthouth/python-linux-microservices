@@ -15,10 +15,12 @@ from django.db import transaction
 from django.conf import settings
 from django.core.cache import cache
 from celery import shared_task, Task
+from celery.signals import task_revoked
 from django.utils import timezone
 from pymongo import MongoClient
 from control_plane.models import (
     CdcExecutionFailure,
+    CdcSourceExternalOperation,
     CdcTableRebuild,
     CdcToBatchTableCheckpoint,
     CdcToBatchTransition,
@@ -32,13 +34,20 @@ from control_plane.models import (
     IngestionMode,
 )
 from control_plane.utils import set_task_progress
+from config.clickhouse_queries import cancel_clickhouse_query
+from control_plane.metadata_guard import source_metadata_write_guard
 from etl.progress import (
     CONNECTING_TO_SOURCE,
     INITIALIZING_INGESTION,
     INTROSPECTING_SCHEMA,
     PREPARING_INGESTION,
 )
+from etl.cdc_external_operations import (
+    CdcExternalOperationCutoverPending,
+    _track_cdc_external_operation,
+)
 from reports.models import ReportDefinition
+from reports.query_builder import source_table_clickhouse_name
 
 
 def create_source_engine(profile):
@@ -83,6 +92,12 @@ def create_source_engine(profile):
     else:
         raise ValueError(f"Unsupported SQL database type: {profile.db_type}")
     return sa.create_engine(url)
+
+
+def _clickhouse_ingestion_settings():
+    if getattr(settings, "CDC_EXTERNAL_OPERATION_TRACKING", False):
+        return {"async_insert": 0}
+    return {}
 
 
 def create_mongo_client(profile):
@@ -455,6 +470,7 @@ class CancellableETLTask(Task):
 
     def _kill_clickhouse_query(self, task_id):
         query_id = f"etl_task_{task_id}"
+        ch_client = None
         try:
             ch_client = clickhouse_connect.get_client(
                 host=getattr(settings, 'CLICKHOUSE_HOST', 'localhost'),
@@ -462,9 +478,24 @@ class CancellableETLTask(Task):
                 username=getattr(settings, 'CLICKHOUSE_USER', 'default'),
                 password=getattr(settings, 'CLICKHOUSE_PASSWORD', ''),
             )
-            ch_client.command(f"KILL QUERY WHERE query_id = '{query_id}' SYNC")
-        except Exception as e:
-            pass
+            cancel_clickhouse_query(ch_client, query_id)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Could not cancel ClickHouse query %s; external work may still be active.",
+                query_id,
+            )
+        finally:
+            if ch_client is not None:
+                ch_client.close()
+
+
+@task_revoked.connect
+def cancel_terminated_etl_query(sender=None, request=None, terminated=False, **kwargs):
+    if not terminated or not isinstance(sender, CancellableETLTask):
+        return
+    task_id = getattr(request, "id", None)
+    if task_id:
+        sender._kill_clickhouse_query(task_id)
 
 
 def get_etl_logger():
@@ -630,7 +661,9 @@ def introspect_source_schema_task(self, source_pk):
     profile.save(update_fields=['last_sync_status', 'last_sync_error'])
 
     try:
-        introspect_source(profile, task_id, logger)
+        with source_metadata_write_guard(source_pk):
+            profile = SourceProfile.objects.select_for_update().get(pk=source_pk)
+            introspect_source(profile, task_id, logger)
 
         profile.last_synced = timezone.now()
         profile.last_sync_status = SyncStatus.SUCCESS
@@ -842,6 +875,7 @@ def _ingest_source_to_clickhouse_batch(
         port=getattr(settings, 'CLICKHOUSE_PORT', 8123),
         username=getattr(settings, 'CLICKHOUSE_USER', 'default'),
         password=getattr(settings, 'CLICKHOUSE_PASSWORD', ''),
+        settings=_clickhouse_ingestion_settings(),
     )
 
     try:
@@ -895,24 +929,34 @@ def _ingest_source_to_clickhouse_batch(
     required_fields_by_table = _batch_required_fields_by_table(profile)
 
     table = source_tables[table_index]
-    profile.refresh_from_db()
-    if not profile.is_active:
+    ch_table_name = source_table_clickhouse_name(table)
+    staging_table_name = (
+        f"{ch_table_name}__staging_{ingestion_run_id}"
+    ).lower()
+
+    def cancel_if_source_deactivated():
+        profile.refresh_from_db()
+        if profile.is_active:
+            return False
+
         profile.last_sync_status = SyncStatus.CANCELLED
         profile.save(update_fields=['last_sync_status'])
-        set_task_progress(task_id, percentage=int((table_index / total_tables) * 100), status="CANCELLED")
+        set_task_progress(
+            task_id,
+            percentage=int((table_index / total_tables) * 100),
+            status="CANCELLED",
+        )
         if not incremental_run:
             ch_client.command(f"DROP TABLE IF EXISTS {staging_table_name}")
         if source_engine:
             source_engine.dispose()
         ch_client.close()
+        return True
+
+    if cancel_if_source_deactivated():
         return f"Ingestion cancelled for {profile.name}"
 
     selected_fields = _batch_selected_fields(profile, table, required_fields_by_table)
-
-    ch_table_name = f"source_{profile.pk}__{table.schema_name}_{table.table_name}".lower()
-    staging_table_name = (
-        f"{ch_table_name}__staging_{ingestion_run_id}"
-    ).lower()
 
     if not selected_fields:
         if full_refresh:
@@ -972,7 +1016,7 @@ def _ingest_source_to_clickhouse_batch(
 
     target_exists = ch_client.query(
         f"EXISTS TABLE {ch_table_name}",
-        transport_settings={"query_id": query_id},
+        settings={"query_id": query_id},
     ).result_rows[0][0]
     if incremental_run is None:
         incremental_run = bool(
@@ -1016,7 +1060,7 @@ def _ingest_source_to_clickhouse_batch(
         actual_schema = {
             row[0]: row[1] for row in ch_client.query(
                 f"DESCRIBE TABLE {ch_table_name}",
-                transport_settings={"query_id": query_id},
+                settings={"query_id": query_id},
             ).result_rows
         }
         expected_schema = {
@@ -1061,12 +1105,12 @@ def _ingest_source_to_clickhouse_batch(
         ch_client.command(f"DROP TABLE IF EXISTS {staging_table_name}")
         ch_client.command(
             f"CREATE TABLE {staging_table_name} ({columns_sql}) ENGINE = {engine_sql}",
-            transport_settings={"query_id": query_id},
+            settings={"query_id": query_id},
         )
     elif not incremental_run:
         stage_exists = ch_client.query(
             f"EXISTS TABLE {staging_table_name}",
-            transport_settings={"query_id": query_id},
+            settings={"query_id": query_id},
         ).result_rows[0][0]
         if not stage_exists:
             raise RuntimeError(
@@ -1157,6 +1201,9 @@ def _ingest_source_to_clickhouse_batch(
                     params=params,
                 )
 
+        if cancel_if_source_deactivated():
+            return f"Ingestion cancelled for {profile.name}"
+
         if not chunk.empty and incremental_eligible:
             values = chunk[table.incremental_field_name].dropna()
             if not values.empty:
@@ -1194,8 +1241,10 @@ def _ingest_source_to_clickhouse_batch(
                 ch_table_name if incremental_run else staging_table_name,
                 data_rows,
                 column_names=insert_field_names,
-                transport_settings={"query_id": query_id},
+                settings={"query_id": query_id},
             )
+            if cancel_if_source_deactivated():
+                return f"Ingestion cancelled for {profile.name}"
     except Exception as exc:
         profile.last_sync_status = SyncStatus.FAILED
         profile.last_sync_error = str(exc)
@@ -1251,19 +1300,21 @@ def _ingest_source_to_clickhouse_batch(
         return f"Queued next {batch_size}-row ingestion batch for {table.table_name}"
 
     if not incremental_run:
+        if cancel_if_source_deactivated():
+            return f"Ingestion cancelled for {profile.name}"
         if target_exists:
             ch_client.command(
                 f"EXCHANGE TABLES {ch_table_name} AND {staging_table_name}",
-                transport_settings={"query_id": query_id},
+                settings={"query_id": query_id},
             )
             ch_client.command(
                 f"DROP TABLE {staging_table_name}",
-                transport_settings={"query_id": query_id},
+                settings={"query_id": query_id},
             )
         else:
             ch_client.command(
                 f"RENAME TABLE {staging_table_name} TO {ch_table_name}",
-                transport_settings={"query_id": query_id},
+                settings={"query_id": query_id},
             )
     if incremental_eligible:
         if incremental_run and watermark_upper:
@@ -1437,31 +1488,14 @@ def ingest_source_to_clickhouse_task(
             "task_queue": task_queue,
         }
         if profile and profile.ingestion_mode == IngestionMode.CDC:
-            with transaction.atomic():
-                locked_source = SourceProfile.objects.select_for_update().get(pk=source_pk)
-                if locked_source.ingestion_mode != IngestionMode.CDC:
-                    raise RuntimeError(
-                        "A queued CDC refresh cannot run after the source mode changes."
-                    )
-                if CdcToBatchTransition.objects.filter(
-                    source_id=source_pk,
-                    status=CdcToBatchTransition.Status.CUTOVER_PENDING,
-                ).exists():
-                    set_task_progress(
-                        self.request.id,
-                        percentage=0,
-                        status="SKIPPED",
-                        error="CDC-to-batch cutover is pending.",
-                    )
-                    get_etl_logger().info(
-                        "Skipped CDC refresh for source %s: CDC-to-batch cutover is pending.",
-                        source_pk,
-                    )
-                    return (
-                        f"CDC refresh skipped for {locked_source.name}: "
-                        "CDC-to-batch cutover is pending."
-                    )
-                return _ingest_source_to_clickhouse_batch(self, source_pk, **batch_options)
+            try:
+                with _track_cdc_external_operation(
+                    source_pk, CdcSourceExternalOperation.Kind.REFRESH,
+                    self.request.id or "",
+                ):
+                    return _run_cdc_mode_refresh(self, source_pk, batch_options)
+            except CdcExternalOperationCutoverPending:
+                return _skip_cdc_cutover_pending(self, source_pk, "refresh")
         return _ingest_source_to_clickhouse_batch(self, source_pk, **batch_options)
     except Exception as exc:
         status = (
@@ -1481,20 +1515,56 @@ def ingest_source_to_clickhouse_task(
         raise
 
 
+def _skip_cdc_cutover_pending(task, source_pk, operation, source_name=None):
+    set_task_progress(
+        task.request.id, percentage=0, status="SKIPPED",
+        error="CDC-to-batch cutover is pending.",
+    )
+    get_etl_logger().info(
+        "Skipped CDC %s for source %s: CDC-to-batch cutover is pending.",
+        operation, source_pk,
+    )
+    if source_name is None:
+        source_name = SourceProfile.objects.get(pk=source_pk).name
+    return f"CDC {operation} skipped for {source_name}: CDC-to-batch cutover is pending."
+
+
+def _run_cdc_mode_refresh(task, source_pk, batch_options):
+    with transaction.atomic():
+        locked_source = SourceProfile.objects.select_for_update().get(pk=source_pk)
+        if locked_source.ingestion_mode != IngestionMode.CDC:
+            raise RuntimeError(
+                "A queued CDC refresh cannot run after the source mode changes."
+            )
+        if CdcToBatchTransition.objects.filter(
+            source_id=source_pk,
+            status=CdcToBatchTransition.Status.CUTOVER_PENDING,
+        ).exists():
+            return _skip_cdc_cutover_pending(task, source_pk, "refresh", locked_source.name)
+        return _ingest_source_to_clickhouse_batch(task, source_pk, **batch_options)
+
+
 def _run_scheduled_cdc_ingestion(
     task,
     source_pk,
     batch_size=None,
     task_queue='queue_hot',
 ):
-    with transaction.atomic():
-        try:
-            SourceProfile.objects.select_for_update().get(pk=source_pk)
-        except SourceProfile.DoesNotExist:
-            pass
-        return _run_scheduled_cdc_ingestion_locked(
-            task, source_pk, batch_size=batch_size, task_queue=task_queue
-        )
+    try:
+        with _track_cdc_external_operation(
+            source_pk, CdcSourceExternalOperation.Kind.INGESTION,
+            task.request.id or "",
+        ):
+            with transaction.atomic():
+                try:
+                    SourceProfile.objects.select_for_update().get(pk=source_pk)
+                except SourceProfile.DoesNotExist:
+                    pass
+                return _run_scheduled_cdc_ingestion_locked(
+                    task, source_pk, batch_size=batch_size, task_queue=task_queue
+                )
+    except CdcExternalOperationCutoverPending:
+        return _skip_cdc_cutover_pending(task, source_pk, "ingestion")
 
 
 def _run_scheduled_cdc_ingestion_locked(
@@ -1532,6 +1602,7 @@ def _run_scheduled_cdc_ingestion_locked(
         port=getattr(settings, 'CLICKHOUSE_PORT', 8123),
         username=getattr(settings, 'CLICKHOUSE_USER', 'default'),
         password=getattr(settings, 'CLICKHOUSE_PASSWORD', ''),
+        settings=_clickhouse_ingestion_settings(),
     )
     lock_key = f"reporthub:cdc-ingestion:{source_pk}"
     lock_token = uuid4().hex
@@ -1561,8 +1632,6 @@ def _run_scheduled_cdc_ingestion_locked(
             consume_source_cdc_batch,
             ensure_debezium_connector,
         )
-        from reports.query_builder import clickhouse_table_name
-
         profile.refresh_from_db(fields=["ingestion_mode", "is_active"])
         if profile.ingestion_mode != IngestionMode.CDC or not profile.is_active:
             raise RuntimeError(
@@ -1596,9 +1665,7 @@ def _run_scheduled_cdc_ingestion_locked(
         ).select_related("source_table")
         for recovery in pending_rebuilds:
             table = recovery.source_table
-            active_table_name = clickhouse_table_name(
-                profile.pk, table.schema_name, table.table_name
-            )
+            active_table_name = source_table_clickhouse_name(table)
             if (
                 recovery.staging_uuid
                 and _clickhouse_table_uuid(ch_client, active_table_name)
@@ -1717,7 +1784,45 @@ def trigger_all_active_clickhouse_ingestion_task(self):
 @shared_task(queue="queue_backfill")
 def stage_cdc_to_batch_transition_task(transition_pk, batch_size=None):
     """Stage one table per task; revalidate all checkpoints when complete."""
-    from etl.cdc_to_batch import stage_cdc_to_batch_table
+    message, staged_one = _stage_cdc_to_batch_transition_step(transition_pk, batch_size)
+    if staged_one:
+        try:
+            stage_cdc_to_batch_transition_task.apply_async(
+                args=[transition_pk], kwargs={"batch_size": batch_size},
+                queue="queue_backfill",
+            )
+        except Exception as exc:
+            _record_cdc_to_batch_task_failure(transition_pk, "Staging", exc)
+            raise
+        return f"{message}; queued the next staging task."
+    return message
+
+
+def _record_cdc_to_batch_task_failure(transition_pk, phase, exc):
+    CdcToBatchTransition.objects.filter(
+        pk=transition_pk,
+        status__in=[
+            CdcToBatchTransition.Status.PREPARING,
+            CdcToBatchTransition.Status.CUTOVER_PENDING,
+        ],
+    ).update(last_error=(
+        f"{type(exc).__name__}: {phase} failed; see ETL worker logs for details."
+    ), updated_at=timezone.now())
+    CdcToBatchTransition.objects.filter(
+        pk=transition_pk, status=CdcToBatchTransition.Status.PREPARING
+    ).update(staging_verified_at=None)
+    get_etl_logger().exception(
+        "CDC-to-batch %s failed for transition %s", phase.lower(), transition_pk
+    )
+
+
+def _stage_cdc_to_batch_transition_step(transition_pk, batch_size=None):
+    """Stage one table or verify all staged checkpoints."""
+    from etl.cdc_to_batch import (
+        cdc_to_batch_checkpoint_needs_staging,
+        stage_cdc_to_batch_table,
+        validate_cdc_to_batch_table_names,
+    )
 
     try:
         transition = CdcToBatchTransition.objects.select_related("source").get(
@@ -1732,6 +1837,7 @@ def stage_cdc_to_batch_transition_task(transition_pk, batch_size=None):
         ):
             raise RuntimeError("The transition is not eligible for batch staging.")
 
+        validate_cdc_to_batch_table_names(source, source.tables.order_by("pk"))
         checkpoints = list(
             transition.table_checkpoints.order_by("source_table_id")
         )
@@ -1751,55 +1857,150 @@ def stage_cdc_to_batch_transition_task(transition_pk, batch_size=None):
 
         pending = next(
             (item for item in checkpoints
-             if item.status == CdcToBatchTableCheckpoint.Status.PENDING),
+             if cdc_to_batch_checkpoint_needs_staging(item)),
             None,
         )
         if pending:
             stage_cdc_to_batch_table(pending.pk, batch_size=batch_size)
-            stage_cdc_to_batch_transition_task.apply_async(
-                args=[transition_pk], kwargs={"batch_size": batch_size},
-                queue="queue_backfill",
+            CdcToBatchTransition.objects.filter(
+                pk=transition_pk, status=CdcToBatchTransition.Status.PREPARING
+            ).update(staging_verified_at=None)
+            return f"Staged checkpoint {pending.pk}", True
+
+        with transaction.atomic():
+            locked_checkpoints = list(
+                CdcToBatchTableCheckpoint.objects.select_for_update()
+                .filter(transition_id=transition_pk).order_by("pk")
             )
-            return f"Staged checkpoint {pending.pk}; queued the next staging task."
-
-        for checkpoint in checkpoints:
-            stage_cdc_to_batch_table(checkpoint.pk, batch_size=batch_size)
-
-        source.refresh_from_db()
-        transition.refresh_from_db()
-        if (
-            transition.status != CdcToBatchTransition.Status.PREPARING
-            or not source.is_active
-            or source.ingestion_mode != IngestionMode.CDC
-            or source.db_type == DbChoice.MONGODB
-            or {item.source_table_id for item in transition.table_checkpoints.all()}
-            != set(source.tables.values_list("pk", flat=True))
-            or transition.table_checkpoints.exclude(
-                status=CdcToBatchTableCheckpoint.Status.STAGED
-            ).exists()
-        ):
-            raise RuntimeError("The transition changed while staging was verified.")
-        CdcToBatchTransition.objects.filter(
-            pk=transition.pk, status=CdcToBatchTransition.Status.PREPARING
-        ).update(last_error="", updated_at=timezone.now())
+            source = SourceProfile.objects.select_for_update().get(pk=source.pk)
+            transition = CdcToBatchTransition.objects.select_for_update().get(pk=transition_pk)
+            if (
+                transition.source_id != source.pk
+                or transition.status != CdcToBatchTransition.Status.PREPARING
+                or not source.is_active
+                or source.ingestion_mode != IngestionMode.CDC
+                or source.db_type == DbChoice.MONGODB
+                or {item.pk for item in checkpoints} != {item.pk for item in locked_checkpoints}
+                or {item.source_table_id for item in locked_checkpoints}
+                != set(source.tables.values_list("pk", flat=True))
+                or any(cdc_to_batch_checkpoint_needs_staging(item) for item in locked_checkpoints)
+            ):
+                raise RuntimeError("The transition changed while staging was verified.")
+            validate_cdc_to_batch_table_names(source, source.tables.order_by("pk"))
+            for checkpoint in locked_checkpoints:
+                stage_cdc_to_batch_table(
+                    checkpoint.pk, batch_size=batch_size, verification_only=True
+                )
+            if (
+                {item.pk for item in locked_checkpoints}
+                != set(transition.table_checkpoints.values_list("pk", flat=True))
+                or {item.source_table_id for item in locked_checkpoints}
+                != set(source.tables.values_list("pk", flat=True))
+            ):
+                raise RuntimeError("The transition changed while staging was verified.")
+            validate_cdc_to_batch_table_names(source, source.tables.order_by("pk"))
+            transition.staging_verified_at = timezone.now()
+            transition.last_error = ""
+            transition.save(update_fields=["staging_verified_at", "last_error", "updated_at"])
         return (
             f"All {len(checkpoints)} tables staged for transition {transition.pk}; "
-            "cutover has not started."
+            "cutover has not started.", False
         )
     except Exception as exc:
-        CdcToBatchTransition.objects.filter(
-            pk=transition_pk, status=CdcToBatchTransition.Status.PREPARING
-        ).update(last_error=(
-            f"{type(exc).__name__}: Staging failed; see ETL worker logs for details."
-        ), updated_at=timezone.now())
-        get_etl_logger().exception(
-            "CDC-to-batch staging failed for transition %s", transition_pk
+        _record_cdc_to_batch_task_failure(transition_pk, "Staging", exc)
+        raise
+
+
+class CdcToBatchDeploymentFenceUnavailable(RuntimeError):
+    pass
+
+
+def _require_cdc_to_batch_deployment_fence():
+    raise CdcToBatchDeploymentFenceUnavailable(
+        "CDC-to-batch cutover is blocked: deployment fencing and external "
+        "request recovery are not implemented."
+    )
+
+
+@shared_task(queue="queue_backfill")
+def execute_cdc_to_batch_transition_task(transition_pk, batch_size=None):
+    """Advance a transition by one bounded step; disabled until deployment is safe."""
+    from etl.cdc_to_batch import (
+        CdcToBatchStepResult,
+        _mark_cdc_to_batch_cutover_pending,
+        _run_cdc_to_batch_cutover_step,
+        _run_cdc_to_batch_generation_step,
+    )
+
+    if not getattr(settings, "CDC_TO_BATCH_EXECUTOR_ENABLED", False):
+        raise RuntimeError("The CDC-to-batch executor is not enabled.")
+    if not getattr(settings, "CDC_EXTERNAL_OPERATION_TRACKING", False):
+        raise RuntimeError("CDC external operation tracking is not enabled.")
+    try:
+        _require_cdc_to_batch_deployment_fence()
+        transition = CdcToBatchTransition.objects.get(pk=transition_pk)
+        if transition.status == CdcToBatchTransition.Status.PREPARING:
+            message, staged_one = _stage_cdc_to_batch_transition_step(
+                transition_pk, batch_size
+            )
+            if not staged_one:
+                _mark_cdc_to_batch_cutover_pending(transition_pk)
+                message = "Cutover is pending"
+        elif transition.status in (
+            CdcToBatchTransition.Status.CUTOVER_PENDING,
+            CdcToBatchTransition.Status.SUCCEEDED,
+        ):
+            if getattr(settings, "CDC_TO_BATCH_GENERATION_EXECUTOR_ENABLED", False):
+                result = _run_cdc_to_batch_generation_step(transition_pk)
+            else:
+                result = _run_cdc_to_batch_cutover_step(transition_pk)
+            if result == CdcToBatchStepResult.SUCCEEDED:
+                return f"CDC-to-batch transition {transition_pk} completed."
+            message = "A table cutover completed"
+        else:
+            raise RuntimeError("The transition cannot be resumed in its current state.")
+        execute_cdc_to_batch_transition_task.apply_async(
+            args=[transition_pk], kwargs={"batch_size": batch_size}, queue="queue_backfill"
         )
+        return f"{message}; queued the next transition step."
+    except Exception as exc:
+        _record_cdc_to_batch_task_failure(transition_pk, "Transition", exc)
+        if isinstance(exc, CdcToBatchDeploymentFenceUnavailable):
+            CdcToBatchTransition.objects.filter(
+                pk=transition_pk,
+                status__in=[
+                    CdcToBatchTransition.Status.PREPARING,
+                    CdcToBatchTransition.Status.CUTOVER_PENDING,
+                ],
+            ).update(
+                last_error=(
+                    "Cutover is blocked: deployment fencing and external request "
+                    "recovery are not implemented."
+                ),
+                updated_at=timezone.now(),
+            )
         raise
 
 
 @shared_task(bind=True, queue="queue_cdc")
 def rebuild_cdc_table_task(self, source_table_pk, rebuild_pk=None):
+    if not getattr(settings, "CDC_EXTERNAL_OPERATION_TRACKING", False):
+        return _rebuild_cdc_table(self, source_table_pk, rebuild_pk)
+    try:
+        source_pk = SourceTable.objects.values_list("source_id", flat=True).get(
+            pk=source_table_pk
+        )
+    except SourceTable.DoesNotExist as exc:
+        raise ValueError(f"Source table {source_table_pk} does not exist.") from exc
+    with _track_cdc_external_operation(
+        source_pk, CdcSourceExternalOperation.Kind.REBUILD, self.request.id or ""
+    ):
+        return _rebuild_cdc_table(
+            self, source_table_pk, rebuild_pk, expected_source_pk=source_pk
+        )
+
+
+def _rebuild_cdc_table(self, source_table_pk, rebuild_pk=None, *, expected_source_pk=None):
     from etl.cdc import (
         _clickhouse_table_uuid,
         _create_cdc_table,
@@ -1807,10 +2008,7 @@ def rebuild_cdc_table_task(self, source_table_pk, rebuild_pk=None):
         _required_field_names,
         consume_cdc_table_rebuild_batch,
     )
-    from reports.query_builder import (
-        clickhouse_table_name,
-        quote_clickhouse_identifier,
-    )
+    from reports.query_builder import quote_clickhouse_identifier
 
     active_statuses = [
         CdcTableRebuild.Status.SNAPSHOTTING,
@@ -1823,6 +2021,8 @@ def rebuild_cdc_table_task(self, source_table_pk, rebuild_pk=None):
     except SourceTable.DoesNotExist as exc:
         raise ValueError(f"Source table {source_table_pk} does not exist.") from exc
 
+    if expected_source_pk is not None and table.source_id != expected_source_pk:
+        raise RuntimeError("The CDC rebuild source changed after operation registration.")
     profile = table.source
     if (
         profile.ingestion_mode != IngestionMode.CDC
@@ -1864,9 +2064,7 @@ def rebuild_cdc_table_task(self, source_table_pk, rebuild_pk=None):
                     f"reporthub-source-{profile.pk}-table-{table.pk}-{suffix}"
                 )
                 topic_prefix = connector_name
-                active_table_name = clickhouse_table_name(
-                    profile.pk, table.schema_name, table.table_name
-                )
+                active_table_name = source_table_clickhouse_name(table)
                 recovery = CdcTableRebuild.objects.create(
                     source_table=table,
                     generation=generation,
@@ -1896,6 +2094,7 @@ def rebuild_cdc_table_task(self, source_table_pk, rebuild_pk=None):
         port=getattr(settings, "CLICKHOUSE_PORT", 8123),
         username=getattr(settings, "CLICKHOUSE_USER", "default"),
         password=getattr(settings, "CLICKHOUSE_PASSWORD", ""),
+        settings=_clickhouse_ingestion_settings(),
     )
     try:
         database_engine = ch_client.query(
@@ -1907,9 +2106,7 @@ def rebuild_cdc_table_task(self, source_table_pk, rebuild_pk=None):
                 "Safe CDC table replacement requires an Atomic ClickHouse database."
             )
 
-        active_table_name = clickhouse_table_name(
-            profile.pk, table.schema_name, table.table_name
-        )
+        active_table_name = source_table_clickhouse_name(table)
         active_uuid = _clickhouse_table_uuid(ch_client, active_table_name)
         if not recovery.active_table_checked:
             if active_uuid and not table.clickhouse_uses_replacing_merge_tree:

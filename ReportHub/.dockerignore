@@ -7,6 +7,8 @@ env/
 venv/
 .git/
 .gitignore
+.env
+.env.*
 media/
 staticfiles/
 *.sqlite3

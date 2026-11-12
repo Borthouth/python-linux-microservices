@@ -12,8 +12,10 @@ MONGO_INIT_DIR="$SCRIPT_DIR/init-db/mongo"
 ORACLE_INIT_DIR="$SCRIPT_DIR/init-db/oracle"
 
 usage() {
-    echo "Usage: ./start_test_dbs.sh [OPTIONS]"
-    echo "  --reset     Tears down old volumes and restarts clean."
+    echo "Usage: ./start_test_dbs.sh [--start|--stop] [--reset]"
+    echo "  --start     Start and initialize the test databases (default)."
+    echo "  --stop      Stop the test database containers without removing them or their volumes."
+    echo "  --reset     Remove old containers and volumes, then start clean."
     exit 0
 }
 
@@ -36,14 +38,43 @@ wait_for_service() {
     return 1
 }
 
+ACTION=start
+ACTION_SELECTED=false
 RESET_VOLUMES=false
 for arg in "$@"; do
     case "$arg" in
+        --start)
+            if [ "$ACTION_SELECTED" = true ] && [ "$ACTION" != "start" ]; then
+                echo "Error: --start and --stop cannot be used together." >&2
+                exit 1
+            fi
+            ACTION=start
+            ACTION_SELECTED=true
+            ;;
+        --stop)
+            if [ "$ACTION_SELECTED" = true ] && [ "$ACTION" != "stop" ]; then
+                echo "Error: --start and --stop cannot be used together." >&2
+                exit 1
+            fi
+            ACTION=stop
+            ACTION_SELECTED=true
+            ;;
         --reset|--rebuild) RESET_VOLUMES=true ;;
         --help|-h) usage ;;
         *) echo "Unknown option: $arg"; exit 1 ;;
     esac
 done
+
+if [ "$ACTION" = stop ]; then
+    if [ "$RESET_VOLUMES" = true ]; then
+        echo "Error: --reset cannot be used with --stop." >&2
+        exit 1
+    fi
+    echo "🛑 Stopping ReportHub test databases..."
+    docker compose -f "$COMPOSE_FILE" stop
+    echo "✅ Test database containers stopped; their containers and volumes are preserved."
+    exit 0
+fi
 
 echo "🛠️ Ensuring initialization directories exist..."
 mkdir -p "$PG_INIT_DIR"
@@ -268,11 +299,11 @@ wait_for_service "Microsoft SQL Server" 180 2 \
 
 northwind_exists="$(
     docker exec reporthub-mssql-test /opt/mssql-tools18/bin/sqlcmd \
-        -S localhost -U sa -P 'YourStrongPassword123!' -C -h -1 -W \
+        -S localhost -U sa -P 'YourStrongPassword123!' -C -b -h -1 -W \
         -Q "SET NOCOUNT ON; SELECT CASE WHEN DB_ID('northwind') IS NULL THEN 0 ELSE 1 END" \
         | tr -d '[:space:]'
 )"
-if [ "$northwind_exists" != "1" ]; then
+if [ "$northwind_exists" = "0" ]; then
     echo "   - Creating and importing MSSQL Northwind..."
     docker exec reporthub-mssql-test /opt/mssql-tools18/bin/sqlcmd \
         -S localhost -U sa -P 'YourStrongPassword123!' -C \
@@ -281,8 +312,22 @@ if [ "$northwind_exists" != "1" ]; then
         -S localhost -U sa -P 'YourStrongPassword123!' -C -d northwind \
         < "$MSSQL_INIT_DIR/instnwnd_final.sql" >/dev/null
     echo "   ✅ MSSQL Northwind imported."
-else
+elif [ "$northwind_exists" = "1" ]; then
     echo "   ✅ MSSQL Northwind already exists; keeping its data."
+else
+    echo "   ❌ Unexpected SQL Server database existence result: '$northwind_exists'." >&2
+    exit 1
+fi
+
+if ! wait_for_service "SQL Server Northwind database" 180 2 \
+    docker exec reporthub-mssql-test /opt/mssql-tools18/bin/sqlcmd \
+        -S localhost -U sa -P 'YourStrongPassword123!' -C -b -l 5 \
+        -d northwind -Q "SELECT 1"; then
+    echo "   ❌ Northwind is not accepting connections; last connection attempt:" >&2
+    docker exec reporthub-mssql-test /opt/mssql-tools18/bin/sqlcmd \
+        -S localhost -U sa -P 'YourStrongPassword123!' -C -b -l 5 \
+        -d northwind -Q "SELECT 1" >&2 || true
+    exit 1
 fi
 
 wait_for_service "Microsoft SQL Server Agent" 90 2 \

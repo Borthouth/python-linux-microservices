@@ -15,8 +15,10 @@ from .ai_summary import generate_report_summary
 from .charting import build_chart_data
 from .exporters import build_json_report, build_xlsx_report
 from .query_builder import build_clickhouse_report_query
+from .cutover_guard import report_query_guard
 from .pdf_export import build_pdf_report
 from control_plane.utils import set_task_progress
+from config.clickhouse_queries import cancel_clickhouse_query
 
 logger = logging.getLogger(__name__)
 PDF_MAX_ROWS = 5000
@@ -176,35 +178,47 @@ def execute_report_task(self, report_id, execution_id=None):
         execution.save(update_fields=['progress_percentage'])
         set_task_progress(task_id, percentage=ReportProgress.QUERYING.value, status="RUNNING", current_step=f"Querying ClickHouse for {report.name}...")
 
-        query, headers, aggregates = build_clickhouse_report_query(report, fields_to_query)
-        if export_format == 'pdf':
-            query += f" LIMIT {PDF_MAX_ROWS + 1}"
-
-        ch_client = clickhouse_connect.get_client(
-            host=getattr(settings, 'CLICKHOUSE_HOST', 'localhost'),
-            port=getattr(settings, 'CLICKHOUSE_PORT', 8123),
-            username=getattr(settings, 'CLICKHOUSE_USER', 'default'),
-            password=getattr(settings, 'CLICKHOUSE_PASSWORD', ''),
-        )
-        try:
-            result = ch_client.query(
-                query,
-                settings={"join_use_nulls": 1},
-                transport_settings={"query_id": f"report_{execution.pk}"},
+        with report_query_guard(report, task_id=task_id or "") as current_report:
+            current_config = current_report.config or {}
+            if (
+                current_config != config
+                or current_report.selected_fields != report.selected_fields
+                or current_report.base_table_id != report.base_table_id
+                or current_report.join_config != report.join_config
+                or current_report.export_format != report.export_format
+            ):
+                raise RuntimeError("The report changed while waiting to run; retry the report.")
+            query, headers, aggregates = build_clickhouse_report_query(
+                current_report, fields_to_query
             )
-            execution.refresh_from_db()
-            if execution.is_cancelled:
-                ch_client.command(
-                    f"KILL QUERY WHERE query_id = 'report_{execution.pk}' SYNC"
+            if export_format == 'pdf':
+                query += f" LIMIT {PDF_MAX_ROWS + 1}"
+
+            ch_client = clickhouse_connect.get_client(
+                host=getattr(settings, 'CLICKHOUSE_HOST', 'localhost'),
+                port=getattr(settings, 'CLICKHOUSE_PORT', 8123),
+                username=getattr(settings, 'CLICKHOUSE_USER', 'default'),
+                password=getattr(settings, 'CLICKHOUSE_PASSWORD', ''),
+            )
+            try:
+                result = ch_client.query(
+                    query,
+                    settings={
+                        "join_use_nulls": 1,
+                        "query_id": f"report_{execution.pk}",
+                    },
                 )
-                raise InterruptedError("Report execution cancelled during query.")
-            rows = [list(row) for row in result.result_rows]
-            if export_format == 'pdf' and len(rows) > PDF_MAX_ROWS:
-                pdf_truncated = True
-                rows = rows[:PDF_MAX_ROWS]
-            row_count = len(rows)
-        finally:
-            ch_client.close()
+                execution.refresh_from_db()
+                if execution.is_cancelled:
+                    cancel_clickhouse_query(ch_client, f"report_{execution.pk}")
+                    raise InterruptedError("Report execution cancelled during query.")
+                rows = [list(row) for row in result.result_rows]
+                if export_format == 'pdf' and len(rows) > PDF_MAX_ROWS:
+                    pdf_truncated = True
+                    rows = rows[:PDF_MAX_ROWS]
+                row_count = len(rows)
+            finally:
+                ch_client.close()
 
         # Check cancellation after heavy query
         execution.refresh_from_db()

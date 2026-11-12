@@ -35,9 +35,260 @@
 
 ---
 
+## Local configuration
+
+For a **new local development deployment**, copy `.env.example` to `.env`
+without overwriting an existing file:
+
+```bash
+cp -n .env.example .env
+```
+
+Edit `.env` and replace every `CHANGE_ME` value. Generate a Django secret and a
+Fernet field-encryption key with Python 3:
+
+```bash
+python3 -c "import secrets; print(secrets.token_hex(32))"
+python3 -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+```
+
+Use the first output for `SECRET_KEY` and the second for
+`FIELD_ENCRYPTION_KEY`. Generate separate strong passwords for PostgreSQL,
+ClickHouse and MinIO; use the same MinIO username and password in both the
+`MINIO_ROOT_*` and `MINIO_STORAGE_*` variables. Keep the two bucket names
+consistent. Add the actual browser hostname to `ALLOWED_HOSTS` if accessing
+ReportHub from another machine.
+
+Keep `.env` private and backed up securely. **Do not replace an existing
+`FIELD_ENCRYPTION_KEY`**: saved source credentials depend on it. Database
+password variables initialize new persistent volumes; changing them in `.env`
+does not rotate existing PostgreSQL or ClickHouse credentials. MinIO changes
+also require coordinated credential configuration. Follow an appropriate
+rotation procedure instead of overwriting an existing configuration.
+
+The template is for local development only: it enables debug mode, and the
+bundled Compose stack exposes infrastructure ports and uses privileged service
+accounts. It is not a production security configuration. The experimental
+CDC-to-batch flags must remain disabled until the documented fencing and
+recovery work is complete. Docker Compose reads `.env` for interpolation;
+Django also reads the mounted project file, while explicitly supplied process
+environment variables take precedence. The Docker build excludes `.env` files.
+
+### Optional separate application database identities
+
+Django, Celery workers and Beat can use separately provisioned credentials by
+setting **both** `APP_POSTGRES_USER` and `APP_POSTGRES_PASSWORD`, and/or both
+`APP_CLICKHOUSE_USER` and `APP_CLICKHOUSE_PASSWORD`. These are optional; when
+both values for a database are absent, ReportHub retains the existing
+`POSTGRES_USER` / `POSTGRES_PASSWORD` and `CLICKHOUSE_USER` /
+`CLICKHOUSE_PASSWORD` behavior. A partial or empty application credential pair
+stops Django startup rather than silently using an administrator account.
+The bundled PostgreSQL and ClickHouse servers continue to use their existing
+server credentials; changing the application values does not create users,
+grant privileges, rotate credentials or restart services.
+With the bundled Compose configuration, place these values in the project
+`.env` mounted into each application container, or configure the container
+environment explicitly. Merely exporting them in the host shell does not pass
+them into the containers unless you also include the optional
+`docker-compose.application-credentials.yml` override, for example:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cdc.yml \
+  -f docker-compose.application-credentials.yml config --quiet
+```
+
+Include the same files in Compose commands when you intentionally deploy the
+override. Process environment values take precedence over the mounted file per
+variable, so set or override each pair together.
+
+Provision and test any new identities separately before a coordinated rollout
+to **all** web and worker processes. By default, every container runs Django
+migrations at startup, so a PostgreSQL role without the required migration and
+application permissions can cause migrations to fail. If migrations fail, the
+entrypoint logs a startup error and exits with the migration command's status
+without launching the main process. An opt-in migration process is described
+below; the required least-privilege roles and rollout are not yet implemented.
+Compose still passes the legacy PostgreSQL credentials to application
+containers and mounts the project `.env`, which can contain administrator
+credentials. Distinct credentials alone do **not** fence old workers, direct
+clients or in-flight requests and must not be used to enable CDC-to-batch cutover.
+
+### Opt-in dedicated migration process
+
+`docker-compose.migrations.yml` adds a one-shot `migrations` service. It runs
+`python manage.py migrate --noinput` with the separately provisioned PostgreSQL
+identity supplied by `MIGRATION_POSTGRES_USER` and `MIGRATION_POSTGRES_PASSWORD`.
+Both variables must be nonempty and available to Compose (export them or put
+them in its environment file); missing values reject the configuration.
+The migration role must have all permissions needed for existing and future
+Django migrations, including ownership of objects it must alter. This override
+does not create roles, transfer ownership or grant privileges.
+
+All web, worker and beat services disable their own startup migrations and
+depend on successful completion of the migration service. A failed migration
+therefore blocks dependent services from starting. Existing running processes
+are not stopped by this dependency. Before adopting this configuration, coordinate
+draining and stopping existing application processes and test the identities in
+isolation; do not apply it to a running shared stack without approval.
+
+For an approved deployment, use the same Compose files for both steps:
+
+```bash
+compose_with_migrations() {
+  docker compose -f docker-compose.yml -f docker-compose.cdc.yml \
+    -f docker-compose.application-credentials.yml \
+    -f docker-compose.migrations.yml "$@"
+}
+
+# Force a fresh migration run for each deployment, not a stale successful job.
+compose_with_migrations up -d --build --force-recreate migrations
+compose_with_migrations up -d --build
+```
+
+Omit the CDC overlay for batch-only deployments. Do not use `--no-deps` for
+application startup: it bypasses the migration dependency. Ordinary container
+restarts do not rerun this deployment gate; the two-step procedure is required
+for each new deployment. The existing `reporthub-stack.sh` helper does not
+include these optional overrides and must not be used to deploy this mode.
+
+Outside this override, `MIGRATIONS_ON_STARTUP` defaults to `1`; explicit `0`
+skips startup migrations, and any other value fails startup. Disabling it
+outside an equivalent migration-gated deployment is unsafe. This separation
+does not remove privileged credentials from the shared `.env` mount or legacy
+container environment, and is not a CDC-to-batch fence.
+
+### Test layout and discovery
+
+- `tests/infrastructure/`: standalone startup, Compose, query-cancellation and
+  opt-in disposable service-identity tests. No Django installation is needed
+  on the host for discovery.
+- `tests/integration/`: opt-in Django/ClickHouse and PostgreSQL CDC stream
+  tests, plus the identity probe executed inside disposable containers.
+- `tests/docker-compose*.yml`, `tests/init-db/` and test startup scripts:
+  supporting infrastructure.
+- Application `tests.py` modules remain alongside their Django apps, including
+  `config/tests.py`, `control_plane/tests.py`, `etl/tests.py` and `reports/tests.py`.
+  Django's normal application-test discovery remains supported.
+
+Run standalone tests from `ReportHub/`:
+
+```bash
+python3 -m unittest discover -s tests/infrastructure -t . -v
+```
+
+The identity integration runner is skipped unless `REPORTHUB_IDENTITY_TEST=1`
+is set. Live Django integration tests retain their separate opt-in flags and
+must run through `manage.py test tests.integration` in a configured Django
+environment; do not use host-only unittest discovery for that directory.
+
+### Isolated service-identity permission tests
+
+The candidate permission model is exercised by
+`tests/integration/service_identity_probe.py`, not installed into the running stack:
+
+- PostgreSQL migration identity: owns the isolated database and `public` schema
+  and objects it creates; no superuser, role/database creation, replication or
+  RLS-bypass attributes. It applies the complete Django migration chain.
+- PostgreSQL runtime identity: database `CONNECT`, schema `USAGE`, table
+  `SELECT/INSERT/UPDATE/DELETE`, and sequence `USAGE/SELECT`. Default privileges
+  belonging to the migration role cover future tables and sequences. It has no
+  schema creation, table alteration/drop/truncate, temporary-table, role/database
+  creation or migration-role membership privileges. ORM history, row locking,
+  database sessions, schedules and report metadata are exercised.
+- ClickHouse runtime identity: `SELECT`, `INSERT`, `CREATE TABLE`, `DROP TABLE`
+  and `ALTER ADD COLUMN` on the isolated `default` database, plus `SELECT` on
+  `system.tables`, `system.columns` and `system.databases`. Tests exercise
+  `MergeTree`, CDC `ReplacingMergeTree` evolution and report reads, staging
+  through the application workflow, copy/exchange/rename/drop, and cancellation
+  of its own queries without a global `KILL QUERY` grant. Another identity's
+  query must finish normally despite an attempted cancellation. Access to an
+  unrelated database and user/role/database administration are denied.
+
+Run from `ReportHub/`:
+
+```bash
+REPORTHUB_IDENTITY_TEST=1 python3 -m unittest discover \
+  -s tests/infrastructure -t . -p test_service_identities.py -v
+```
+
+Docker must already have the `postgres:15-alpine`,
+`clickhouse/clickhouse-server:latest` and `reporthub-app` images. Build the
+application image separately if absent, or select an existing compatible image
+with `REPORTHUB_IDENTITY_APP_IMAGE`. The runner never pulls images, publishes
+ports, joins the shared network, mounts existing database data, or modifies
+existing services. It generates throwaway credentials, uses a unique internal
+Compose network and disposable tmpfs database storage, mounts project code
+read-only, and masks the project `.env` with `/dev/null`. Its own project is
+removed after success or failure; do not run the probe script directly against
+an existing stack.
+
+These are candidate grants verified on PostgreSQL 15.19 and ClickHouse
+26.10.3.7, not a production provisioning or upgrade procedure. Existing
+PostgreSQL objects need a separately reviewed ownership/grant transition;
+default privileges are not retroactive and only apply to objects created by
+the specified role. The runtime can change all application metadata and
+create/drop/rename/exchange every table in its ClickHouse database. It cannot
+fence different sources or old workers sharing that identity. System-table
+reads may also reveal server metadata; this is not tenant isolation.
+
+Live Kafka/Debezium, real workers, all supported source databases, production
+role rollout, existing-object ownership and interrupted-operation recovery are
+not covered. Report and bounded ETL requests assign their IDs through driver
+`settings={"query_id": ...}`; `transport_settings` carries HTTP headers and does
+not assign the query ID. Isolated tests verify exact IDs for queries, commands
+and inserts, active-query cancellation through the driver, and actual report
+execution and batch refresh/publication. Cancellation binds the ID as a query
+parameter; ETL cancellation failures are logged and the client is closed.
+Timeouts and simulated interruptions retain uncertain external-operation records,
+even after a cancellation command finds no active query.
+
+UI cancellation remains cooperative, not immediate. Report cancellation flags
+are checked after blocking queries return. Ingestion rechecks whether its source
+is active after source reads and ClickHouse writes and before publishing a
+staging table; deactivation during a read cancels the task, removes staging and
+preserves the existing ClickHouse table. The source sync status is recorded as
+`CANCELLED`. These checks do not preempt a database or ClickHouse request already
+in progress.
+
+Seven opt-in, disposable real-worker scenarios cover report and ingestion
+control-plane flags, worker termination, delayed ClickHouse requests and dropped
+cancellation responses. They also demonstrate that a delayed request can still
+execute after worker termination and after a cancellation found no active
+query. This behavior is tested, but uncertain-request recovery and fencing are
+not implemented. Keep CDC-to-batch switching disabled.
+
+## Starting and stopping ReportHub with CDC
+
+From the ReportHub directory, start the main stack and CDC overlay with:
+
+```bash
+./reporthub-stack.sh start
+```
+
+Stop them without removing containers or data:
+
+```bash
+./reporthub-stack.sh stop
+```
+
+The stop command stops the scheduler and web app first, then gives workers up to
+10 minutes to finish before stopping the remaining services. A task still
+running after the timeout may be forcibly stopped and require recovery. Queued
+tasks can remain for the next start. Stopping CDC also pauses change capture:
+source logs must remain available until the connector catches up after restart.
+This script does not start or stop the separate test database stack; start it
+with `./tests/start_test_dbs.sh` first if your sources depend on it.
+
+---
+
 ## 🧪 Polyglot Test Database & Test Email Server Environment
 
 ReportHub includes an isolated multi-database test harness in `tests/docker-compose.test.yml` and a one-command setup script at `tests/start_test_dbs.sh`. The script starts the test databases, waits for them to accept connections, enables PostgreSQL logical replication, grants MySQL's Debezium snapshot and replication privileges, imports Northwind into MSSQL, enables SQL Server Agent and CDC on Northwind's primary-key tables, and reapplies the MongoDB and Oracle seeds safely on every run. MongoDB runs as a standalone server. PostgreSQL and MySQL run their initialization scripts when their volumes are first created. Test volumes persist between runs.
+
+SQL Server can accept connections to its system database before Northwind has
+finished recovery. The setup script waits for Northwind itself to accept a
+connection before enabling CDC; if it times out, inspect the SQL Server
+container logs rather than resetting its persistent volume.
 
 ### Test Database Connection Matrix
 
@@ -58,9 +309,11 @@ If the test MongoDB container previously ran with replica-set options, recreate 
 ```bash
 # From the ReportHub project directory: start and populate the test databases
 ./tests/start_test_dbs.sh
+# Or use the explicit start option
+./tests/start_test_dbs.sh --start
 
 # Stop containers but preserve their database volumes
-docker compose -f tests/docker-compose.test.yml down
+./tests/start_test_dbs.sh --stop
 
 # Optional: remove test containers and erase all their data, then start fresh
 ./tests/start_test_dbs.sh --reset
@@ -72,23 +325,53 @@ Each new data source has an **Ingestion mode**: **Batch refresh** (the default, 
 
 Scheduled ingestion consumes at most `DEFAULT_ETL_BATCH_SIZE` CDC events per Celery task (default `10000`) and then returns so other queued work can run. CDC batches are serialized per source with a Redis lock; concurrent requests are requeued. In CDC mode relational tables with discovered primary keys use Debezium change events; tables without a primary key use bounded full-refresh batches. Batch-mode sources use bounded full refreshes for all tables. Backfills use the same row limit and the dedicated `queue_backfill` queue, and are skipped for CDC sources with primary-key tables because a safe rebuild requires a coordinated CDC snapshot. Celery prefetch is set to 1.
 
-Scheduled CDC ingestion, its continuations, and CDC rebuilds use `queue_cdc` on the dedicated `celery_cdc_worker`. Scheduled batch refreshes, keyless CDC refreshes, backfills, and the internal CDC-to-batch staging task use `queue_backfill` on `celery_batch_worker`. Interactive and legacy `queue_hot` tasks remain on `celery_ux_worker`; `celery_warm_worker` consumes `queue_warm`. Set `CDC_WORKER_CONCURRENCY` and `BATCH_WORKER_CONCURRENCY` in the Compose environment to tune worker slots (default 2 each). Per-source CDC locking still applies; extra slots primarily help different sources.
+Scheduled CDC ingestion, its continuations, and CDC rebuilds use `queue_cdc` on the dedicated `celery_cdc_worker`. Scheduled batch refreshes, keyless CDC refreshes, backfills, and the CDC-to-batch staging task use `queue_backfill` on `celery_batch_worker`. Interactive and legacy `queue_hot` tasks remain on `celery_ux_worker`; `celery_warm_worker` consumes `queue_warm`. Set `CDC_WORKER_CONCURRENCY` and `BATCH_WORKER_CONCURRENCY` in the Compose environment to tune worker slots (default 2 each). Per-source CDC locking still applies; extra slots primarily help different sources.
 
-CDC-to-batch staging is internal and does not expose a switch or start cutover. It stages one whole table per task, then revalidates the table list and staged UUIDs and schemas. Checkpoint statuses record staging progress; they are not proof that a future cutover is safe. A failed or interrupted task needs an explicit retry of the staging task for the existing transition; there is no automatic crash recovery yet. Interrupted attempts can leave separate ClickHouse tables for manual cleanup. Long tables hold a checkpoint transaction while staging, and connector streaming and large-table performance still need validation.
+Administrators can prepare CDC-to-batch staging from the source edit page. This does not switch modes or start cutover, and CDC continues while staging runs. It stages or restages one whole table per task, then revalidates the table list and staged UUIDs and schemas without restaging in the verification task. Checkpoint statuses record staging progress; they are not proof that verification has finished or that a future cutover is safe. A failed or interrupted task needs an explicit retry; there is no automatic crash recovery yet. If dispatch could not be confirmed, check whether a worker is still running before retrying. Administrators can cancel preparation; cancellation is rejected while a staging checkpoint is locked. Cancelling leaves staged tables for manual cleanup and keeps the source in CDC mode. Pending cutover has a separate, restricted abandonment action described below. Active preparation also prevents starting CDC table rebuilds until preparation is cancelled or resolved. Interrupted attempts can leave separate ClickHouse tables for manual cleanup. Long tables hold a checkpoint transaction while staging, and connector streaming and large-table performance still need validation.
 
-Staging validation compares the actual ClickHouse engine, sorting, partition, primary and sampling keys, column names, order, types and default expressions with the expected table after staging, during retries and when recording the active table UUID. A mismatch fails validation and requires investigation; it is not automatically repaired. These checks do not prove row completeness or protect against changes after validation, so the future cutover executor must revalidate under a complete fence.
+Staging actions use a separate confirmation page. The source page renders status without JavaScript; if automatic polling is unavailable, reload the page to see current progress.
 
-CDC ingestion remains enabled during staging. Each ingestion task now holds the control-plane source row lock while it acquires the Redis lock, checks source mode and cutover status, and processes its batch. This serializes healthy database sessions for the same source even if the Redis lease expires; a future cutover executor must acquire the same source row lock before marking cutover pending. Queued CDC batches skip while cutover is pending. Holding the row lock across connector and ClickHouse work can delay other source-row updates. A database connection loss, external side effects, and Redis lease ownership still require a complete fencing and recovery design. No existing operation marks a transition cutover pending or performs that switch.
+The transition status shows the last completed whole-transition verification separately from the table count. This timestamp is cleared on staging, cancellation or a preparation error. It records a past check, not current cutover readiness: source data and configuration can change afterward, and cutover must revalidate under a complete fence. Checkpoints created before timestamp tracking will show verification as incomplete until the staging task is retried.
+
+Transition preparation and staging reject source tables that map to the same ClickHouse name, including collisions caused by case folding or underscores. The existing naming scheme is unchanged; resolve the underlying mapping conflict before retrying. This check is not a cutover fence and does not prevent later metadata changes.
+
+Staging validation compares the actual ClickHouse engine, sorting, partition, primary and sampling keys, column names, order, types and default expressions with the expected table after staging, during retries and when recording the active table UUID. Staging explicitly disables ClickHouse asynchronous inserts and checks the physical row count against the number of rows read and inserted, including empty tables. The staging signature includes the source username because different database users can see different rows. A mismatch fails validation and requires investigation; it is not automatically repaired. Staged checkpoints created before row-count, username or synchronous-insert tracking are restaged into a fresh table on retry, retaining the old table for manual cleanup; they cannot be used for active-table observation until restaged. Counting adds an extra ClickHouse query for each validation. These checks cannot detect changed values or equal-count substitutions, changes in permissions or row-level policies for the same username, prove that the source scan captured every intended row, or protect against changes after validation, so the future cutover executor must revalidate under a complete fence.
+
+CDC ingestion remains enabled during staging. Each ingestion task now holds the control-plane source row lock while it acquires the Redis lock, checks source mode and cutover status, and processes its batch. This serializes healthy database sessions for the same source even if the Redis lease expires; a future cutover executor must acquire the same source row lock before marking cutover pending. Queued CDC batches skip while cutover is pending. Holding the row lock across connector and ClickHouse work can delay other source-row updates. A database connection loss, external side effects, and Redis lease ownership still require a complete fencing and recovery design. No user-facing operation performs that switch.
 
 CDC-mode batch refresh tasks, including keyless-table fallback, hold the same control-plane source row lock for each bounded task and recheck source mode and cutover status under that lock. A cutover executor must acquire that lock before marking cutover pending so it waits for an in-flight refresh. Queued refreshes then skip while cutover is pending; a stale keyless continuation is rejected after the source switches to batch. Each refresh holds a database transaction while accessing the source and ClickHouse, so long-running tasks can delay other source-row updates. Database connection loss still requires a complete fencing design; these guards do not implement cutover.
 
+Private source-scoped external-operation records and a row-lock barrier are available as groundwork for a future fence. An experimental, disabled-by-default `CDC_EXTERNAL_OPERATION_TRACKING` setting registers CDC ingestion, CDC-mode refresh, rebuild and report-query tasks before their work and keeps records on failure; tracked ClickHouse inserts disable asynchronous insertion. Report queries are registered for batch and inactive sources too, so tracking also affects those sources when enabled. Unresolved records block the barrier and protect their source from deletion; only a caller that has proved all external work ended may remove one. **Do not enable this setting in production yet:** recovery is not implemented, errors can leave permanent records, and coverage and external request completion still need validation. The barrier is not wired to a cutover executor, and neither the setting nor the records account for old workers or already-running work. A future executor must commit cutover-pending while holding the source lock, coordinate report reads, and address worker upgrades and uncertain requests before switching modes.
+
+An unexposed pending-cutover primitive now coordinates the report lock, checkpoint locks and source lock, rejects unresolved operation records, and rechecks staged tables before committing active UUID observations and pending status together. It requires the experimental tracking setting, but that setting does **not** prove that every writer is upgraded or that an earlier request has terminated. The primitive must not be used until an executor establishes those guarantees; report connection loss and direct ClickHouse readers are still outside the report guard.
+
 Scheduled ingestion, backfill dispatch, retries and continuations carry their originating source mode; a task from another mode is rejected. Legacy unmarked tasks still run for sources without a completed transition, but are rejected for batch sources with a successful CDC-to-batch transition because their origin is ambiguous. A future transition executor must commit the mode change and successful transition status together under the source lock, retain the successful transition record, and ensure all producers and workers use this version before switching. Any external callers submitting ingestion or backfill tasks for a transitioned source must supply the current `origin_mode`. These checks do not protect against lost database connections, external side effects or future mode-switch cycles.
 
-The internal cutover checkpoint distinguishes an unchecked active table from an observed missing one. An internal preparation operation can record the active table UUID after checking the staged UUID and configuration; it rejects a missing CDC-managed table. Re-observation rejects changed identities rather than replacing the original checkpoint. UUID decision logic can identify a pending exchange or rename, recognize one completed before a crash, and reject unexpected table identities. These preparation observations may become stale while CDC or keyless refreshes continue: a future executor must revalidate them under a complete fence. No operation performs the exchange, establishes that fence, or switches the source yet.
+The internal cutover checkpoint distinguishes an unchecked active table from an observed missing one. An internal preparation operation can record the active table UUID after checking the staged UUID and configuration; it rejects a missing CDC-managed table. Re-observation rejects changed identities rather than replacing the original checkpoint. UUID decision logic can identify a pending exchange or rename, recognize one completed before a crash, and reject unexpected table identities. These preparation observations may become stale while CDC or keyless refreshes continue: a future executor must revalidate them under a complete fence.
+
+Private primitives can exchange or rename one table and finalize metadata after all checkpoints are complete. Before issuing a ClickHouse command, the exchange primitive commits a durable in-flight marker; it clears the marker only after a successful response and verified checkpoint update. After the command, it rechecks cutover eligibility, checkpoint data, table membership, configuration, physical schema and row count before completing the checkpoint. A changed state or failed validation leaves the marker in place. If a response is lost, the worker exits, or checkpointing fails, retries and finalization are blocked because the command may still be running. Recovery for this uncertain state is not implemented; checking UUIDs alone is insufficient to prove that a delayed command cannot still execute. The exchange primitive cannot run inside an enclosing database transaction. Finalization checks physical table identities and configurations, then commits table metadata, source mode and successful transition status in one control-plane transaction. Connector references and old tables are retained. **These primitives and the experimental executor do not establish a complete external-write fence and must not be invoked until that fence exists.** Report reads also require coordination: between table exchange and metadata finalization, the existing CDC query logic would expect CDC columns on the new batch table. No switch is available yet.
+
+A separate experimental generation-publication path copies each staged table to a fresh, uniquely named ClickHouse table and atomically publishes all physical names with the source mode. A retry reserves a different name, so a delayed copy from an earlier attempt cannot become the published generation; old CDC and staging tables are retained. Reports, batch ingestion and CDC paths resolve the stored physical name, falling back to the existing naming convention for unchanged sources. The private executor can select this path with `CDC_TO_BATCH_GENERATION_EXECUTOR_ENABLED`, which defaults to false. It is **not exposed in the UI and must not be enabled for real sources**: it still needs deployment and worker-version coordination, protection against untracked metadata writers and external clients, recovery and end-to-end CDC validation. Do not manually set physical names or call these private functions to switch a real source.
+
+The source edit, toggle and delete routes, source and table Django admin mutations, schema introspection, warehouse field selection, and report configuration writes coordinate with the pending and generation-publication operations using a source-scoped PostgreSQL advisory transaction lock. They reject changes while cutover is pending. Existing source ingestion mode is read-only in Django admin; bulk source and table admin actions require explicit selection rather than "select all" across pages. Introspection holds the advisory lock and source row lock throughout the source scan, so CDC processing for that source can wait for a long scan; source database writes remain online. Unupgraded workers and direct database or ClickHouse clients do not participate and can still cause unsafe effects. These gaps must be resolved before the generation path is safe to expose.
+
+An experimental queued executor contains staging, pending cutover, per-table cutover and finalization orchestration. It is not exposed in the UI and is disabled by default. Even if its flags are enabled, a hard fail-closed deployment-fence check now blocks the executor because worker/client fencing and external-request recovery are not implemented. This check is a safety gate, **not an implementation of fencing**; private primitives must not be invoked for real sources. Tests replace the gate only for isolated prototype validation. Worker rollout, safe recovery and live interruption tests remain required before the source-page switch can be enabled.
+
+Administrators can view the latest transition on the source edit page, including per-table progress, errors and uncertain command markers. Active transitions refresh automatically. The switch button is deliberately disabled even if experimental executor settings are enabled. The page can start, retry or cancel staging. It can also abandon a pending cutover after confirming that no exchange is recorded or uncertain and the active table UUIDs still match their checkpoints; it retains all staged and copied tables and leaves the source in CDC mode. Uncertain or completed exchanges cannot be abandoned this way. These checks do not fence untracked external writers. Retry and cancel confirmations identify a specific transition, so an old confirmation cannot act on a newer one.
+
+The same control-plane panel shows generation-copy progress and any recorded external operations. An operation record can represent running work or an uncertain outcome; neither its age nor its presence alone proves whether the external request has stopped. No control-plane action currently clears these records or resolves uncertain exchange commands safely.
+
+Finalization locks checkpoints in primary-key order before the source row, matching the checkpoint-first staging and exchange operations. A caller must not already hold the source row lock when invoking it. It rejects checkpoint membership changes detected while acquiring locks. This avoids one lock-order deadlock but does not fence external writes.
+
+Report tasks use a shared, source-scoped PostgreSQL advisory transaction lock while building and executing their ClickHouse query; concurrent reports can still run together. Reports fail with a visible error if a CDC-to-batch cutover is pending. A future executor must acquire the corresponding exclusive lock **before the source row lock and before** marking cutover pending, then commit that status while holding it; it must also prevent new reads until cutover finishes. A report reloads table metadata after obtaining the lock. The lock holds a PostgreSQL transaction over the ClickHouse query, and loss of that connection can release the lock while the external query continues. With the experimental tracking setting enabled on the report worker, the durable report record remains after such a failure and blocks the pending-cutover primitive. This still does not prove that the external query has stopped, provide recovery, cover older workers, or fence direct ClickHouse clients.
 
 Local staging tests compared source rows with staging for PostgreSQL, MySQL, SQL Server, and Oracle. A PostgreSQL two-table run was staged through the batch worker, and an isolated worker exit after a PostgreSQL staging insert was recovered by manually retrying into a fresh table. In a separate PostgreSQL test, updates, deletes, and inserts committed during a table read were absent from that staged snapshot and appeared in a fresh staging run; the existing live CDC table UUID and source mode remained unchanged. This is a result for that driver and configuration, not a cross-database or source-wide snapshot guarantee. Other concurrent-write cases, crash boundaries, production-scale tables, and the unfinished cutover remain to be validated.
 
 An automated concurrency regression pauses a staging insert while a CDC ingestion task processes simulated insert, update, and delete events. It checks that CDC completes against a separate live table and staging remains independent. This uses a real control-plane database transaction but mocked Kafka and ClickHouse clients and a SQLite source; it does not replace end-to-end testing with live CDC infrastructure.
+
+An opt-in live test exercises the private exchange, generation copy and publication, lost responses, late writes to retained tables, and a delayed superseded copy against ClickHouse. It uses a Django test database and uniquely named synthetic ClickHouse tables, which it removes afterward; it does not establish a fence or test a live CDC stream. With the Compose stack running, execute `docker compose -f docker-compose.yml -f docker-compose.cdc.yml exec -T -e REPORTHUB_LIVE_CUTOVER_TEST=1 app python manage.py test tests.integration.test_cdc_to_batch_live --noinput`. Do not run this against a ClickHouse instance where creating and dropping test tables is inappropriate.
+
+An additional opt-in test exercises a PostgreSQL Debezium snapshot and insert, update and delete events while staging is paused, private generation publication, report queries, a late write to the retained CDC table and a subsequent batch refresh. The tasks run in the test process, not on workers or through the control-plane switch; this is not a deployment fence or validation of other databases. It creates a uniquely named table, connector, replication slot, publication, Kafka topic and ClickHouse tables, and attempts to remove those exact test resources afterward. Use it only with disposable test infrastructure; an interrupted run or unconfirmed external request may leave resources requiring inspection. With the CDC stack and `tests/docker-compose.test.yml` running, execute `docker compose -f docker-compose.yml -f docker-compose.cdc.yml exec -T -e REPORTHUB_LIVE_CDC_STREAM_TEST=1 app python manage.py test tests.integration.test_cdc_to_batch_stream_live --noinput`. The test defaults to the PostgreSQL test Compose service and accepts `REPORTHUB_TEST_PG_HOST`, `REPORTHUB_TEST_PG_PORT`, `REPORTHUB_TEST_PG_DATABASE`, `REPORTHUB_TEST_PG_USER` and `REPORTHUB_TEST_PG_PASSWORD` overrides.
 
 In a local PostgreSQL test, staging was paused after an actual ClickHouse insert while test-row updates, deletes, and inserts flowed through Debezium, Kafka, and the CDC worker to the live table. The live table reflected the changes before staging resumed; the staged table retained the earlier snapshot, and the live table UUID and source mode were unchanged. Test rows and temporary transition records were removed; the staging table was retained for manual cleanup. Staging ran in a separate application process, not through the batch worker. This validates one local overlap scenario, not cutover safety or other drivers.
 
@@ -157,6 +440,8 @@ CDC is not zero-overhead: it uses source log/stream capacity, Kafka storage, con
 
 Administrators can view recent CDC execution failures on the dashboard and open **CDC Execution Failures** for a searchable, paginated history. Search covers source name, database type, task ID, and recorded error. The dashboard widget can be hidden under **Customize Widgets**. Entries record the source, time, task ID, and exception type; use the task ID to locate details in the ETL worker logs. Entries represent failures recorded after this feature is deployed, not the current health of a connector or older executions.
 
+The **CDC Table Rebuilds** page in the Control Plane shows each authorized source's table, rebuild status, last update, and required attention. Staff and superusers can monitor all sources; other users see only sources assigned to them, and only source-scoped **System Admin** users or global administrators can resume a rebuild in **Cutover pending**. Other statuses cannot be resumed from this page. Rebuild checkpoints remain read-only in Django admin.
+
 The warehouse field selections saved in **Warehouse Mapping** control the ClickHouse columns. Batch-mode sources and CDC-mode relational tables without a discovered primary key use scheduled bounded full refreshes. Full-refresh backfills are rejected for CDC sources containing a primary-key table: replacing a CDC table while changes continue would require a coordinated Debezium snapshot and offset barrier to avoid losing updates. New columns are added to CDC-managed warehouse tables, but existing rows are not repopulated; use a coordinated Debezium snapshot before relying on newly selected fields for historical data.
 
 Potential future alternatives to full refresh include explicitly configured append-only ID watermarks and database-specific row-version tracking. These need safeguards for transaction ordering, retries, updates, and deletes; choosing a numeric column alone is not sufficient. See [ROADMAP.md](./ROADMAP.md) for the planned strategy and cross-source reporting work.
@@ -221,6 +506,7 @@ reporthub/
 ├── docker-compose.yml    # Service orchestration (Web, Postgres, Redis, ClickHouse, MinIO, Celery)
 ├── docker-compose.cdc.yml # Kafka and Debezium Connect overlay
 ├── requirements.txt      # Python dependencies
+├── reporthub-stack.sh    # Start/stop the main stack with the CDC overlay
 ├── entrypoint.sh         # Container startup & auto-migration script
 ├── ROADMAP.md            # Project implementation tracker & audit cleanup checklist
 └── README.md             # Project documentation

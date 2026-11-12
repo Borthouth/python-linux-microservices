@@ -9,6 +9,7 @@ staticfiles/
 
 # Environment variables
 .env
+!.env.example
 venv/
 env/
 ENV/

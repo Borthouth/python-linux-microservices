@@ -15,6 +15,8 @@ from pathlib import Path
 import environ
 from datetime import timedelta
 
+from config.service_credentials import service_credentials
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -219,12 +221,18 @@ AUTO_LOGOUT = {
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+postgres_user, postgres_password = service_credentials(
+    os.environ, "APP_POSTGRES",
+    env('POSTGRES_USER', default='postgres'),
+    env('POSTGRES_PASSWORD', default='your_secure_password'),
+)
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': env('POSTGRES_DB', default='reporthub'),
-        'USER': env('POSTGRES_USER', default='postgres'),
-        'PASSWORD': env('POSTGRES_PASSWORD', default='your_secure_password'),
+        'USER': postgres_user,
+        'PASSWORD': postgres_password,
         'HOST': env('POSTGRES_HOST', default='localhost'),
         'PORT': env('POSTGRES_PORT', default='5432'),
     }
@@ -233,8 +241,16 @@ DATABASES = {
 # ClickHouse Settings
 CLICKHOUSE_HOST = env('CLICKHOUSE_HOST', default='clickhouse')
 CLICKHOUSE_PORT = env.int('CLICKHOUSE_PORT', default=8123)
-CLICKHOUSE_USER = env('CLICKHOUSE_USER', default='default')
-CLICKHOUSE_PASSWORD = env('CLICKHOUSE_PASSWORD', default='your_secure_password')
+CLICKHOUSE_USER, CLICKHOUSE_PASSWORD = service_credentials(
+    os.environ, "APP_CLICKHOUSE",
+    env('CLICKHOUSE_USER', default='default'),
+    env('CLICKHOUSE_PASSWORD', default='your_secure_password'),
+)
+
+# Experimental groundwork; does not by itself enable CDC-to-batch cutover.
+CDC_EXTERNAL_OPERATION_TRACKING = env.bool('CDC_EXTERNAL_OPERATION_TRACKING', default=False)
+CDC_TO_BATCH_EXECUTOR_ENABLED = env.bool('CDC_TO_BATCH_EXECUTOR_ENABLED', default=False)
+CDC_TO_BATCH_GENERATION_EXECUTOR_ENABLED = env.bool('CDC_TO_BATCH_GENERATION_EXECUTOR_ENABLED', default=False)
 
 # Local AI report design (Ollama)
 OLLAMA_BASE_URL = env('OLLAMA_BASE_URL', default='http://ollama:11434')

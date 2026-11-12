@@ -1,0 +1,67 @@
+<div id="cdc-to-batch-status" class="mt-4 text-sm text-slate-300"
+     {% if transition_active %}hx-get="{% url 'control_plane:source_cdc_to_batch_status' profile.pk %}" hx-trigger="every 5s" hx-swap="outerHTML"{% endif %}>
+    {% if transition %}
+        <p><span class="font-semibold">Status:</span> {{ transition.get_status_display }}</p>
+        <p class="mt-1">Staged: {{ staged_count }} / {{ checkpoints|length }} tables; cut over: {{ cutover_count }} / {{ checkpoints|length }} tables.</p>
+        {% if generation_copies_started %}
+            <p class="mt-1">Generation copies verified: {{ generation_copy_count }} / {{ checkpoints|length }} tables.</p>
+        {% endif %}
+        {% if transition.staging_verified_at %}
+            <p class="mt-1">Staging last verified: {{ transition.staging_verified_at }}. Revalidation is required before cutover.</p>
+        {% elif transition.status == 'PREPARING' %}
+            <p class="mt-1">Staging verification has not completed.</p>
+        {% endif %}
+        {% if transition.status == 'PREPARING' and pre_synchronous_staging_count %}
+            <p class="mt-2 text-amber-400" role="alert">{{ pre_synchronous_staging_count }} staged table{{ pre_synchronous_staging_count|pluralize }} must be restaged because synchronous inserts were not recorded. Retry staging to create fresh tables; existing tables will be retained.</p>
+        {% endif %}
+        {% if transition.last_error %}
+            <p class="mt-2 text-red-400" role="alert">{{ transition.last_error }}</p>
+        {% endif %}
+        {% if transition.status == 'CUTOVER_PENDING' %}
+            <p class="mt-2 text-amber-400">Reports for this source are blocked until cutover is resolved.</p>
+        {% endif %}
+        <ul class="mt-3 space-y-1">
+            {% for checkpoint in checkpoints %}
+                <li>{{ checkpoint.source_table.schema_name }}.{{ checkpoint.source_table.table_name }}: {{ checkpoint.get_status_display }}{% if checkpoint.cutover_command_inflight %} - command outcome uncertain{% elif checkpoint.generation_table and not checkpoint.generation_uuid %} - copy started; completion unconfirmed{% endif %}</li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p>No CDC-to-batch transition has been started for this source.</p>
+    {% endif %}
+    {% if external_operations %}
+        <p class="mt-3 text-amber-400">External operations are active or have an unresolved outcome. They prevent cutover; do not assume they have stopped.</p>
+        <ul class="mt-2 space-y-1">
+            {% for operation in external_operations %}
+                <li>{{ operation.get_kind_display }} - recorded {{ operation.created_at }}{% if operation.task_id %} - task {{ operation.task_id }}{% endif %}</li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+    {% if transition.status == 'PREPARING' %}
+        <p class="mt-3 text-slate-400">Staging does not start cutover. Retry only after checking whether a previous task is still running.</p>
+        <div class="mt-3 flex flex-wrap gap-2">
+            <form method="post" action="{% url 'control_plane:source_cdc_to_batch_staging' profile.pk %}">
+                {% csrf_token %}
+                <input type="hidden" name="transition" value="{{ transition.generation }}">
+                <button name="action" value="retry" class="px-3 py-2 bg-sky-500/10 text-sky-400 border border-sky-500/20 rounded-lg">Retry staging</button>
+            </form>
+            <form method="post" action="{% url 'control_plane:source_cdc_to_batch_staging' profile.pk %}">
+                {% csrf_token %}
+                <input type="hidden" name="transition" value="{{ transition.generation }}">
+                <button name="action" value="cancel" class="px-3 py-2 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-lg">Cancel staging</button>
+            </form>
+        </div>
+    {% elif transition.status == 'CUTOVER_PENDING' %}
+        <form method="post" action="{% url 'control_plane:source_cdc_to_batch_staging' profile.pk %}" class="mt-3">
+            {% csrf_token %}
+            <input type="hidden" name="transition" value="{{ transition.generation }}">
+            <button name="action" value="abandon_pending" class="px-3 py-2 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-lg">Abandon pending cutover</button>
+        </form>
+    {% elif not transition or transition.status == 'FAILED' %}
+        {% if profile.is_active and profile.ingestion_mode == 'cdc' and profile.db_type != 'mongodb' %}
+            <form method="post" action="{% url 'control_plane:source_cdc_to_batch_staging' profile.pk %}" class="mt-3">
+                {% csrf_token %}
+                <button name="action" value="start" class="px-3 py-2 bg-sky-500/10 text-sky-400 border border-sky-500/20 rounded-lg">Prepare batch staging</button>
+            </form>
+        {% endif %}
+    {% endif %}
+</div>

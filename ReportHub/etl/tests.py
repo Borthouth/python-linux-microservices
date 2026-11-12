@@ -9,15 +9,25 @@ from unittest.mock import MagicMock, patch
 
 from bson import ObjectId
 from django.db import close_old_connections, connection, transaction
-from django.test import SimpleTestCase, TestCase, TransactionTestCase, skipUnlessDBFeature
+from django.db.models.deletion import ProtectedError
+from django.test import (
+    SimpleTestCase, TestCase, TransactionTestCase, override_settings, skipUnlessDBFeature,
+)
+from django.utils import timezone
 from kafka import TopicPartition
 import pandas as pd
 import sqlalchemy as sa
 
 from control_plane.forms import SourceProfileForm
 from control_plane.forms.pipeline_automations import PipelineAutomationForm
+from control_plane.metadata_guard import (
+    SourceMetadataCutoverPending,
+    acquire_source_metadata_lock,
+    source_metadata_write_guard,
+)
 from control_plane.models import (
     CdcExecutionFailure,
+    CdcSourceExternalOperation,
     CdcTableRebuild,
     CdcToBatchTableCheckpoint,
     CdcToBatchTransition,
@@ -29,10 +39,13 @@ from control_plane.models import (
 )
 from etl.tasks import (
     _run_scheduled_cdc_ingestion,
+    _rebuild_cdc_table,
     create_source_engine,
+    execute_cdc_to_batch_transition_task,
     backfill_source_to_clickhouse_task,
     ingest_source_to_clickhouse_task,
     introspect_source,
+    introspect_source_schema_task,
     map_to_clickhouse_type,
     parse_ingestion_watermark,
     read_mongo_chunks,
@@ -59,13 +72,27 @@ from etl.cdc import (
 )
 from etl.cdc_to_batch import (
     CdcToBatchCutoverAction,
+    CdcToBatchStepResult,
+    _field_signature,
+    _copy_cdc_to_batch_generation,
+    _cutover_cdc_to_batch_table,
+    _finalize_cdc_to_batch_generation,
+    _finalize_cdc_to_batch_transition,
+    _mark_cdc_to_batch_cutover_pending,
+    _run_cdc_to_batch_cutover_step,
     _stage_fields,
     checkpoint_cdc_to_batch_active_table,
     plan_cdc_to_batch_table_cutover,
     prepare_cdc_to_batch_transition,
     stage_cdc_to_batch_table,
 )
+from etl.cdc_external_operations import (
+    _begin_cdc_external_operation,
+    _cdc_external_operation_barrier,
+    _complete_cdc_external_operation,
+)
 from reports.models import ReportDefinition
+from reports.cutover_guard import report_query_guard
 
 
 class SourceProfileFormTests(SimpleTestCase):
@@ -917,6 +944,8 @@ class CdcConsumerTests(SimpleTestCase):
     def setUp(self):
         self.table = SimpleNamespace(
             pk=4,
+            source_id=12,
+            clickhouse_physical_table="",
             schema_name="public",
             table_name="events",
             primary_key_fields=["event_id"],
@@ -972,6 +1001,17 @@ class CdcConsumerTests(SimpleTestCase):
 
         self.assertIn("CREATE TABLE", clickhouse_client.command.call_args.args[0])
         self.assertTrue(self.table.cdc_managed)
+
+    def test_cdc_table_uses_configured_physical_generation(self):
+        self.table.clickhouse_physical_table = "rh_generation_123"
+        self.table.cdc_managed = False
+        clickhouse_client = MagicMock()
+        clickhouse_client.query.return_value.result_rows = [[0]]
+        physical_name, _ = _create_cdc_table(
+            clickhouse_client, self.profile, self.table, ["event_id", "value"]
+        )
+        self.assertEqual(physical_name, "`rh_generation_123`")
+        self.assertIn("`rh_generation_123`", clickhouse_client.command.call_args.args[0])
 
     def test_missing_cdc_table_is_not_recreated_with_old_offsets(self):
         self.table.cdc_managed = True
@@ -1308,6 +1348,1742 @@ class CdcToBatchCutoverPlanningTests(SimpleTestCase):
             plan_cdc_to_batch_table_cutover(self.checkpoint, "", "")
 
 
+class CdcToBatchFinalizationTests(TestCase):
+    def setUp(self):
+        self.source = SourceProfile.objects.create(
+            name="Cutover finalization source", db_type=DbChoice.POSTGRESQL,
+            host="localhost", port=5432, database_name="analytics",
+            username="cdc_user", ingestion_mode=IngestionMode.CDC,
+        )
+        self.tables = [
+            SourceTable.objects.create(
+                source=self.source, schema_name="public", table_name=name,
+                primary_key_fields=["id"], cdc_managed=True,
+                clickhouse_uses_replacing_merge_tree=True, incremental_ready=True,
+                incremental_watermark="123", cdc_connector_name=f"connector-{name}",
+            )
+            for name in ("events", "logs")
+        ]
+        for table in self.tables:
+            SourceField.objects.create(table=table, field_name="id", data_type="INTEGER")
+        self.transition = prepare_cdc_to_batch_transition(self.source.pk)
+        self.checkpoints = list(
+            self.transition.table_checkpoints.order_by("source_table_id")
+        )
+        self.uuids = {}
+        for table, checkpoint in zip(self.tables, self.checkpoints):
+            checkpoint.status = CdcToBatchTableCheckpoint.Status.CUTOVER
+            checkpoint.active_table_checked = True
+            checkpoint.active_uuid_before = f"old-{table.pk}"
+            checkpoint.staging_uuid = f"new-{table.pk}"
+            checkpoint.staging_row_count = 1
+            checkpoint.staging_schema = _field_signature(
+                self.source, _stage_fields(self.source, table), table
+            )
+            checkpoint.save()
+            self.uuids[f"source_{self.source.pk}__public_{table.table_name}"] = checkpoint.staging_uuid
+            self.uuids[checkpoint.staging_table] = checkpoint.active_uuid_before
+        self.transition.status = CdcToBatchTransition.Status.CUTOVER_PENDING
+        self.transition.last_error = "previous error"
+        self.transition.save()
+        self.client = MagicMock()
+        self.client.query.return_value.result_rows = [["Atomic"]]
+        for target, kwargs in (
+            ("etl.cdc_to_batch.clickhouse_connect.get_client", {"return_value": self.client}),
+            ("etl.cdc_to_batch._clickhouse_table_uuid", {
+                "side_effect": lambda client, name: self.uuids.get(name, "")
+            }),
+            ("etl.cdc_to_batch._validate_staging_table", {}),
+            ("etl.cdc_to_batch._validate_staging_row_count", {}),
+        ):
+            mocker = patch(target, **kwargs)
+            mocker.start()
+            self.addCleanup(mocker.stop)
+
+    def test_atomically_completes_metadata_and_preserves_connectors(self):
+        result = _finalize_cdc_to_batch_transition(self.transition.pk)
+        self.source.refresh_from_db()
+        self.transition.refresh_from_db()
+        self.assertEqual(result.status, CdcToBatchTransition.Status.SUCCEEDED)
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.BATCH)
+        self.assertEqual(self.transition.last_error, "")
+        for table in self.tables:
+            table.refresh_from_db()
+            self.assertFalse(table.cdc_managed)
+            self.assertFalse(table.clickhouse_uses_replacing_merge_tree)
+            self.assertFalse(table.incremental_ready)
+            self.assertIsNone(table.incremental_watermark)
+            self.assertEqual(table.cdc_connector_name, f"connector-{table.table_name}")
+        self.client.command.assert_not_called()
+        self.client.close.assert_called_once()
+        _finalize_cdc_to_batch_transition(self.transition.pk)
+        self.client.close.assert_called_once()
+
+    def test_rejects_unfinished_or_unexpected_table_identities(self):
+        for changes in (
+            {"status": CdcToBatchTableCheckpoint.Status.STAGED},
+            {"active_table_checked": False},
+            {"staging_uuid": "unexpected"},
+            {"staging_schema": {}},
+        ):
+            checkpoint = self.checkpoints[0]
+            old_values = {name: getattr(checkpoint, name) for name in changes}
+            CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint.pk).update(**changes)
+            with self.subTest(changes=changes), self.assertRaises(RuntimeError):
+                _finalize_cdc_to_batch_transition(self.transition.pk)
+            CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint.pk).update(**old_values)
+            self.source.refresh_from_db()
+            self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+            self.tables[0].refresh_from_db()
+            self.assertTrue(self.tables[0].cdc_managed)
+
+    def test_rejects_invalid_count_and_rolls_back_completion(self):
+        with patch("etl.cdc_to_batch._validate_staging_row_count",
+                   side_effect=[None, RuntimeError("row count changed")]):
+            with self.assertRaisesRegex(RuntimeError, "row count changed"):
+                _finalize_cdc_to_batch_transition(self.transition.pk)
+        self.source.refresh_from_db()
+        self.transition.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.CUTOVER_PENDING)
+        self.assertTrue(all(SourceTable.objects.get(pk=t.pk).cdc_managed for t in self.tables))
+
+    def test_rejects_missing_original_table_and_non_atomic_database(self):
+        self.uuids[self.checkpoints[0].staging_table] = ""
+        with self.assertRaisesRegex(RuntimeError, "Completed cutover tables changed"):
+            _finalize_cdc_to_batch_transition(self.transition.pk)
+        self.uuids[self.checkpoints[0].staging_table] = self.checkpoints[0].active_uuid_before
+        self.client.query.return_value.result_rows = [["Ordinary"]]
+        with self.assertRaisesRegex(RuntimeError, "Atomic ClickHouse database"):
+            _finalize_cdc_to_batch_transition(self.transition.pk)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+
+    def test_rejects_active_rebuild(self):
+        CdcTableRebuild.objects.create(
+            source_table=self.tables[0], connector_name="conflict",
+            topic_prefix="conflict", notification_topic="conflict-notifications",
+            consumer_group="conflict-group", staging_table="conflict-stage",
+        )
+        with self.assertRaisesRegex(RuntimeError, "active CDC table rebuild"):
+            _finalize_cdc_to_batch_transition(self.transition.pk)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+        self.client.query.assert_not_called()
+
+    def test_rejects_unresolved_cutover_command(self):
+        CdcToBatchTableCheckpoint.objects.filter(pk=self.checkpoints[0].pk).update(
+            cutover_command_inflight=True
+        )
+        with self.assertRaisesRegex(RuntimeError, "Not every transition table"):
+            _finalize_cdc_to_batch_transition(self.transition.pk)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+
+    def test_database_failure_rolls_back_all_metadata(self):
+        with patch.object(CdcToBatchTransition, "save", side_effect=RuntimeError("database failure")):
+            with self.assertRaisesRegex(RuntimeError, "database failure"):
+                _finalize_cdc_to_batch_transition(self.transition.pk)
+        self.source.refresh_from_db()
+        self.transition.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.CUTOVER_PENDING)
+        for table in self.tables:
+            table.refresh_from_db()
+            self.assertTrue(table.cdc_managed)
+            self.assertTrue(table.incremental_ready)
+            self.assertEqual(table.incremental_watermark, "123")
+
+    def test_rejects_changed_membership_and_ineligible_transition(self):
+        SourceTable.objects.create(
+            source=self.source, schema_name="public", table_name="new_table"
+        )
+        with self.assertRaisesRegex(RuntimeError, "table list changed"):
+            _finalize_cdc_to_batch_transition(self.transition.pk)
+        self.source.tables.filter(table_name="new_table").delete()
+        self.transition.status = CdcToBatchTransition.Status.PREPARING
+        self.transition.save(update_fields=["status"])
+        with self.assertRaisesRegex(RuntimeError, "not eligible"):
+            _finalize_cdc_to_batch_transition(self.transition.pk)
+
+
+@skipUnlessDBFeature("has_select_for_update")
+@override_settings(CDC_EXTERNAL_OPERATION_TRACKING=True, CDC_TO_BATCH_EXECUTOR_ENABLED=True)
+class CdcToBatchExecutorTests(TransactionTestCase):
+    def setUp(self):
+        CdcToBatchFinalizationTests.setUp(self)
+        self.transition.status = CdcToBatchTransition.Status.PREPARING
+        self.transition.save(update_fields=["status"])
+        for table, checkpoint in zip(self.tables, self.checkpoints):
+            checkpoint.status = CdcToBatchTableCheckpoint.Status.PENDING
+            checkpoint.active_table_checked = False
+            checkpoint.active_uuid_before = ""
+            checkpoint.save(update_fields=["status", "active_table_checked", "active_uuid_before"])
+            self.uuids[f"source_{self.source.pk}__public_{table.table_name}"] = f"old-{table.pk}"
+            self.uuids[checkpoint.staging_table] = checkpoint.staging_uuid
+
+        def stage(checkpoint_pk, batch_size=None, *, verification_only=False):
+            if not verification_only:
+                CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint_pk).update(
+                    status=CdcToBatchTableCheckpoint.Status.STAGED
+                )
+
+        def exchange(sql):
+            for table, checkpoint in zip(self.tables, self.checkpoints):
+                active = f"source_{self.source.pk}__public_{table.table_name}"
+                if f"`{active}`" in sql and f"`{checkpoint.staging_table}`" in sql:
+                    self.uuids[active], self.uuids[checkpoint.staging_table] = (
+                        self.uuids[checkpoint.staging_table], self.uuids[active]
+                    )
+                    return
+            raise AssertionError(f"Unexpected ClickHouse command: {sql}")
+
+        self.client.command.side_effect = exchange
+        self.stage = patch("etl.cdc_to_batch.stage_cdc_to_batch_table", side_effect=stage)
+        self.stage_mock = self.stage.start()
+        self.addCleanup(self.stage.stop)
+        self.enqueue = patch("etl.tasks.execute_cdc_to_batch_transition_task.apply_async")
+        self.enqueue_mock = self.enqueue.start()
+        self.addCleanup(self.enqueue.stop)
+        self.fence = patch("etl.tasks._require_cdc_to_batch_deployment_fence")
+        self.fence.start()
+        self.addCleanup(self.fence.stop)
+
+    def run_step(self):
+        return execute_cdc_to_batch_transition_task.apply(
+            args=[self.transition.pk], kwargs={"batch_size": 5}, throw=True
+        ).get()
+
+    def test_runs_staging_cutover_and_atomic_finalization(self):
+        self.assertIn("Staged checkpoint", self.run_step())
+        self.assertIn("Staged checkpoint", self.run_step())
+        self.assertIn("Cutover is pending", self.run_step())
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.CUTOVER_PENDING)
+        self.assertIn("table cutover completed", self.run_step())
+        self.assertIn("table cutover completed", self.run_step())
+        self.assertIn("completed", self.run_step())
+        self.source.refresh_from_db()
+        self.transition.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.BATCH)
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.SUCCEEDED)
+        self.assertEqual(self.client.command.call_count, 2)
+        self.assertEqual(self.enqueue_mock.call_count, 5)
+        for call in self.enqueue_mock.call_args_list:
+            self.assertEqual(call.kwargs["queue"], "queue_backfill")
+            self.assertEqual(call.kwargs["kwargs"], {"batch_size": 5})
+        self.assertIn("completed", self.run_step())
+        self.assertEqual(self.enqueue_mock.call_count, 5)
+
+    def test_disabled_gate_prevents_any_work(self):
+        with override_settings(CDC_TO_BATCH_EXECUTOR_ENABLED=False):
+            with self.assertRaisesRegex(RuntimeError, "executor is not enabled"):
+                self.run_step()
+        with override_settings(CDC_EXTERNAL_OPERATION_TRACKING=False):
+            with self.assertRaisesRegex(RuntimeError, "tracking is not enabled"):
+                self.run_step()
+        self.assertFalse(self.transition.table_checkpoints.exclude(
+            status=CdcToBatchTableCheckpoint.Status.PENDING
+        ).exists())
+        self.enqueue_mock.assert_not_called()
+        self.client.command.assert_not_called()
+
+    @patch("etl.tasks.get_etl_logger")
+    def test_missing_deployment_fence_blocks_preparing_and_pending(self, logger):
+        self.fence.stop()
+        for status in (
+            CdcToBatchTransition.Status.PREPARING,
+            CdcToBatchTransition.Status.CUTOVER_PENDING,
+            CdcToBatchTransition.Status.SUCCEEDED,
+        ):
+            for generation in (False, True):
+                with self.subTest(status=status, generation=generation):
+                    CdcToBatchTransition.objects.filter(pk=self.transition.pk).update(status=status)
+                    with override_settings(CDC_TO_BATCH_GENERATION_EXECUTOR_ENABLED=generation):
+                        with self.assertRaisesRegex(RuntimeError, "deployment fencing"):
+                            self.run_step()
+                    self.transition.refresh_from_db()
+                    self.assertEqual(self.transition.status, status)
+                    if status != CdcToBatchTransition.Status.SUCCEEDED:
+                        self.assertIn("deployment fencing", self.transition.last_error)
+                    self.assertEqual(self.transition.table_checkpoints.filter(
+                        status=CdcToBatchTableCheckpoint.Status.PENDING
+                    ).count(), len(self.checkpoints))
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+        self.stage_mock.assert_not_called()
+        self.enqueue_mock.assert_not_called()
+        self.client.command.assert_not_called()
+
+    @patch("etl.tasks.get_etl_logger")
+    def test_broker_failure_keeps_staging_checkpoint_for_explicit_resume(self, logger):
+        self.enqueue_mock.side_effect = RuntimeError("broker unavailable")
+        with self.assertRaisesRegex(RuntimeError, "broker unavailable"):
+            self.run_step()
+        self.checkpoints[0].refresh_from_db()
+        self.assertEqual(self.checkpoints[0].status, CdcToBatchTableCheckpoint.Status.STAGED)
+        self.transition.refresh_from_db()
+        self.assertIn("Transition failed", self.transition.last_error)
+        self.enqueue_mock.side_effect = None
+        self.assertIn("Staged checkpoint", self.run_step())
+        self.checkpoints[1].refresh_from_db()
+        self.assertEqual(self.checkpoints[1].status, CdcToBatchTableCheckpoint.Status.STAGED)
+
+    @patch("etl.tasks.get_etl_logger")
+    def test_broker_failure_after_pending_can_resume(self, logger):
+        self.run_step()
+        self.run_step()
+        self.enqueue_mock.side_effect = RuntimeError("broker unavailable")
+        with self.assertRaisesRegex(RuntimeError, "broker unavailable"):
+            self.run_step()
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.CUTOVER_PENDING)
+        self.assertIn("Transition failed", self.transition.last_error)
+        self.enqueue_mock.side_effect = None
+        self.assertIn("table cutover completed", self.run_step())
+        self.assertEqual(self.client.command.call_count, 1)
+
+    @patch("etl.tasks.get_etl_logger")
+    def test_broker_failure_after_exchange_resumes_next_checkpoint(self, logger):
+        self.run_step()
+        self.run_step()
+        self.run_step()
+        self.enqueue_mock.side_effect = RuntimeError("broker unavailable")
+        with self.assertRaisesRegex(RuntimeError, "broker unavailable"):
+            self.run_step()
+        self.checkpoints[0].refresh_from_db()
+        self.assertEqual(self.checkpoints[0].status, CdcToBatchTableCheckpoint.Status.CUTOVER)
+        self.enqueue_mock.side_effect = None
+        self.assertIn("table cutover completed", self.run_step())
+        self.assertEqual(self.client.command.call_count, 2)
+
+    @patch("etl.tasks.get_etl_logger")
+    def test_uncertain_exchange_stops_automatic_continuation(self, logger):
+        self.run_step()
+        self.run_step()
+        self.run_step()
+        self.enqueue_mock.reset_mock()
+        exchange = self.client.command.side_effect
+
+        def lose_response(sql):
+            exchange(sql)
+            raise RuntimeError("response lost")
+
+        self.client.command.side_effect = lose_response
+        with self.assertRaisesRegex(RuntimeError, "response lost"):
+            self.run_step()
+        self.checkpoints[0].refresh_from_db()
+        self.assertTrue(self.checkpoints[0].cutover_command_inflight)
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.CUTOVER_PENDING)
+        self.assertIn("Transition failed", self.transition.last_error)
+        self.enqueue_mock.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            self.run_step()
+        self.client.command.assert_called_once()
+
+    @patch("etl.tasks.get_etl_logger")
+    def test_active_operation_blocks_pending_until_explicit_retry(self, logger):
+        self.run_step()
+        self.run_step()
+        operation = _begin_cdc_external_operation(
+            self.source.pk, CdcSourceExternalOperation.Kind.REPORT
+        )
+        self.enqueue_mock.reset_mock()
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            self.run_step()
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+        self.enqueue_mock.assert_not_called()
+        _complete_cdc_external_operation(self.source.pk, operation.pk)
+        self.assertIn("Cutover is pending", self.run_step())
+
+
+@skipUnlessDBFeature("has_select_for_update")
+@override_settings(CDC_EXTERNAL_OPERATION_TRACKING=True)
+class CdcToBatchCutoverStepTests(TransactionTestCase):
+    def setUp(self):
+        CdcToBatchFinalizationTests.setUp(self)
+        self.active_by_checkpoint = {}
+        for table, checkpoint in zip(self.tables, self.checkpoints):
+            checkpoint.status = CdcToBatchTableCheckpoint.Status.STAGED
+            checkpoint.save(update_fields=["status"])
+            active = f"source_{self.source.pk}__public_{table.table_name}"
+            self.active_by_checkpoint[checkpoint.pk] = active
+            self.uuids[active] = checkpoint.active_uuid_before
+            self.uuids[checkpoint.staging_table] = checkpoint.staging_uuid
+
+        def execute(sql):
+            for checkpoint in self.checkpoints:
+                active = self.active_by_checkpoint[checkpoint.pk]
+                if f"`{active}`" in sql and f"`{checkpoint.staging_table}`" in sql:
+                    self.uuids[active], self.uuids[checkpoint.staging_table] = (
+                        self.uuids[checkpoint.staging_table], self.uuids[active]
+                    )
+                    return
+            raise AssertionError(f"Unexpected ClickHouse command: {sql}")
+
+        self.client.command.side_effect = execute
+
+    def test_runs_one_table_per_step_then_finalizes_and_retries_success(self):
+        for index in range(2):
+            self.assertEqual(
+                _run_cdc_to_batch_cutover_step(self.transition.pk),
+                CdcToBatchStepResult.TABLE_CUTOVER,
+            )
+            self.source.refresh_from_db()
+            self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+            self.assertEqual(self.client.command.call_count, index + 1)
+            self.checkpoints[index].refresh_from_db()
+            self.assertEqual(self.checkpoints[index].status, CdcToBatchTableCheckpoint.Status.CUTOVER)
+        self.assertEqual(
+            _run_cdc_to_batch_cutover_step(self.transition.pk), CdcToBatchStepResult.SUCCEEDED
+        )
+        self.source.refresh_from_db()
+        self.transition.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.BATCH)
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.SUCCEEDED)
+        self.assertEqual(
+            _run_cdc_to_batch_cutover_step(self.transition.pk), CdcToBatchStepResult.SUCCEEDED
+        )
+        self.assertEqual(self.client.command.call_count, 2)
+
+    def test_lost_response_blocks_all_further_steps_and_finalization(self):
+        execute = self.client.command.side_effect
+
+        def lose_response(sql):
+            execute(sql)
+            raise RuntimeError("response lost")
+
+        self.client.command.side_effect = lose_response
+        with self.assertRaisesRegex(RuntimeError, "response lost"):
+            _run_cdc_to_batch_cutover_step(self.transition.pk)
+        self.checkpoints[0].refresh_from_db()
+        self.assertTrue(self.checkpoints[0].cutover_command_inflight)
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            _run_cdc_to_batch_cutover_step(self.transition.pk)
+        self.checkpoints[1].refresh_from_db()
+        self.assertEqual(self.checkpoints[1].status, CdcToBatchTableCheckpoint.Status.STAGED)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+        self.client.command.assert_called_once()
+
+    def test_completion_failure_resumes_without_repeating_exchanges(self):
+        for _ in range(2):
+            _run_cdc_to_batch_cutover_step(self.transition.pk)
+        with patch("etl.cdc_to_batch._validate_staging_row_count",
+                   side_effect=RuntimeError("validation failed")):
+            with self.assertRaisesRegex(RuntimeError, "validation failed"):
+                _run_cdc_to_batch_cutover_step(self.transition.pk)
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.CUTOVER_PENDING)
+        self.assertEqual(
+            _run_cdc_to_batch_cutover_step(self.transition.pk), CdcToBatchStepResult.SUCCEEDED
+        )
+        self.assertEqual(self.client.command.call_count, 2)
+
+    def test_reports_remain_blocked_until_all_tables_and_metadata_are_finalized(self):
+        report = ReportDefinition.objects.create(
+            name="Stepped cutover report", source=self.source, base_table=self.tables[0],
+            selected_fields=["id"],
+        )
+        for _ in range(2):
+            _run_cdc_to_batch_cutover_step(self.transition.pk)
+            with self.assertRaisesRegex(RuntimeError, "cutover is pending"):
+                with report_query_guard(report):
+                    pass
+        _run_cdc_to_batch_cutover_step(self.transition.pk)
+        with report_query_guard(report) as current:
+            self.assertFalse(current.base_table.cdc_managed)
+
+    def test_rejects_bad_state_and_enclosing_transaction(self):
+        with override_settings(CDC_EXTERNAL_OPERATION_TRACKING=False):
+            with self.assertRaisesRegex(RuntimeError, "tracking is not enabled"):
+                _run_cdc_to_batch_cutover_step(self.transition.pk)
+        with transaction.atomic():
+            with self.assertRaisesRegex(RuntimeError, "inside a database transaction"):
+                _run_cdc_to_batch_cutover_step(self.transition.pk)
+        self.transition.status = CdcToBatchTransition.Status.PREPARING
+        self.transition.save(update_fields=["status"])
+        with self.assertRaisesRegex(RuntimeError, "not pending"):
+            _run_cdc_to_batch_cutover_step(self.transition.pk)
+        self.transition.status = CdcToBatchTransition.Status.CUTOVER_PENDING
+        self.transition.save(update_fields=["status"])
+        self.checkpoints[1].status = CdcToBatchTableCheckpoint.Status.PENDING
+        self.checkpoints[1].save(update_fields=["status"])
+        with self.assertRaisesRegex(RuntimeError, "not staged"):
+            _run_cdc_to_batch_cutover_step(self.transition.pk)
+        self.client.command.assert_not_called()
+
+    def test_unresolved_external_operation_blocks_exchange_and_finalization(self):
+        operation = CdcSourceExternalOperation.objects.create(
+            source=self.source, kind=CdcSourceExternalOperation.Kind.INGESTION
+        )
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            _run_cdc_to_batch_cutover_step(self.transition.pk)
+        self.client.command.assert_not_called()
+        CdcToBatchTableCheckpoint.objects.filter(transition=self.transition).update(
+            status=CdcToBatchTableCheckpoint.Status.CUTOVER
+        )
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            _run_cdc_to_batch_cutover_step(self.transition.pk)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+        operation.delete()
+
+    def test_another_inflight_command_blocks_direct_exchange(self):
+        CdcToBatchTableCheckpoint.objects.filter(pk=self.checkpoints[1].pk).update(
+            cutover_command_inflight=True
+        )
+        with self.assertRaisesRegex(RuntimeError, "another ClickHouse|Another ClickHouse"):
+            _cutover_cdc_to_batch_table(self.checkpoints[0].pk)
+        self.client.command.assert_not_called()
+
+    def test_concurrent_step_cannot_repeat_an_inflight_exchange(self):
+        command_started, release_command = Event(), Event()
+        execute = self.client.command.side_effect
+
+        def slow_command(sql):
+            command_started.set()
+            if not release_command.wait(timeout=10):
+                raise TimeoutError("Command release timed out.")
+            execute(sql)
+
+        def first_step():
+            close_old_connections()
+            try:
+                return _run_cdc_to_batch_cutover_step(self.transition.pk)
+            finally:
+                close_old_connections()
+
+        self.client.command.side_effect = slow_command
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            first = pool.submit(first_step)
+            try:
+                self.assertTrue(command_started.wait(timeout=10))
+                with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+                    _run_cdc_to_batch_cutover_step(self.transition.pk)
+            finally:
+                release_command.set()
+            self.assertEqual(first.result(timeout=10), CdcToBatchStepResult.TABLE_CUTOVER)
+        self.client.command.assert_called_once()
+
+
+@skipUnlessDBFeature("has_select_for_update")
+@override_settings(CDC_EXTERNAL_OPERATION_TRACKING=True)
+class CdcToBatchPendingCutoverTests(TransactionTestCase):
+    def setUp(self):
+        CdcToBatchFinalizationTests.setUp(self)
+        self.transition.status = CdcToBatchTransition.Status.PREPARING
+        self.transition.save(update_fields=["status"])
+        for table, checkpoint in zip(self.tables, self.checkpoints):
+            checkpoint.status = CdcToBatchTableCheckpoint.Status.STAGED
+            checkpoint.active_table_checked = False
+            checkpoint.active_uuid_before = ""
+            checkpoint.save(update_fields=["status", "active_table_checked", "active_uuid_before"])
+            active_name = f"source_{self.source.pk}__public_{table.table_name}"
+            self.uuids[active_name] = f"old-{table.pk}"
+            self.uuids[checkpoint.staging_table] = checkpoint.staging_uuid
+
+    def test_commits_all_observations_and_pending_together(self):
+        result = _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        self.assertEqual(result.status, CdcToBatchTransition.Status.CUTOVER_PENDING)
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.last_error, "")
+        for table, checkpoint in zip(self.tables, self.checkpoints):
+            checkpoint.refresh_from_db()
+            self.assertTrue(checkpoint.active_table_checked)
+            self.assertEqual(checkpoint.active_uuid_before, f"old-{table.pk}")
+        self.client.command.assert_not_called()
+        self.client.close.assert_called_once()
+
+    def test_pre_synchronous_staging_cannot_enter_pending_cutover(self):
+        checkpoint = self.checkpoints[0]
+        signature = dict(checkpoint.staging_schema)
+        del signature["synchronous_inserts"]
+        CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint.pk).update(
+            staging_schema=signature
+        )
+        with self.assertRaisesRegex(RuntimeError, "configuration changed"):
+            _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+        self.assertFalse(
+            self.transition.table_checkpoints.filter(active_table_checked=True).exists()
+        )
+        self.client.command.assert_not_called()
+
+    def test_metadata_writer_finishes_before_pending_revalidates(self):
+        entered, release, waiting = Event(), Event(), Event()
+
+        def metadata_writer():
+            close_old_connections()
+            try:
+                with source_metadata_write_guard(self.source.pk):
+                    entered.set()
+                    if not release.wait(10):
+                        raise TimeoutError("Metadata writer timed out.")
+                    SourceField.objects.filter(table=self.tables[0], field_name="id").update(
+                        data_type="VARCHAR"
+                    )
+            finally:
+                close_old_connections()
+
+        def cutover():
+            close_old_connections()
+            try:
+                def watch(execute, sql, params, many, context):
+                    if "pg_advisory_xact_lock(" in sql:
+                        waiting.set()
+                    return execute(sql, params, many, context)
+
+                with connection.execute_wrapper(watch):
+                    return _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            writer = pool.submit(metadata_writer)
+            try:
+                self.assertTrue(entered.wait(10))
+                pending = pool.submit(cutover)
+                self.assertTrue(waiting.wait(10))
+                self.assertFalse(pending.done())
+            finally:
+                release.set()
+            writer.result(timeout=10)
+            with self.assertRaisesRegex(RuntimeError, "configuration changed"):
+                pending.result(timeout=10)
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+
+    def test_waiting_metadata_writer_rechecks_pending_after_lock(self):
+        locked, release, waiting = Event(), Event(), Event()
+
+        def mark_pending():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    acquire_source_metadata_lock(self.source.pk)
+                    locked.set()
+                    if not release.wait(10):
+                        raise TimeoutError("Pending-state transaction timed out.")
+                    CdcToBatchTransition.objects.filter(pk=self.transition.pk).update(
+                        status=CdcToBatchTransition.Status.CUTOVER_PENDING
+                    )
+            finally:
+                close_old_connections()
+
+        def metadata_writer():
+            close_old_connections()
+            try:
+                def watch(execute, sql, params, many, context):
+                    if "pg_advisory_xact_lock(" in sql:
+                        waiting.set()
+                    return execute(sql, params, many, context)
+
+                with connection.execute_wrapper(watch):
+                    with source_metadata_write_guard(self.source.pk):
+                        SourceField.objects.filter(table=self.tables[0]).update(data_type="VARCHAR")
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = pool.submit(mark_pending)
+            try:
+                self.assertTrue(locked.wait(10))
+                writer = pool.submit(metadata_writer)
+                self.assertTrue(waiting.wait(10))
+                self.assertFalse(writer.done())
+            finally:
+                release.set()
+            pending.result(timeout=10)
+            with self.assertRaises(SourceMetadataCutoverPending):
+                writer.result(timeout=10)
+        self.assertEqual(
+            SourceField.objects.get(table=self.tables[0], field_name="id").data_type, "INTEGER"
+        )
+
+    @patch("etl.tasks.introspect_source")
+    @patch("etl.tasks.get_etl_logger")
+    @patch("etl.tasks.set_task_progress")
+    def test_pending_cutover_blocks_introspection_and_records_failure(
+        self, progress, logger, introspect
+    ):
+        _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        with self.assertRaises(SourceMetadataCutoverPending):
+            with source_metadata_write_guard(self.source.pk):
+                self.fail("A pending cutover must block metadata writes.")
+        result = introspect_source_schema_task.apply(args=[self.source.pk], throw=True).get()
+        self.assertIn("cutover is pending", result)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.last_sync_status, "FAILED")
+        introspect.assert_not_called()
+
+    def test_rejects_tracking_disabled_and_outer_transactions(self):
+        with override_settings(CDC_EXTERNAL_OPERATION_TRACKING=False):
+            with self.assertRaisesRegex(RuntimeError, "tracking is not enabled"):
+                _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        with transaction.atomic():
+            with self.assertRaisesRegex(RuntimeError, "durable atomic block"):
+                _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        self.client.query.assert_not_called()
+
+    def test_unresolved_operation_blocks_pending(self):
+        operation = _begin_cdc_external_operation(
+            self.source.pk, CdcSourceExternalOperation.Kind.INGESTION
+        )
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+        self.client.query.assert_not_called()
+        _complete_cdc_external_operation(self.source.pk, operation.pk)
+        _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+
+    def test_unresolved_report_blocks_pending(self):
+        operation = _begin_cdc_external_operation(
+            self.source.pk, CdcSourceExternalOperation.Kind.REPORT
+        )
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+        self.client.query.assert_not_called()
+        _complete_cdc_external_operation(self.source.pk, operation.pk)
+
+    def test_later_validation_failure_rolls_back_earlier_observations(self):
+        self.uuids[self.checkpoints[1].staging_table] = "unexpected"
+        with self.assertRaisesRegex(RuntimeError, "staged ClickHouse table"):
+            _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+        for checkpoint in self.checkpoints:
+            checkpoint.refresh_from_db()
+            self.assertFalse(checkpoint.active_table_checked)
+            self.assertEqual(checkpoint.active_uuid_before, "")
+        self.client.close.assert_called_once()
+
+    def test_bad_staged_row_count_rolls_back_pending(self):
+        with patch("etl.cdc_to_batch._validate_staging_row_count",
+                   side_effect=[None, RuntimeError("row count changed")]):
+            with self.assertRaisesRegex(RuntimeError, "row count changed"):
+                _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+        self.checkpoints[0].refresh_from_db()
+        self.assertFalse(self.checkpoints[0].active_table_checked)
+
+    def test_missing_keyless_active_table_is_observed(self):
+        table, checkpoint = self.tables[0], self.checkpoints[0]
+        table.cdc_managed = False
+        table.primary_key_fields = []
+        table.save(update_fields=["cdc_managed", "primary_key_fields"])
+        checkpoint.staging_schema = _field_signature(
+            self.source, _stage_fields(self.source, table), table
+        )
+        checkpoint.save(update_fields=["staging_schema"])
+        del self.uuids[f"source_{self.source.pk}__public_{table.table_name}"]
+        _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        checkpoint.refresh_from_db()
+        self.assertTrue(checkpoint.active_table_checked)
+        self.assertEqual(checkpoint.active_uuid_before, "")
+
+    def test_rejects_changed_previous_active_observation(self):
+        checkpoint = self.checkpoints[0]
+        checkpoint.active_table_checked = True
+        checkpoint.active_uuid_before = "outdated"
+        checkpoint.save(update_fields=["active_table_checked", "active_uuid_before"])
+        with self.assertRaisesRegex(RuntimeError, "changed after observation"):
+            _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+
+    def test_rejects_invalid_checkpoint_and_colliding_names(self):
+        checkpoint = self.checkpoints[0]
+        CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint.pk).update(
+            cutover_command_inflight=True
+        )
+        with self.assertRaisesRegex(RuntimeError, "not staged"):
+            _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint.pk).update(
+            cutover_command_inflight=False,
+            staging_table=f"source_{self.source.pk}__public_{self.tables[1].table_name}",
+        )
+        with self.assertRaisesRegex(RuntimeError, "names must be distinct"):
+            _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+
+    def test_rejects_rebuild_and_table_membership_changes(self):
+        rebuild = CdcTableRebuild.objects.create(
+            source_table=self.tables[0], connector_name="pending-conflict",
+            topic_prefix="pending-conflict", notification_topic="pending-notifications",
+            consumer_group="pending-group", staging_table="pending-stage",
+        )
+        with self.assertRaisesRegex(RuntimeError, "active CDC table rebuild"):
+            _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        rebuild.delete()
+        SourceTable.objects.create(source=self.source, schema_name="public", table_name="new")
+        with self.assertRaisesRegex(RuntimeError, "table list changed"):
+            _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+        self.client.query.assert_not_called()
+
+    def test_report_reader_finishes_before_pending_commit(self):
+        report = ReportDefinition.objects.create(
+            name="Pending cutover report", source=self.source, base_table=self.tables[0],
+            selected_fields=["id"],
+        )
+        report_started, release_report, pending_waiting = Event(), Event(), Event()
+
+        def guarded_report():
+            close_old_connections()
+            try:
+                with report_query_guard(report):
+                    report_started.set()
+                    if not release_report.wait(timeout=10):
+                        raise TimeoutError("Report release timed out.")
+            finally:
+                close_old_connections()
+
+        def watch_queries(execute, sql, params, many, context):
+            if "pg_advisory_xact_lock(" in sql:
+                pending_waiting.set()
+            return execute(sql, params, many, context)
+
+        def mark_pending():
+            close_old_connections()
+            try:
+                with connection.execute_wrapper(watch_queries):
+                    return _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reader = pool.submit(guarded_report)
+            try:
+                self.assertTrue(report_started.wait(timeout=10))
+                pending = pool.submit(mark_pending)
+                self.assertTrue(pending_waiting.wait(timeout=10))
+                self.assertFalse(pending.done())
+            finally:
+                release_report.set()
+            reader.result(timeout=10)
+            self.assertEqual(
+                pending.result(timeout=10).status, CdcToBatchTransition.Status.CUTOVER_PENDING
+            )
+        with self.assertRaisesRegex(RuntimeError, "cutover is pending"):
+            with report_query_guard(report):
+                pass
+
+    def test_pending_commit_prevents_writer_registration(self):
+        validating, release_validation, writer_waiting = Event(), Event(), Event()
+
+        def validate(*args, **kwargs):
+            validating.set()
+            if not release_validation.wait(timeout=10):
+                raise TimeoutError("Validation release timed out.")
+
+        def mark_pending():
+            close_old_connections()
+            try:
+                return _mark_cdc_to_batch_cutover_pending(self.transition.pk)
+            finally:
+                close_old_connections()
+
+        def watch_queries(execute, sql, params, many, context):
+            if "FOR UPDATE" in sql and "control_plane_sourceprofile" in sql:
+                writer_waiting.set()
+            return execute(sql, params, many, context)
+
+        def register_writer():
+            close_old_connections()
+            try:
+                with connection.execute_wrapper(watch_queries):
+                    return _begin_cdc_external_operation(
+                        self.source.pk, CdcSourceExternalOperation.Kind.INGESTION
+                    )
+            finally:
+                close_old_connections()
+
+        with patch("etl.cdc_to_batch._validate_staging_table", side_effect=validate), \
+             ThreadPoolExecutor(max_workers=2) as pool:
+            pending = pool.submit(mark_pending)
+            try:
+                self.assertTrue(validating.wait(timeout=10))
+                writer = pool.submit(register_writer)
+                self.assertTrue(writer_waiting.wait(timeout=10))
+                self.assertFalse(writer.done())
+            finally:
+                release_validation.set()
+            self.assertEqual(
+                pending.result(timeout=10).status, CdcToBatchTransition.Status.CUTOVER_PENDING
+            )
+            with self.assertRaisesRegex(RuntimeError, "cutover is pending"):
+                writer.result(timeout=10)
+        self.assertFalse(CdcSourceExternalOperation.objects.filter(source=self.source).exists())
+
+
+@skipUnlessDBFeature("has_select_for_update")
+class CdcExternalOperationTests(TransactionTestCase):
+    def setUp(self):
+        self.source = SourceProfile.objects.create(
+            name="External operation source", db_type=DbChoice.POSTGRESQL,
+            host="localhost", port=5432, database_name="analytics",
+            username="cdc_user", ingestion_mode=IngestionMode.CDC,
+        )
+        self.other = SourceProfile.objects.create(
+            name="Other external operation source", db_type=DbChoice.POSTGRESQL,
+            host="localhost", port=5432, database_name="analytics",
+            username="cdc_user", ingestion_mode=IngestionMode.CDC,
+        )
+        self.transition = CdcToBatchTransition.objects.create(source=self.source)
+
+    def begin(self, source=None):
+        return _begin_cdc_external_operation(
+            (source or self.source).pk,
+            CdcSourceExternalOperation.Kind.INGESTION,
+            task_id="test-task",
+        )
+
+    def test_record_is_visible_and_blocks_only_its_source(self):
+        operation = self.begin()
+
+        def verify_from_other_session():
+            close_old_connections()
+            try:
+                self.assertTrue(CdcSourceExternalOperation.objects.filter(pk=operation.pk).exists())
+                with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+                    with _cdc_external_operation_barrier(self.source.pk):
+                        self.fail("An unresolved operation must block the barrier.")
+                with _cdc_external_operation_barrier(self.other.pk) as source:
+                    self.assertEqual(source.pk, self.other.pk)
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(verify_from_other_session).result(timeout=10)
+        _complete_cdc_external_operation(self.source.pk, operation.pk)
+        with _cdc_external_operation_barrier(self.source.pk):
+            pass
+
+    def test_unresolved_record_protects_source_from_deletion(self):
+        operation = self.begin()
+        with self.assertRaises(ProtectedError):
+            self.source.delete()
+        _complete_cdc_external_operation(self.source.pk, operation.pk)
+        self.source.delete()
+
+    def test_invalid_operation_cannot_clear_another_sources_record(self):
+        operation = self.begin()
+        with self.assertRaises(CdcSourceExternalOperation.DoesNotExist):
+            _complete_cdc_external_operation(self.other.pk, operation.pk)
+        self.assertTrue(CdcSourceExternalOperation.objects.filter(pk=operation.pk).exists())
+        with self.assertRaisesRegex(ValueError, "kind"):
+            _begin_cdc_external_operation(self.source.pk, "invalid")
+        with self.assertRaisesRegex(ValueError, "task ID"):
+            _begin_cdc_external_operation(self.source.pk, "INGESTION", "x" * 256)
+
+    def test_pending_or_ineligible_source_rejects_new_operations(self):
+        self.transition.status = CdcToBatchTransition.Status.CUTOVER_PENDING
+        self.transition.save(update_fields=["status"])
+        with self.assertRaisesRegex(RuntimeError, "cutover is pending"):
+            self.begin()
+        self.transition.status = CdcToBatchTransition.Status.PREPARING
+        self.transition.save(update_fields=["status"])
+        for changes in ({"is_active": False}, {"ingestion_mode": IngestionMode.BATCH}):
+            with self.subTest(changes=changes):
+                SourceProfile.objects.filter(pk=self.source.pk).update(**changes)
+                with self.assertRaisesRegex(RuntimeError, "not eligible"):
+                    self.begin()
+                SourceProfile.objects.filter(pk=self.source.pk).update(
+                    is_active=True, ingestion_mode=IngestionMode.CDC
+                )
+        self.assertFalse(CdcSourceExternalOperation.objects.exists())
+
+    def test_primitives_reject_enclosing_transactions(self):
+        operation = self.begin()
+        with transaction.atomic():
+            with self.assertRaisesRegex(RuntimeError, "durable atomic block"):
+                self.begin()
+            with self.assertRaisesRegex(RuntimeError, "durable atomic block"):
+                _complete_cdc_external_operation(self.source.pk, operation.pk)
+            with self.assertRaisesRegex(RuntimeError, "durable atomic block"):
+                with _cdc_external_operation_barrier(self.source.pk):
+                    pass
+        self.assertTrue(CdcSourceExternalOperation.objects.filter(pk=operation.pk).exists())
+
+    def test_barrier_rollback_does_not_leave_source_pending(self):
+        with self.assertRaisesRegex(RuntimeError, "abort cutover"):
+            with _cdc_external_operation_barrier(self.source.pk):
+                CdcToBatchTransition.objects.filter(pk=self.transition.pk).update(
+                    status=CdcToBatchTransition.Status.CUTOVER_PENDING
+                )
+                raise RuntimeError("abort cutover")
+        self.transition.refresh_from_db()
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+        operation = self.begin()
+        self.assertTrue(CdcSourceExternalOperation.objects.filter(pk=operation.pk).exists())
+
+    def test_primitives_fail_closed_without_row_lock_support(self):
+        with patch.object(connection.features, "has_select_for_update", False):
+            with self.assertRaisesRegex(RuntimeError, "requires row locks"):
+                self.begin()
+            with self.assertRaisesRegex(RuntimeError, "requires row locks"):
+                with _cdc_external_operation_barrier(self.source.pk):
+                    pass
+            with self.assertRaisesRegex(RuntimeError, "requires row locks"):
+                _complete_cdc_external_operation(self.source.pk, uuid4())
+
+    def test_barrier_waits_for_registration_and_then_rejects_it(self):
+        inserted = Event()
+        barrier_waiting = Event()
+        release_registration = Event()
+
+        def watch_registration(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if "INSERT INTO" in sql and "control_plane_cdcsourceexternaloperation" in sql:
+                inserted.set()
+                if not release_registration.wait(timeout=10):
+                    raise TimeoutError("Registration release timed out.")
+            return result
+
+        def watch_barrier(execute, sql, params, many, context):
+            if "FOR UPDATE" in sql and "control_plane_sourceprofile" in sql:
+                barrier_waiting.set()
+            return execute(sql, params, many, context)
+
+        def register():
+            close_old_connections()
+            try:
+                with connection.execute_wrapper(watch_registration):
+                    return self.begin()
+            finally:
+                close_old_connections()
+
+        def cutover():
+            close_old_connections()
+            try:
+                with connection.execute_wrapper(watch_barrier):
+                    with _cdc_external_operation_barrier(self.source.pk):
+                        raise AssertionError("Barrier admitted an unresolved operation.")
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            registration = pool.submit(register)
+            try:
+                self.assertTrue(inserted.wait(timeout=10))
+                barrier = pool.submit(cutover)
+                self.assertTrue(barrier_waiting.wait(timeout=10))
+                self.assertFalse(barrier.done())
+            finally:
+                release_registration.set()
+            operation = registration.result(timeout=10)
+            with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+                barrier.result(timeout=10)
+        self.assertTrue(CdcSourceExternalOperation.objects.filter(pk=operation.pk).exists())
+
+    def test_pending_commit_blocks_a_concurrent_operation(self):
+        barrier_held = Event()
+        operation_waiting = Event()
+        release_barrier = Event()
+
+        def watch_queries(execute, sql, params, many, context):
+            if "FOR UPDATE" in sql and "control_plane_sourceprofile" in sql:
+                operation_waiting.set()
+            return execute(sql, params, many, context)
+
+        def cutover():
+            close_old_connections()
+            try:
+                with _cdc_external_operation_barrier(self.source.pk):
+                    barrier_held.set()
+                    if not release_barrier.wait(timeout=10):
+                        raise TimeoutError("Barrier release timed out.")
+                    CdcToBatchTransition.objects.filter(pk=self.transition.pk).update(
+                        status=CdcToBatchTransition.Status.CUTOVER_PENDING
+                    )
+            finally:
+                close_old_connections()
+
+        def begin_after_barrier():
+            close_old_connections()
+            try:
+                with connection.execute_wrapper(watch_queries):
+                    return self.begin()
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            cutover_future = pool.submit(cutover)
+            try:
+                self.assertTrue(barrier_held.wait(timeout=10))
+                begin_future = pool.submit(begin_after_barrier)
+                self.assertTrue(operation_waiting.wait(timeout=10))
+                self.assertFalse(begin_future.done())
+            finally:
+                release_barrier.set()
+            cutover_future.result(timeout=10)
+            with self.assertRaisesRegex(RuntimeError, "cutover is pending"):
+                begin_future.result(timeout=10)
+        self.assertFalse(CdcSourceExternalOperation.objects.exists())
+
+
+@skipUnlessDBFeature("has_select_for_update")
+@override_settings(CDC_EXTERNAL_OPERATION_TRACKING=True)
+class CdcExternalOperationTaskTests(TransactionTestCase):
+    def setUp(self):
+        self.source = SourceProfile.objects.create(
+            name="Tracked operation source", db_type=DbChoice.POSTGRESQL,
+            host="localhost", port=5432, database_name="analytics",
+            username="cdc_user", ingestion_mode=IngestionMode.CDC,
+        )
+        self.table = SourceTable.objects.create(
+            source=self.source, schema_name="public", table_name="events",
+            primary_key_fields=["id"], cdc_managed=True,
+        )
+
+    def test_ingestion_refresh_and_rebuild_register_before_work_and_clear_on_success(self):
+        cases = (
+            (
+                "etl.tasks._run_scheduled_cdc_ingestion_locked",
+                CdcSourceExternalOperation.Kind.INGESTION,
+                lambda: ingest_source_to_clickhouse_task.apply(
+                    args=[self.source.pk], kwargs={"cdc_continue": True}, throw=True
+                ).get(),
+            ),
+            (
+                "etl.tasks._ingest_source_to_clickhouse_batch",
+                CdcSourceExternalOperation.Kind.REFRESH,
+                lambda: ingest_source_to_clickhouse_task.apply(
+                    args=[self.source.pk], kwargs={"cdc_fallback_only": True}, throw=True
+                ).get(),
+            ),
+            (
+                "etl.tasks._rebuild_cdc_table",
+                CdcSourceExternalOperation.Kind.REBUILD,
+                lambda: rebuild_cdc_table_task.apply(
+                    args=[self.table.pk], throw=True
+                ).get(),
+            ),
+        )
+        for target, kind, execute in cases:
+            with self.subTest(kind=kind):
+                def verify_in_separate_connection():
+                    close_old_connections()
+                    try:
+                        operation = CdcSourceExternalOperation.objects.get(source=self.source)
+                        self.assertEqual(operation.kind, kind)
+                        self.assertTrue(operation.task_id)
+                    finally:
+                        close_old_connections()
+
+                def work(*args, **kwargs):
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        pool.submit(verify_in_separate_connection).result(timeout=10)
+                    return "completed"
+
+                with patch(target, side_effect=work):
+                    self.assertEqual(execute(), "completed")
+                self.assertFalse(CdcSourceExternalOperation.objects.exists())
+
+    @patch("etl.tasks.get_etl_logger")
+    @patch("etl.tasks.set_task_progress")
+    def test_failed_or_interrupted_work_keeps_record(self, progress, logger):
+        cases = (
+            (
+                "etl.tasks._run_scheduled_cdc_ingestion_locked",
+                CdcSourceExternalOperation.Kind.INGESTION,
+                lambda: ingest_source_to_clickhouse_task.apply(
+                    args=[self.source.pk], kwargs={"cdc_continue": True}, throw=True
+                ),
+            ),
+            (
+                "etl.tasks._ingest_source_to_clickhouse_batch",
+                CdcSourceExternalOperation.Kind.REFRESH,
+                lambda: ingest_source_to_clickhouse_task.apply(
+                    args=[self.source.pk], kwargs={"cdc_fallback_only": True}, throw=True
+                ),
+            ),
+            (
+                "etl.tasks._rebuild_cdc_table",
+                CdcSourceExternalOperation.Kind.REBUILD,
+                lambda: rebuild_cdc_table_task.apply(args=[self.table.pk], throw=True),
+            ),
+        )
+        for target, kind, execute in cases:
+            with self.subTest(kind=kind):
+                with patch(target, side_effect=RuntimeError("external response lost")):
+                    with self.assertRaisesRegex(RuntimeError, "external response lost"):
+                        execute()
+                operation = CdcSourceExternalOperation.objects.get(source=self.source)
+                self.assertEqual(operation.kind, kind)
+                with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+                    with _cdc_external_operation_barrier(self.source.pk):
+                        pass
+                # The test simulates known-terminated external work.
+                _complete_cdc_external_operation(self.source.pk, operation.pk)
+
+    @patch("etl.tasks.get_etl_logger")
+    @patch("etl.tasks.set_task_progress")
+    @patch("etl.tasks._ingest_source_to_clickhouse_batch", return_value="completed")
+    @patch("etl.cdc_external_operations._complete_cdc_external_operation",
+           side_effect=RuntimeError("completion failed"))
+    def test_completion_failure_keeps_record(self, complete, work, progress, logger):
+        with self.assertRaisesRegex(RuntimeError, "completion failed"):
+            ingest_source_to_clickhouse_task.apply(
+                args=[self.source.pk], kwargs={"cdc_fallback_only": True}, throw=True
+            )
+        self.assertTrue(CdcSourceExternalOperation.objects.filter(source=self.source).exists())
+
+    @patch("etl.tasks.clickhouse_connect.get_client")
+    def test_rebuild_rejects_source_change_after_registration(self, get_client):
+        with self.assertRaisesRegex(RuntimeError, "source changed"):
+            _rebuild_cdc_table(
+                SimpleNamespace(), self.table.pk, expected_source_pk=self.source.pk + 1
+            )
+        get_client.assert_not_called()
+
+    @patch("etl.tasks.get_etl_logger")
+    @patch("etl.tasks.set_task_progress")
+    def test_record_blocks_cutover_after_worker_database_connection_is_lost(
+        self, progress, logger
+    ):
+        for target, kwargs in (
+            ("etl.tasks._run_scheduled_cdc_ingestion_locked", {"cdc_continue": True}),
+            ("etl.tasks._ingest_source_to_clickhouse_batch", {"cdc_fallback_only": True}),
+        ):
+            with self.subTest(target=target):
+                lost_connection = Event()
+                release_worker = Event()
+
+                def work(*args, **work_kwargs):
+                    connection.close()
+                    lost_connection.set()
+                    if not release_worker.wait(timeout=10):
+                        raise TimeoutError("Worker release timed out.")
+                    raise RuntimeError("external response lost")
+
+                def run_task():
+                    close_old_connections()
+                    try:
+                        return ingest_source_to_clickhouse_task.apply(
+                            args=[self.source.pk], kwargs=kwargs, throw=True
+                        )
+                    finally:
+                        close_old_connections()
+
+                with patch(target, side_effect=work), ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(run_task)
+                    try:
+                        self.assertTrue(lost_connection.wait(timeout=10))
+                        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+                            with _cdc_external_operation_barrier(self.source.pk):
+                                pass
+                    finally:
+                        release_worker.set()
+                    with self.assertRaisesRegex(RuntimeError, "external response lost"):
+                        future.result(timeout=10)
+                operation = CdcSourceExternalOperation.objects.get(source=self.source)
+                _complete_cdc_external_operation(self.source.pk, operation.pk)
+
+    @patch("etl.tasks.get_etl_logger")
+    @patch("etl.tasks.set_task_progress")
+    @patch("etl.tasks._ingest_source_to_clickhouse_batch")
+    @patch("etl.tasks._run_scheduled_cdc_ingestion_locked")
+    def test_pending_cutover_skips_ingestion_and_refresh(self, ingestion, refresh, progress, logger):
+        CdcToBatchTransition.objects.create(
+            source=self.source, status=CdcToBatchTransition.Status.CUTOVER_PENDING
+        )
+        for kwargs in ({"cdc_continue": True}, {"cdc_fallback_only": True}):
+            result = ingest_source_to_clickhouse_task.apply(
+                args=[self.source.pk], kwargs=kwargs, throw=True
+            ).get()
+            self.assertIn("cutover is pending", result)
+        ingestion.assert_not_called()
+        refresh.assert_not_called()
+        self.assertFalse(CdcSourceExternalOperation.objects.exists())
+
+
+@skipUnlessDBFeature("has_select_for_update")
+class CdcToBatchFinalizationConcurrencyTests(TransactionTestCase):
+    def setUp(self):
+        CdcToBatchFinalizationTests.setUp(self)
+
+    def test_finalization_does_not_hold_source_while_waiting_for_checkpoint(self):
+        checkpoint_held = Event()
+        finalizer_waiting = Event()
+        source_acquired = Event()
+        release_checkpoint = Event()
+
+        def watch_queries(execute, sql, params, many, context):
+            if "FOR UPDATE" in sql and "control_plane_cdctobatchtablecheckpoint" in sql:
+                finalizer_waiting.set()
+            return execute(sql, params, many, context)
+
+        def finish():
+            close_old_connections()
+            try:
+                with connection.execute_wrapper(watch_queries):
+                    return _finalize_cdc_to_batch_transition(self.transition.pk)
+            finally:
+                close_old_connections()
+
+        def hold_checkpoint():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    CdcToBatchTableCheckpoint.objects.select_for_update().get(
+                        pk=self.checkpoints[0].pk
+                    )
+                    checkpoint_held.set()
+                    if not finalizer_waiting.wait(timeout=10):
+                        raise TimeoutError("Finalization did not attempt the checkpoint lock.")
+                    SourceProfile.objects.select_for_update().get(pk=self.source.pk)
+                    source_acquired.set()
+                    if not release_checkpoint.wait(timeout=10):
+                        raise TimeoutError("Checkpoint release timed out.")
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            holder = pool.submit(hold_checkpoint)
+            try:
+                self.assertTrue(checkpoint_held.wait(timeout=10))
+                finalizer = pool.submit(finish)
+                self.assertTrue(finalizer_waiting.wait(timeout=10))
+                self.assertTrue(source_acquired.wait(timeout=10))
+                self.assertFalse(finalizer.done())
+            finally:
+                release_checkpoint.set()
+            holder.result(timeout=10)
+            self.assertEqual(
+                finalizer.result(timeout=10).status, CdcToBatchTransition.Status.SUCCEEDED
+            )
+
+    def test_finalization_rejects_checkpoint_added_while_waiting(self):
+        checkpoint_held = Event()
+        finalizer_waiting = Event()
+        release_checkpoint = Event()
+
+        def watch_queries(execute, sql, params, many, context):
+            if "FOR UPDATE" in sql and "control_plane_cdctobatchtablecheckpoint" in sql:
+                finalizer_waiting.set()
+            return execute(sql, params, many, context)
+
+        def finish():
+            close_old_connections()
+            try:
+                with connection.execute_wrapper(watch_queries):
+                    return _finalize_cdc_to_batch_transition(self.transition.pk)
+            finally:
+                close_old_connections()
+
+        def add_checkpoint():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    CdcToBatchTableCheckpoint.objects.select_for_update().get(
+                        pk=self.checkpoints[0].pk
+                    )
+                    checkpoint_held.set()
+                    if not finalizer_waiting.wait(timeout=10):
+                        raise TimeoutError("Finalization did not attempt the checkpoint lock.")
+                    table = SourceTable.objects.create(
+                        source_id=self.source.pk, schema_name="public", table_name="new_table"
+                    )
+                    CdcToBatchTableCheckpoint.objects.create(
+                        transition_id=self.transition.pk, source_table=table,
+                        staging_table="new_stage",
+                    )
+                    if not release_checkpoint.wait(timeout=10):
+                        raise TimeoutError("Checkpoint release timed out.")
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            holder = pool.submit(add_checkpoint)
+            try:
+                self.assertTrue(checkpoint_held.wait(timeout=10))
+                finalizer = pool.submit(finish)
+                self.assertTrue(finalizer_waiting.wait(timeout=10))
+            finally:
+                release_checkpoint.set()
+            holder.result(timeout=10)
+            with self.assertRaisesRegex(RuntimeError, "checkpoints changed"):
+                finalizer.result(timeout=10)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+
+
+class CdcToBatchGenerationPublicationTests(TransactionTestCase):
+    def setUp(self):
+        CdcToBatchFinalizationTests.setUp(self)
+        for checkpoint in self.checkpoints:
+            checkpoint.status = CdcToBatchTableCheckpoint.Status.STAGED
+            checkpoint.generation_table = (
+                f"rh_batch_publish_{self.transition.generation.hex}_"
+                f"{checkpoint.source_table_id}_{uuid4().hex}"
+            )
+            checkpoint.generation_uuid = f"copy-{checkpoint.pk}"
+            checkpoint.save(update_fields=["status", "generation_table", "generation_uuid"])
+            self.uuids[checkpoint.generation_table] = checkpoint.generation_uuid
+
+    def test_atomically_publishes_all_generations_and_retains_connector_metadata(self):
+        _finalize_cdc_to_batch_generation(self.transition.pk)
+        self.source.refresh_from_db()
+        self.transition.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.BATCH)
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.SUCCEEDED)
+        for table, checkpoint in zip(self.tables, self.checkpoints):
+            table.refresh_from_db()
+            checkpoint.refresh_from_db()
+            self.assertEqual(table.clickhouse_physical_table, checkpoint.generation_table)
+            self.assertEqual(checkpoint.status, CdcToBatchTableCheckpoint.Status.CUTOVER)
+            self.assertFalse(table.cdc_managed)
+            self.assertTrue(table.cdc_connector_name)
+        self.assertEqual(_finalize_cdc_to_batch_generation(self.transition.pk).pk, self.transition.pk)
+
+    def test_duplicate_copy_does_not_replace_verified_generation(self):
+        checkpoint = self.checkpoints[0]
+        result = _copy_cdc_to_batch_generation(checkpoint.pk)
+        self.assertEqual(result.generation_table, checkpoint.generation_table)
+        self.assertEqual(result.generation_uuid, checkpoint.generation_uuid)
+        self.client.command.assert_not_called()
+
+    def test_changed_second_generation_leaves_all_metadata_unchanged(self):
+        self.uuids[self.checkpoints[1].generation_table] = "unexpected"
+        with self.assertRaisesRegex(RuntimeError, "generation is missing or changed"):
+            _finalize_cdc_to_batch_generation(self.transition.pk)
+        self.source.refresh_from_db()
+        self.transition.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.CUTOVER_PENDING)
+        for table, checkpoint in zip(self.tables, self.checkpoints):
+            table.refresh_from_db()
+            checkpoint.refresh_from_db()
+            self.assertFalse(table.clickhouse_physical_table)
+            self.assertTrue(table.cdc_managed)
+            self.assertEqual(checkpoint.status, CdcToBatchTableCheckpoint.Status.STAGED)
+
+    def test_rejects_foreign_or_missing_candidate(self):
+        checkpoint = self.checkpoints[0]
+        checkpoint.generation_table = "rh_batch_publish_wrong"
+        checkpoint.save(update_fields=["generation_table"])
+        with self.assertRaisesRegex(RuntimeError, "invalid for this checkpoint"):
+            _finalize_cdc_to_batch_generation(self.transition.pk)
+        checkpoint.generation_uuid = ""
+        checkpoint.save(update_fields=["generation_uuid"])
+        with self.assertRaisesRegex(RuntimeError, "Not every generation copy"):
+            _finalize_cdc_to_batch_generation(self.transition.pk)
+
+    def test_exchange_path_cannot_run_after_generation_attempt(self):
+        with self.assertRaisesRegex(RuntimeError, "cannot be mixed"):
+            _cutover_cdc_to_batch_table(self.checkpoints[0].pk)
+        self.client.command.assert_not_called()
+
+    def test_copy_cannot_start_after_any_table_exchange(self):
+        checkpoint = self.checkpoints[1]
+        checkpoint.status = CdcToBatchTableCheckpoint.Status.CUTOVER
+        checkpoint.save(update_fields=["status"])
+        with self.assertRaisesRegex(RuntimeError, "cannot be mixed"):
+            _copy_cdc_to_batch_generation(self.checkpoints[0].pk)
+        self.client.command.assert_not_called()
+
+
+class CdcToBatchTableCutoverTests(TransactionTestCase):
+    def setUp(self):
+        CdcToBatchFinalizationTests.setUp(self)
+        self.checkpoint = self.checkpoints[0]
+        self.table = self.tables[0]
+        self.active_name = f"source_{self.source.pk}__public_{self.table.table_name}"
+        self.checkpoint.status = CdcToBatchTableCheckpoint.Status.STAGED
+        self.checkpoint.save(update_fields=["status"])
+        self.uuids[self.active_name] = self.checkpoint.active_uuid_before
+        self.uuids[self.checkpoint.staging_table] = self.checkpoint.staging_uuid
+
+        def execute(sql):
+            if sql.startswith("EXCHANGE TABLES"):
+                self.uuids[self.active_name], self.uuids[self.checkpoint.staging_table] = (
+                    self.uuids[self.checkpoint.staging_table], self.uuids[self.active_name]
+                )
+            elif sql.startswith("RENAME TABLE"):
+                self.uuids[self.active_name] = self.uuids.pop(self.checkpoint.staging_table)
+            else:
+                raise AssertionError(f"Unexpected ClickHouse command: {sql}")
+
+        self.client.command.side_effect = execute
+
+    def test_exchange_and_retry_do_not_repeat_swap(self):
+        result = _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.assertEqual(result.status, CdcToBatchTableCheckpoint.Status.CUTOVER)
+        self.assertEqual(self.uuids[self.active_name], self.checkpoint.staging_uuid)
+        self.assertEqual(self.uuids[self.checkpoint.staging_table], self.checkpoint.active_uuid_before)
+        self.assertTrue(self.client.command.call_args.args[0].startswith("EXCHANGE TABLES"))
+        _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.client.command.assert_called_once()
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+
+    def test_rename_missing_keyless_table_and_retry(self):
+        self.table.primary_key_fields = []
+        self.table.cdc_managed = False
+        self.table.save(update_fields=["primary_key_fields", "cdc_managed"])
+        self.checkpoint.active_uuid_before = ""
+        self.checkpoint.staging_schema = _field_signature(
+            self.source, _stage_fields(self.source, self.table), self.table
+        )
+        self.checkpoint.save(update_fields=["active_uuid_before", "staging_schema"])
+        self.uuids.pop(self.active_name)
+        _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.assertEqual(self.uuids[self.active_name], self.checkpoint.staging_uuid)
+        self.assertNotIn(self.checkpoint.staging_table, self.uuids)
+        self.assertTrue(self.client.command.call_args.args[0].startswith("RENAME TABLE"))
+        _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.client.command.assert_called_once()
+
+    def test_checkpoint_save_failure_blocks_retry_after_exchange(self):
+        original_save = CdcToBatchTableCheckpoint.save
+
+        def fail_final_save(checkpoint, *args, **kwargs):
+            if checkpoint.status == CdcToBatchTableCheckpoint.Status.CUTOVER:
+                raise RuntimeError("save failed")
+            return original_save(checkpoint, *args, **kwargs)
+
+        with patch.object(CdcToBatchTableCheckpoint, "save", fail_final_save):
+            with self.assertRaisesRegex(RuntimeError, "save failed"):
+                _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.checkpoint.refresh_from_db()
+        self.assertEqual(self.checkpoint.status, CdcToBatchTableCheckpoint.Status.STAGED)
+        self.assertTrue(self.checkpoint.cutover_command_inflight)
+        self.assertEqual(self.uuids[self.active_name], self.checkpoint.staging_uuid)
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.client.command.assert_called_once()
+
+    def test_blocks_retry_when_exchange_response_is_lost(self):
+        original_command = self.client.command.side_effect
+
+        def lost_response(sql):
+            original_command(sql)
+            raise RuntimeError("response lost")
+
+        self.client.command.side_effect = lost_response
+        with self.assertRaisesRegex(RuntimeError, "response lost"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.client.command.side_effect = original_command
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.client.command.assert_called_once()
+
+    def test_blocks_retry_when_rename_response_is_lost(self):
+        self.table.cdc_managed = False
+        self.table.save(update_fields=["cdc_managed"])
+        self.checkpoint.active_uuid_before = ""
+        self.checkpoint.save(update_fields=["active_uuid_before"])
+        self.uuids.pop(self.active_name)
+        original_command = self.client.command.side_effect
+
+        def lost_response(sql):
+            original_command(sql)
+            raise RuntimeError("response lost")
+
+        self.client.command.side_effect = lost_response
+        with self.assertRaisesRegex(RuntimeError, "response lost"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.client.command.side_effect = original_command
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.client.command.assert_called_once()
+
+    def test_marker_is_committed_before_command_and_blocks_concurrent_retry(self):
+        original_command = self.client.command.side_effect
+
+        def competing_worker():
+            close_old_connections()
+            try:
+                checkpoint = CdcToBatchTableCheckpoint.objects.get(pk=self.checkpoint.pk)
+                self.assertTrue(checkpoint.cutover_command_inflight)
+                with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+                    _cutover_cdc_to_batch_table(self.checkpoint.pk)
+            finally:
+                close_old_connections()
+
+        def execute(sql):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(competing_worker).result(timeout=10)
+            original_command(sql)
+
+        self.client.command.side_effect = execute
+        _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.checkpoint.refresh_from_db()
+        self.assertFalse(self.checkpoint.cutover_command_inflight)
+        self.client.command.assert_called_once()
+
+    def test_unexecuted_timed_out_command_cannot_be_retried(self):
+        self.client.command.side_effect = RuntimeError("request timed out")
+        with self.assertRaisesRegex(RuntimeError, "request timed out"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.checkpoint.refresh_from_db()
+        self.assertTrue(self.checkpoint.cutover_command_inflight)
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.client.command.assert_called_once()
+
+    def test_cutover_command_must_not_run_inside_outer_transaction(self):
+        with transaction.atomic():
+            with self.assertRaisesRegex(RuntimeError, "durable atomic block"):
+                _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.client.command.assert_not_called()
+        self.checkpoint.refresh_from_db()
+        self.assertFalse(self.checkpoint.cutover_command_inflight)
+
+    def test_rejects_non_atomic_and_missing_cdc_managed_table(self):
+        self.client.query.return_value.result_rows = [["Ordinary"]]
+        with self.assertRaisesRegex(RuntimeError, "Atomic"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.checkpoint.active_uuid_before = ""
+        self.checkpoint.save(update_fields=["active_uuid_before"])
+        with self.assertRaisesRegex(RuntimeError, "CDC-managed active.*missing"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.client.command.assert_not_called()
+
+    def test_rejects_bad_post_exchange_identity_before_checkpoint(self):
+        self.client.command.side_effect = lambda sql: None
+        with self.assertRaisesRegex(RuntimeError, "did not complete"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.checkpoint.refresh_from_db()
+        self.assertEqual(self.checkpoint.status, CdcToBatchTableCheckpoint.Status.STAGED)
+
+    def assert_change_during_exchange_blocks_completion(self, change, error):
+        execute = self.client.command.side_effect
+
+        def exchange_and_change(sql):
+            execute(sql)
+            change()
+
+        self.client.command.side_effect = exchange_and_change
+        with self.assertRaisesRegex(RuntimeError, error):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.checkpoint.refresh_from_db()
+        self.assertEqual(self.checkpoint.status, CdcToBatchTableCheckpoint.Status.STAGED)
+        self.assertTrue(self.checkpoint.cutover_command_inflight)
+        with self.assertRaisesRegex(RuntimeError, "uncertain outcome"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.client.command.assert_called_once()
+
+    def test_rejects_checkpoint_changes_during_exchange(self):
+        execute = self.client.command.side_effect
+        changes = (
+            {"staging_row_count": 2},
+            {"staging_schema": {}},
+            {"active_table_checked": False},
+        )
+        for change in changes:
+            with self.subTest(change=change):
+                original = {key: getattr(self.checkpoint, key) for key in change}
+                self.assert_change_during_exchange_blocks_completion(
+                    lambda: CdcToBatchTableCheckpoint.objects.filter(
+                        pk=self.checkpoint.pk
+                    ).update(**change),
+                    "marker changed",
+                )
+                CdcToBatchTableCheckpoint.objects.filter(pk=self.checkpoint.pk).update(
+                    cutover_command_inflight=False, **original
+                )
+                self.checkpoint.refresh_from_db()
+                self.uuids[self.active_name] = self.checkpoint.active_uuid_before
+                self.uuids[self.checkpoint.staging_table] = self.checkpoint.staging_uuid
+                self.client.command.reset_mock()
+                self.client.command.side_effect = execute
+
+    def test_rejects_source_configuration_change_during_exchange(self):
+        self.assert_change_during_exchange_blocks_completion(
+            lambda: SourceProfile.objects.filter(pk=self.source.pk).update(username="other"),
+            "configuration changed",
+        )
+
+    def test_rejects_source_deactivation_during_exchange(self):
+        self.assert_change_during_exchange_blocks_completion(
+            lambda: SourceProfile.objects.filter(pk=self.source.pk).update(is_active=False),
+            "not eligible",
+        )
+
+    def test_rejects_table_cdc_configuration_change_during_exchange(self):
+        self.assert_change_during_exchange_blocks_completion(
+            lambda: SourceTable.objects.filter(pk=self.table.pk).update(cdc_managed=False),
+            "CDC configuration changed",
+        )
+
+    def test_rejects_transition_change_during_exchange(self):
+        self.assert_change_during_exchange_blocks_completion(
+            lambda: CdcToBatchTransition.objects.filter(pk=self.transition.pk).update(
+                status=CdcToBatchTransition.Status.FAILED
+            ),
+            "not eligible",
+        )
+
+    def test_rejects_new_source_table_during_exchange(self):
+        self.assert_change_during_exchange_blocks_completion(
+            lambda: SourceTable.objects.create(
+                source=self.source, schema_name="public", table_name="new_table"
+            ),
+            "table list changed",
+        )
+
+    def test_rejects_new_rebuild_during_exchange(self):
+        self.assert_change_during_exchange_blocks_completion(
+            lambda: CdcTableRebuild.objects.create(
+                source_table=self.table, connector_name="conflict",
+                topic_prefix="conflict", notification_topic="conflict-notifications",
+                consumer_group="conflict-group", staging_table="conflict-stage",
+            ),
+            "active CDC table rebuild",
+        )
+
+    def test_revalidates_physical_table_after_exchange(self):
+        with patch(
+            "etl.cdc_to_batch._validate_staging_row_count",
+            side_effect=[None, RuntimeError("row count changed")],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "row count changed"):
+                _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.checkpoint.refresh_from_db()
+        self.assertTrue(self.checkpoint.cutover_command_inflight)
+        self.assertEqual(self.checkpoint.status, CdcToBatchTableCheckpoint.Status.STAGED)
+        self.client.command.assert_called_once()
+
+    def test_revalidates_physical_schema_after_exchange(self):
+        with patch(
+            "etl.cdc_to_batch._validate_staging_table",
+            side_effect=[None, RuntimeError("columns changed")],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "columns changed"):
+                _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.checkpoint.refresh_from_db()
+        self.assertTrue(self.checkpoint.cutover_command_inflight)
+        self.assertEqual(self.checkpoint.status, CdcToBatchTableCheckpoint.Status.STAGED)
+        self.client.command.assert_called_once()
+
+    def test_rejects_bad_uuid_count_and_non_pending_transition(self):
+        self.uuids[self.active_name] = "unexpected"
+        with self.assertRaisesRegex(RuntimeError, "UUIDs changed"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.uuids[self.active_name] = self.checkpoint.active_uuid_before
+        with patch("etl.cdc_to_batch._validate_staging_row_count",
+                   side_effect=RuntimeError("row count changed")):
+            with self.assertRaisesRegex(RuntimeError, "row count changed"):
+                _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.transition.status = CdcToBatchTransition.Status.PREPARING
+        self.transition.save(update_fields=["status"])
+        with self.assertRaisesRegex(RuntimeError, "not eligible"):
+            _cutover_cdc_to_batch_table(self.checkpoint.pk)
+        self.client.command.assert_not_called()
+        self.checkpoint.refresh_from_db()
+        self.assertEqual(self.checkpoint.status, CdcToBatchTableCheckpoint.Status.STAGED)
+
+
 class CdcToBatchStagingTests(TestCase):
     def setUp(self):
         self.source = SourceProfile.objects.create(
@@ -1351,6 +3127,13 @@ class CdcToBatchStagingTests(TestCase):
         self.client.query.return_value.result_rows = [["Atomic"]]
 
         def query(sql, *args, **kwargs):
+            if sql.startswith("SELECT count() FROM "):
+                counts = {}
+                for call in self.client.insert.call_args_list:
+                    counts[call.args[0]] = counts.get(call.args[0], 0) + len(call.args[1])
+                return SimpleNamespace(result_rows=[[
+                    counts.get(sql.split("`")[1], 0)
+                ]])
             if "FROM system.tables" in sql:
                 return SimpleNamespace(result_rows=[("MergeTree", "", "", "", "")])
             if sql.startswith("DESCRIBE TABLE"):
@@ -1366,7 +3149,7 @@ class CdcToBatchStagingTests(TestCase):
 
         self.client.query.side_effect = query
         self.client_patch = patch("etl.cdc_to_batch.clickhouse_connect.get_client", return_value=self.client)
-        self.client_patch.start()
+        self.get_client = self.client_patch.start()
         self.addCleanup(self.client_patch.stop)
         self.uuid_patch = patch("etl.cdc_to_batch._clickhouse_table_uuid", return_value="stage-uuid")
         self.table_uuid = self.uuid_patch.start()
@@ -1377,6 +3160,10 @@ class CdcToBatchStagingTests(TestCase):
 
         self.assertEqual(checkpoint.status, CdcToBatchTableCheckpoint.Status.STAGED)
         self.assertEqual(checkpoint.staging_uuid, "stage-uuid")
+        self.assertEqual(checkpoint.staging_row_count, 3)
+        self.assertEqual(checkpoint.staging_schema["username"], self.source.username)
+        self.assertIs(checkpoint.staging_schema["synchronous_inserts"], True)
+        self.assertEqual(self.get_client.call_args.kwargs["settings"], {"async_insert": 0})
         self.assertEqual(checkpoint.staging_schema["primary_key_fields"], ["id"])
         self.assertEqual(
             {tuple(field) for field in checkpoint.staging_schema["fields"]},
@@ -1411,7 +3198,201 @@ class CdcToBatchStagingTests(TestCase):
         checkpoint = stage_cdc_to_batch_table(self.checkpoint.pk, batch_size=2)
         self.assertEqual(checkpoint.status, CdcToBatchTableCheckpoint.Status.STAGED)
         self.assertEqual(checkpoint.staging_schema["primary_key_fields"], [])
+        self.assertEqual(checkpoint.staging_row_count, 0)
         self.client.insert.assert_not_called()
+
+    def test_incomplete_insert_is_rejected_before_checkpoint(self):
+        original_query = self.client.query.side_effect
+        self.client.query.side_effect = lambda sql, *args, **kwargs: (
+            SimpleNamespace(result_rows=[[2]])
+            if sql.startswith("SELECT count() FROM ")
+            else original_query(sql, *args, **kwargs)
+        )
+        with self.assertRaisesRegex(RuntimeError, "row count changed"):
+            stage_cdc_to_batch_table(self.checkpoint.pk, batch_size=2)
+        self.checkpoint.refresh_from_db()
+        self.assertEqual(self.checkpoint.status, CdcToBatchTableCheckpoint.Status.PENDING)
+        self.assertIsNone(self.checkpoint.staging_row_count)
+        self.assertTrue(all(call.args[0].startswith("CREATE TABLE")
+                            for call in self.client.command.call_args_list))
+
+    def test_rejects_changed_row_count_on_retry_and_active_observation(self):
+        stage_cdc_to_batch_table(self.checkpoint.pk)
+        original_query = self.client.query.side_effect
+        self.client.query.side_effect = lambda sql, *args, **kwargs: (
+            SimpleNamespace(result_rows=[[4]])
+            if sql.startswith("SELECT count() FROM ")
+            else original_query(sql, *args, **kwargs)
+        )
+        with self.assertRaisesRegex(RuntimeError, "row count changed"):
+            stage_cdc_to_batch_table(self.checkpoint.pk)
+        with self.assertRaisesRegex(RuntimeError, "row count changed"):
+            checkpoint_cdc_to_batch_active_table(self.checkpoint.pk)
+        self.checkpoint.refresh_from_db()
+        self.assertFalse(self.checkpoint.active_table_checked)
+
+    def test_rejects_invalid_count_query_results(self):
+        stage_cdc_to_batch_table(self.checkpoint.pk)
+        original_query = self.client.query.side_effect
+        for result in ([], [[3, 0]], [[None]]):
+            with self.subTest(result=result):
+                self.client.query.side_effect = lambda sql, *args, **kwargs: (
+                    SimpleNamespace(result_rows=result)
+                    if sql.startswith("SELECT count() FROM ")
+                    else original_query(sql, *args, **kwargs)
+                )
+                with self.assertRaisesRegex(RuntimeError, "row count changed"):
+                    stage_cdc_to_batch_table(self.checkpoint.pk)
+
+    def test_legacy_checkpoint_is_restaged_without_deleting_old_table(self):
+        checkpoint = stage_cdc_to_batch_table(self.checkpoint.pk)
+        old_table = checkpoint.staging_table
+        CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint.pk).update(
+            staging_row_count=None, active_table_checked=True, active_uuid_before="old-live"
+        )
+        with self.assertRaisesRegex(RuntimeError, "row count is missing"):
+            checkpoint_cdc_to_batch_active_table(checkpoint.pk)
+        checkpoint = stage_cdc_to_batch_table(self.checkpoint.pk)
+        self.assertNotEqual(checkpoint.staging_table, old_table)
+        self.assertEqual(checkpoint.staging_row_count, 3)
+        self.assertFalse(checkpoint.active_table_checked)
+        self.assertEqual(checkpoint.active_uuid_before, "")
+        self.assertTrue(all(call.args[0].startswith("CREATE TABLE")
+                            for call in self.client.command.call_args_list))
+
+    def test_verification_only_never_stages_pending_or_legacy_checkpoints(self):
+        with self.assertRaisesRegex(RuntimeError, "requires staging"):
+            stage_cdc_to_batch_table(self.checkpoint.pk, verification_only=True)
+        self.client.command.assert_not_called()
+        checkpoint = stage_cdc_to_batch_table(self.checkpoint.pk)
+        for changes in (
+            {"staging_row_count": None},
+            {"staging_row_count": 3, "staging_schema": {}},
+        ):
+            CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint.pk).update(**changes)
+            with self.assertRaisesRegex(RuntimeError, "requires staging"):
+                stage_cdc_to_batch_table(checkpoint.pk, verification_only=True)
+            self.assertEqual(self.client.command.call_count, 1)
+
+    @patch("etl.tasks.stage_cdc_to_batch_transition_task.apply_async")
+    def test_worker_restages_real_legacy_checkpoints_one_table_at_a_time(self, enqueue):
+        second_table = SourceTable.objects.create(
+            source=self.source, schema_name="analytics", table_name="other_events",
+            primary_key_fields=["id"],
+        )
+        SourceField.objects.create(
+            table=second_table, field_name="id", data_type="INTEGER"
+        )
+        SourceField.objects.create(
+            table=second_table, field_name="value", data_type="VARCHAR"
+        )
+        with self.engine.begin() as connection:
+            connection.execute(sa.text("CREATE TABLE other_events (id INTEGER, value TEXT)"))
+            connection.execute(sa.text("INSERT INTO other_events VALUES (1, 'other')"))
+        second = CdcToBatchTableCheckpoint.objects.create(
+            transition=self.checkpoint.transition, source_table=second_table,
+            staging_table="unused",
+        )
+        first = stage_cdc_to_batch_table(self.checkpoint.pk)
+        second = stage_cdc_to_batch_table(second.pk)
+        old_names = [first.staging_table, second.staging_table]
+        CdcToBatchTableCheckpoint.objects.filter(pk__in=[first.pk, second.pk]).update(
+            staging_row_count=None
+        )
+        for expected_count in (3, 4):
+            result = stage_cdc_to_batch_transition_task.apply(
+                args=[first.transition_id], throw=True
+            ).get()
+            self.assertIn("queued the next", result)
+            self.assertEqual(self.client.command.call_count, expected_count)
+        self.assertEqual(enqueue.call_count, 2)
+        result = stage_cdc_to_batch_transition_task.apply(
+            args=[first.transition_id], throw=True
+        ).get()
+        self.assertIn("All 2 tables staged", result)
+        self.assertEqual(self.client.command.call_count, 4)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertNotEqual(first.staging_table, old_names[0])
+        self.assertNotEqual(second.staging_table, old_names[1])
+        self.assertEqual([first.staging_row_count, second.staging_row_count], [3, 1])
+        self.assertTrue(all(call.args[0].startswith("CREATE TABLE")
+                            for call in self.client.command.call_args_list))
+
+    def test_rejects_malformed_staged_schema_without_restaging(self):
+        checkpoint = stage_cdc_to_batch_table(self.checkpoint.pk)
+        CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint.pk).update(staging_schema=[])
+        with self.assertRaisesRegex(RuntimeError, "schema is invalid"):
+            stage_cdc_to_batch_table(checkpoint.pk)
+        self.assertEqual(self.client.command.call_count, 1)
+
+    def test_failed_legacy_restage_preserves_previous_checkpoint(self):
+        checkpoint = stage_cdc_to_batch_table(self.checkpoint.pk)
+        old_table = checkpoint.staging_table
+        CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint.pk).update(
+            staging_row_count=None, active_table_checked=True, active_uuid_before="old-live"
+        )
+        self.client.insert.side_effect = RuntimeError("insert failed")
+        with self.assertRaisesRegex(RuntimeError, "insert failed"):
+            stage_cdc_to_batch_table(self.checkpoint.pk)
+        checkpoint.refresh_from_db()
+        self.assertEqual(checkpoint.status, CdcToBatchTableCheckpoint.Status.STAGED)
+        self.assertEqual(checkpoint.staging_table, old_table)
+        self.assertTrue(checkpoint.active_table_checked)
+        self.assertIsNone(checkpoint.staging_row_count)
+
+    def test_pre_username_checkpoint_is_restaged_and_old_table_retained(self):
+        checkpoint = stage_cdc_to_batch_table(self.checkpoint.pk)
+        old_table = checkpoint.staging_table
+        signature = dict(checkpoint.staging_schema)
+        del signature["username"]
+        CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint.pk).update(
+            staging_schema=signature, active_table_checked=True, active_uuid_before="old-live"
+        )
+        with self.assertRaisesRegex(RuntimeError, "configuration changed"):
+            checkpoint_cdc_to_batch_active_table(checkpoint.pk)
+        checkpoint = stage_cdc_to_batch_table(self.checkpoint.pk)
+        self.assertNotEqual(checkpoint.staging_table, old_table)
+        self.assertEqual(checkpoint.staging_schema["username"], self.source.username)
+        self.assertEqual(checkpoint.staging_row_count, 3)
+        self.assertFalse(checkpoint.active_table_checked)
+        self.assertTrue(all(call.args[0].startswith("CREATE TABLE")
+                            for call in self.client.command.call_args_list))
+
+    def test_pre_synchronous_checkpoint_is_restaged_and_old_table_retained(self):
+        checkpoint = stage_cdc_to_batch_table(self.checkpoint.pk)
+        old_table = checkpoint.staging_table
+        signature = dict(checkpoint.staging_schema)
+        del signature["synchronous_inserts"]
+        CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint.pk).update(
+            staging_schema=signature, active_table_checked=True, active_uuid_before="old-live"
+        )
+        with self.assertRaisesRegex(RuntimeError, "requires staging"):
+            stage_cdc_to_batch_table(checkpoint.pk, verification_only=True)
+        with self.assertRaisesRegex(RuntimeError, "configuration changed"):
+            checkpoint_cdc_to_batch_active_table(checkpoint.pk)
+        checkpoint = stage_cdc_to_batch_table(checkpoint.pk)
+        self.assertNotEqual(checkpoint.staging_table, old_table)
+        self.assertIs(checkpoint.staging_schema["synchronous_inserts"], True)
+        self.assertFalse(checkpoint.active_table_checked)
+        self.assertTrue(all(call.args[0].startswith("CREATE TABLE")
+                            for call in self.client.command.call_args_list))
+
+    def test_failed_pre_username_restage_preserves_previous_checkpoint(self):
+        checkpoint = stage_cdc_to_batch_table(self.checkpoint.pk)
+        old_table = checkpoint.staging_table
+        signature = dict(checkpoint.staging_schema)
+        del signature["username"]
+        CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint.pk).update(
+            staging_schema=signature
+        )
+        self.client.insert.side_effect = RuntimeError("insert failed")
+        with self.assertRaisesRegex(RuntimeError, "insert failed"):
+            stage_cdc_to_batch_table(self.checkpoint.pk)
+        checkpoint.refresh_from_db()
+        self.assertEqual(checkpoint.staging_table, old_table)
+        self.assertEqual(checkpoint.staging_schema, signature)
+        self.assertEqual(checkpoint.staging_row_count, 3)
 
     def test_keyless_table_streams_all_rows(self):
         self.table.primary_key_fields = []
@@ -1539,10 +3520,64 @@ class CdcToBatchStagingTests(TestCase):
         with self.assertRaisesRegex(RuntimeError, "configuration changed"):
             stage_cdc_to_batch_table(self.checkpoint.pk)
 
+    def test_rejects_changed_username_on_retry_and_active_observation(self):
+        stage_cdc_to_batch_table(self.checkpoint.pk)
+        self.source.username = "other_reader"
+        self.source.save(update_fields=["username"])
+        with self.assertRaisesRegex(RuntimeError, "configuration changed"):
+            stage_cdc_to_batch_table(self.checkpoint.pk)
+        with self.assertRaisesRegex(RuntimeError, "configuration changed"):
+            checkpoint_cdc_to_batch_active_table(self.checkpoint.pk)
+        self.assertEqual(self.client.command.call_count, 1)
+
+    def test_rejects_username_changed_during_staging(self):
+        def change_username(*args, **kwargs):
+            SourceProfile.objects.filter(pk=self.source.pk).update(username="other_reader")
+
+        self.client.insert.side_effect = change_username
+        with self.assertRaisesRegex(RuntimeError, "configuration changed during batch staging"):
+            stage_cdc_to_batch_table(self.checkpoint.pk)
+        self.checkpoint.refresh_from_db()
+        self.assertEqual(self.checkpoint.status, CdcToBatchTableCheckpoint.Status.PENDING)
+        self.assertIsNone(self.checkpoint.staging_row_count)
+        self.assertTrue(all(call.args[0].startswith("CREATE TABLE")
+                            for call in self.client.command.call_args_list))
+
+    def test_rejects_colliding_active_name_during_staging(self):
+        def add_colliding_table(*args, **kwargs):
+            SourceTable.objects.create(
+                source=self.source, schema_name="ANALYTICS", table_name="EVENTS"
+            )
+
+        self.client.insert.side_effect = add_colliding_table
+        with self.assertRaisesRegex(RuntimeError, "map to the same ClickHouse table"):
+            stage_cdc_to_batch_table(self.checkpoint.pk)
+        self.checkpoint.refresh_from_db()
+        self.assertEqual(self.checkpoint.status, CdcToBatchTableCheckpoint.Status.PENDING)
+        self.assertTrue(all(call.args[0].startswith("CREATE TABLE")
+                            for call in self.client.command.call_args_list))
+
+    def test_rejects_colliding_active_name_on_retry_and_observation(self):
+        stage_cdc_to_batch_table(self.checkpoint.pk)
+        SourceTable.objects.create(
+            source=self.source, schema_name="ANALYTICS", table_name="EVENTS"
+        )
+        with self.assertRaisesRegex(RuntimeError, "map to the same ClickHouse table"):
+            stage_cdc_to_batch_table(self.checkpoint.pk)
+        with self.assertRaisesRegex(RuntimeError, "map to the same ClickHouse table"):
+            checkpoint_cdc_to_batch_active_table(self.checkpoint.pk)
+        self.assertEqual(self.client.command.call_count, 1)
+
     def test_checkpoints_live_uuid_and_revalidates_on_retry(self):
         staged = stage_cdc_to_batch_table(self.checkpoint.pk)
         self.client.reset_mock()
         self.client.query.return_value.result_rows = [["Atomic"]]
+        original_query = self.client.query.side_effect
+        self.client.query.side_effect = lambda sql, *args, **kwargs: (
+            SimpleNamespace(result_rows=[[3]])
+            if sql.startswith("SELECT count() FROM ")
+            else original_query(sql, *args, **kwargs)
+        )
         self.table_uuid.side_effect = ["stage-uuid", "live-uuid"] * 2
         checkpoint = checkpoint_cdc_to_batch_active_table(staged.pk)
         self.assertTrue(checkpoint.active_table_checked)
@@ -1681,9 +3716,11 @@ class CdcToBatchStagingTaskTests(TestCase):
             self.transition.table_checkpoints.order_by("source_table_id")
         )
 
-    def mark_staged(self, checkpoint_pk, batch_size=None):
+    def mark_staged(self, checkpoint_pk, batch_size=None, *, verification_only=False):
         CdcToBatchTableCheckpoint.objects.filter(pk=checkpoint_pk).update(
-            status=CdcToBatchTableCheckpoint.Status.STAGED
+            status=CdcToBatchTableCheckpoint.Status.STAGED,
+            staging_row_count=0,
+            staging_schema={"username": self.source.username, "synchronous_inserts": True},
         )
 
     @patch("etl.tasks.stage_cdc_to_batch_transition_task.apply_async")
@@ -1696,6 +3733,8 @@ class CdcToBatchStagingTaskTests(TestCase):
         ).get()
         self.assertIn("queued the next", first)
         stage.assert_called_once_with(self.checkpoints[0].pk, batch_size=5)
+        self.transition.refresh_from_db()
+        self.assertIsNone(self.transition.staging_verified_at)
         enqueue.assert_called_once_with(
             args=[self.transition.pk], kwargs={"batch_size": 5},
             queue="queue_backfill",
@@ -1706,19 +3745,78 @@ class CdcToBatchStagingTaskTests(TestCase):
             args=[self.transition.pk], kwargs={"batch_size": 5}, throw=True
         ).get()
         stage.assert_called_once_with(self.checkpoints[1].pk, batch_size=5)
+        self.transition.refresh_from_db()
+        self.assertIsNone(self.transition.staging_verified_at)
         stage.reset_mock()
         enqueue.reset_mock()
         result = stage_cdc_to_batch_transition_task.apply(
             args=[self.transition.pk], kwargs={"batch_size": 5}, throw=True
         ).get()
         self.assertEqual(stage.call_count, 2)
+        self.assertTrue(all(call.kwargs["verification_only"] for call in stage.call_args_list))
         self.assertIn("All 2 tables staged", result)
         self.assertIn("cutover has not started", result)
         enqueue.assert_not_called()
         self.transition.refresh_from_db()
         self.source.refresh_from_db()
         self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+        self.assertIsNotNone(self.transition.staging_verified_at)
         self.assertEqual(self.source.ingestion_mode, IngestionMode.CDC)
+
+    @patch("etl.tasks.stage_cdc_to_batch_transition_task.apply_async")
+    @patch("etl.cdc_to_batch.stage_cdc_to_batch_table")
+    def test_legacy_checkpoints_are_restaged_one_per_task(self, stage, enqueue):
+        self.transition.table_checkpoints.update(
+            status=CdcToBatchTableCheckpoint.Status.STAGED,
+            staging_row_count=None, staging_schema={"username": self.source.username},
+        )
+        CdcToBatchTableCheckpoint.objects.filter(pk=self.checkpoints[1].pk).update(
+            staging_row_count=0, staging_schema={},
+        )
+        stage.side_effect = self.mark_staged
+        for checkpoint in self.checkpoints:
+            stage.reset_mock()
+            enqueue.reset_mock()
+            result = stage_cdc_to_batch_transition_task.apply(
+                args=[self.transition.pk], kwargs={"batch_size": 5}, throw=True
+            ).get()
+            self.assertIn("queued the next", result)
+            stage.assert_called_once_with(checkpoint.pk, batch_size=5)
+            enqueue.assert_called_once()
+        stage.reset_mock()
+        enqueue.reset_mock()
+        result = stage_cdc_to_batch_transition_task.apply(
+            args=[self.transition.pk], kwargs={"batch_size": 5}, throw=True
+        ).get()
+        self.assertIn("All 2 tables staged", result)
+        self.assertEqual(stage.call_count, 2)
+        self.assertTrue(all(call.kwargs["verification_only"] for call in stage.call_args_list))
+        enqueue.assert_not_called()
+
+    @patch("etl.tasks.get_etl_logger")
+    @patch("etl.tasks.stage_cdc_to_batch_transition_task.apply_async")
+    @patch("etl.cdc_to_batch.stage_cdc_to_batch_table")
+    def test_legacy_restage_publish_failure_resumes_from_next_checkpoint(
+        self, stage, enqueue, logger
+    ):
+        self.transition.table_checkpoints.update(
+            status=CdcToBatchTableCheckpoint.Status.STAGED,
+            staging_row_count=None, staging_schema={},
+        )
+        stage.side_effect = self.mark_staged
+        enqueue.side_effect = RuntimeError("broker unavailable")
+        with self.assertRaisesRegex(RuntimeError, "broker unavailable"):
+            stage_cdc_to_batch_transition_task.apply(
+                args=[self.transition.pk], throw=True
+            )
+        self.checkpoints[0].refresh_from_db()
+        self.assertEqual(self.checkpoints[0].staging_row_count, 0)
+        enqueue.side_effect = None
+        stage.reset_mock()
+        stage_cdc_to_batch_transition_task.apply(
+            args=[self.transition.pk], throw=True
+        ).get()
+        stage.assert_called_once_with(self.checkpoints[1].pk, batch_size=None)
 
     @patch("etl.tasks.get_etl_logger")
     @patch("etl.tasks.stage_cdc_to_batch_transition_task.apply_async")
@@ -1778,9 +3876,36 @@ class CdcToBatchStagingTaskTests(TestCase):
 
     @patch("etl.tasks.get_etl_logger")
     @patch("etl.cdc_to_batch.stage_cdc_to_batch_table")
-    def test_verification_failure_never_reports_ready(self, stage, logger):
+    def test_rejects_colliding_names_during_final_verification(self, stage, logger):
         self.transition.table_checkpoints.update(
-            status=CdcToBatchTableCheckpoint.Status.STAGED
+            status=CdcToBatchTableCheckpoint.Status.STAGED,
+            staging_row_count=0,
+            staging_schema={"username": self.source.username, "synchronous_inserts": True},
+        )
+
+        def rename_table(*args, **kwargs):
+            SourceTable.objects.filter(pk=self.tables[1].pk).update(
+                schema_name="PUBLIC", table_name="EVENTS"
+            )
+
+        stage.side_effect = rename_table
+        with self.assertRaisesRegex(RuntimeError, "map to the same ClickHouse table"):
+            stage_cdc_to_batch_transition_task.apply(
+                args=[self.transition.pk], throw=True
+            )
+        self.transition.refresh_from_db()
+        self.assertIn("Staging failed", self.transition.last_error)
+        self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+
+    @patch("etl.tasks.get_etl_logger")
+    @patch("etl.cdc_to_batch.stage_cdc_to_batch_table")
+    def test_verification_failure_never_reports_ready(self, stage, logger):
+        self.transition.staging_verified_at = timezone.now()
+        self.transition.save(update_fields=["staging_verified_at"])
+        self.transition.table_checkpoints.update(
+            status=CdcToBatchTableCheckpoint.Status.STAGED,
+            staging_row_count=0,
+            staging_schema={"username": self.source.username, "synchronous_inserts": True},
         )
         stage.side_effect = RuntimeError("staged table changed")
         with self.assertRaisesRegex(RuntimeError, "staged table changed"):
@@ -1790,6 +3915,7 @@ class CdcToBatchStagingTaskTests(TestCase):
         self.transition.refresh_from_db()
         self.assertIn("Staging failed", self.transition.last_error)
         self.assertEqual(self.transition.status, CdcToBatchTransition.Status.PREPARING)
+        self.assertIsNone(self.transition.staging_verified_at)
 
     @patch("etl.tasks.get_etl_logger")
     @patch("etl.cdc_to_batch.stage_cdc_to_batch_table")
@@ -1916,6 +4042,35 @@ class CdcToBatchPreparationTests(TestCase):
         with self.assertRaisesRegex(ValueError, "discovered source tables"):
             prepare_cdc_to_batch_transition(self.source.pk)
         self.assertFalse(CdcToBatchTransition.objects.exists())
+
+    def test_rejects_colliding_clickhouse_names_before_preparation(self):
+        for schema, table in (("PUBLIC", "EVENTS"), ("public_events", "extra")):
+            with self.subTest(schema=schema, table=table):
+                collision = SourceTable.objects.create(
+                    source=self.source, schema_name=schema, table_name=table
+                )
+                if table == "extra":
+                    extra = SourceTable.objects.create(
+                        source=self.source, schema_name="public",
+                        table_name="events_extra"
+                    )
+                with self.assertRaisesRegex(RuntimeError, "map to the same ClickHouse table"):
+                    prepare_cdc_to_batch_transition(self.source.pk)
+                self.assertFalse(CdcToBatchTransition.objects.exists())
+                collision.delete()
+                if table == "extra":
+                    extra.delete()
+
+    def test_rejects_colliding_names_when_reusing_transition(self):
+        transition = prepare_cdc_to_batch_transition(self.source.pk)
+        SourceTable.objects.create(
+            source=self.source, schema_name="PUBLIC", table_name="EVENTS"
+        )
+        with self.assertRaisesRegex(RuntimeError, "map to the same ClickHouse table"):
+            prepare_cdc_to_batch_transition(self.source.pk)
+        self.assertEqual(self.source.cdc_to_batch_transitions.count(), 1)
+        transition.refresh_from_db()
+        self.assertEqual(transition.status, CdcToBatchTransition.Status.PREPARING)
 
     @patch("etl.cdc_to_batch.CdcToBatchTableCheckpoint.objects.bulk_create")
     def test_checkpoint_creation_failure_rolls_back_transition(self, bulk_create):
@@ -2059,8 +4214,9 @@ class CdcToBatchConcurrentIngestionTests(TransactionTestCase):
             SimpleNamespace(result_rows=[
                 ("id", "Int64", "", ""), ("value", "Nullable(String)", "", "")
             ]) if sql.startswith("DESCRIBE TABLE") else (
-                SimpleNamespace(result_rows=[("MergeTree", "", "", "", "")])
-                if "FROM system.tables" in sql else stage_client.query.return_value
+                SimpleNamespace(result_rows=[[2]]) if sql.startswith("SELECT count() FROM ")
+                else (SimpleNamespace(result_rows=[("MergeTree", "", "", "", "")])
+                      if "FROM system.tables" in sql else stage_client.query.return_value)
             )
         )
         cdc_client = MagicMock()
@@ -3133,6 +5289,41 @@ class IngestionQueueRoutingTests(TestCase):
 
 
 class BoundedIngestionTests(TestCase):
+    @patch("etl.tasks.set_task_progress")
+    @patch("etl.tasks.create_source_engine")
+    @patch("etl.tasks.clickhouse_connect.get_client")
+    def test_batch_refresh_uses_configured_physical_generation(
+        self, get_client, create_engine, set_progress
+    ):
+        source = SourceProfile.objects.create(
+            name="Generation refresh", db_type=DbChoice.MYSQL,
+            host="localhost", port=3306, database_name="test_db", username="test_user",
+            ingestion_mode=IngestionMode.BATCH,
+        )
+        table = SourceTable.objects.create(
+            source=source, schema_name="test_db", table_name="items",
+            primary_key_fields=["id"], clickhouse_physical_table="rh_generation_123",
+        )
+        SourceField.objects.create(table=table, field_name="id", data_type="INTEGER")
+        engine = sa.create_engine("sqlite:///:memory:")
+        with engine.begin() as connection:
+            connection.execute(sa.text("CREATE TABLE items (id INTEGER PRIMARY KEY)"))
+            connection.execute(sa.text("INSERT INTO items (id) VALUES (1)"))
+        create_engine.return_value = engine
+        client = get_client.return_value
+        client.query.return_value.result_rows = [[1]]
+        with patch("etl.tasks.get_etl_logger"):
+            ingest_source_to_clickhouse_task.apply(
+                args=[source.pk], kwargs={"batch_size": 10}, throw=True
+            ).get()
+        commands = [call.args[0] for call in client.command.call_args_list]
+        self.assertTrue(any(
+            command.startswith("EXCHANGE TABLES rh_generation_123 AND rh_generation_123__staging_")
+            for command in commands
+        ))
+        self.assertTrue(client.insert.call_args.args[0].startswith("rh_generation_123__staging_"))
+        self.assertFalse(any(f"source_{source.pk}__test_db_items" in command for command in commands))
+
     @patch("etl.tasks.set_task_progress")
     @patch("etl.tasks.create_source_engine")
     @patch("etl.tasks.clickhouse_connect.get_client")

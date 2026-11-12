@@ -58,6 +58,7 @@ class SyncStatus(models.TextChoices):
     RUNNING = 'RUNNING', 'Running'
     SUCCESS = 'SUCCESS', 'Success'
     FAILED = 'FAILED', 'Failed'
+    CANCELLED = 'CANCELLED', 'Cancelled'
 
 class SourceProfile(TimeStampedAuditedModel):
     """Represents a remote data source (e.g., client MySQL database) to be introspected."""
@@ -204,6 +205,7 @@ class SourceTable(TimeStampedAuditedModel):
     primary_key_fields = models.JSONField(default=list, blank=True)
     incremental_ready = models.BooleanField(default=False)
     clickhouse_uses_replacing_merge_tree = models.BooleanField(default=False)
+    clickhouse_physical_table = models.CharField(max_length=255, blank=True, default="", editable=False)
     cdc_managed = models.BooleanField(default=False)
     cdc_connector_name = models.CharField(max_length=255, blank=True, default="")
     cdc_topic_prefix = models.CharField(max_length=255, blank=True, default="")
@@ -266,6 +268,22 @@ class CdcTableRebuild(models.Model):
         ]
 
 
+class CdcSourceExternalOperation(models.Model):
+    class Kind(models.TextChoices):
+        INGESTION = "INGESTION", "CDC ingestion"
+        REFRESH = "REFRESH", "CDC-mode refresh"
+        REBUILD = "REBUILD", "CDC table rebuild"
+        REPORT = "REPORT", "Report query"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source = models.ForeignKey(
+        SourceProfile, on_delete=models.PROTECT, related_name="cdc_external_operations"
+    )
+    kind = models.CharField(max_length=20, choices=Kind.choices)
+    task_id = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
 class CdcToBatchTransition(models.Model):
     class Status(models.TextChoices):
         PREPARING = "PREPARING", "Preparing"
@@ -285,6 +303,7 @@ class CdcToBatchTransition(models.Model):
         default=Status.PREPARING,
     )
     last_error = models.TextField(blank=True, default="")
+    staging_verified_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -324,6 +343,10 @@ class CdcToBatchTableCheckpoint(models.Model):
     active_table_checked = models.BooleanField(default=False)
     staging_uuid = models.CharField(max_length=64, blank=True, default="")
     staging_schema = models.JSONField(default=dict, blank=True)
+    staging_row_count = models.PositiveBigIntegerField(null=True, blank=True)
+    cutover_command_inflight = models.BooleanField(default=False)
+    generation_table = models.CharField(max_length=255, blank=True, default="")
+    generation_uuid = models.CharField(max_length=64, blank=True, default="")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
