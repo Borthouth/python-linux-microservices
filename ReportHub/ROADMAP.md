@@ -4,13 +4,38 @@ Track the development phases, architectural milestones, and codebase optimizatio
 
 ## Suggested next priorities
 
-1. Complete safe CDC-to-batch switching in the control plane: resolve uncertain external requests, migrate existing-object ownership and privileges, coordinate restricted-identity rollout and worker/client fencing, then expose confirmed switch and resume actions. Real-worker cancellation behavior is tested, but delayed requests are not fenced or safely recovered. Candidate roles and query-ID propagation are verified in isolation; staging and status are available, but switching remains disabled. See [the continuation handoff](./CDC_TO_BATCH_HANDOFF.md).
-2. Add control-plane rebuild monitoring and administrator-initiated resource cleanup. Continue validating CDC permissions, concurrent snapshot writes, and interruption recovery.
+1. Complete safe CDC-to-batch switching in the control plane: resolve uncertain external requests, migrate existing-object ownership and privileges, coordinate restricted-identity rollout and worker/client fencing, then expose confirmed switch and resume actions. Real-worker cancellation behavior is tested, but delayed requests are not fenced or safely recovered. Candidate roles and query-ID propagation are verified in isolation; staging and status are available, but switching remains disabled. Use [the continuation handoff](./CDC_TO_BATCH_HANDOFF.md) as the detailed CDC work tracker and next-task source.
+2. Validate the CDC cleanup workflow against disposable connector/PostgreSQL/Kafka/ClickHouse services. Continue validating CDC permissions, concurrent snapshot writes, and interruption recovery.
 3. Enforce source and tenant access before introducing cross-source linking references and linked reports.
 4. Evaluate explicit incremental strategies and S3/Parquet sources where their source guarantees and operational costs justify them.
 5. Extend AI layouts or diagnostics and dashboard navigation where they improve the existing workflows.
 
 The unchecked items below are proposals, not implemented capabilities. Existing CDC and AI features have the limitations described in [README.md](./README.md).
+
+## Current checkpoint (2026-11-14)
+
+- The agreed SFTP scope is complete: reusable destinations, multi-destination
+  Celery delivery, connection tests, Save & Test, Activate/Deactivate, delivery
+  audit/resend and the optional dashboard widget. Enterprise cloud destinations
+  remain future work.
+- The staff-only CDC rebuild-resource cleanup workflow is implemented in the
+  current worktree. Migration `0048` reconciles historical cleanup defaults;
+  migration consistency, 12 focused tests and an upgrade preserving historical
+  records pass in isolated SQLite. Migrations `0047` and `0048` are applied to
+  the running database; validate against disposable external services before
+  use. Do not run cleanup against production or shared resources.
+- Page-level control-plane templates now use thin wrappers and separate content
+  templates; the standalone login shell and shared component partials remain
+  intentionally purpose-specific.
+- CDC-to-batch work is parked, not complete. Restricted-role, migration-gate,
+  ownership-transfer candidate and real-worker cancellation probes are recorded
+  in [CDC_TO_BATCH_HANDOFF.md](./CDC_TO_BATCH_HANDOFF.md), along with the next
+  steps. The switch remains fail-closed until fencing and recovery are proven.
+- The running app uses Django 5.2.19; a 6.1 upgrade is deferred because the
+  released `django-celery-beat` requires Django <6.1 and Python must also be
+  upgraded. The requirements file does not pin Django to the 5.2 series.
+- Browser verification of polling and the unused-dependency review are small
+  follow-up candidates, deferred until a later session.
 
 ## Phase 1: Infrastructure, Networking & Decoupled Architecture
 - [x] Initialize repository structure (`README.md`, `ROADMAP.md`, `.gitignore`).
@@ -92,10 +117,16 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [x] Add a scheduled/manual Pipeline Automation backfill dispatcher (`trigger_all_active_clickhouse_backfill_task`) on the dedicated `queue_backfill` queue.
   - [x] Implement active-source guard checks (`is_active=True`), set the default batch limit to 10,000 rows via `DEFAULT_ETL_BATCH_SIZE`, and set Celery worker prefetch to 1.
   - [x] Configure periodic dispatch tasks (`trigger_all_active_clickhouse_ingestion_task`) and dedicated worker queue routing (`queue_hot`, `queue_backfill`, `queue_periodic`, and other application queues).
+- [ ] **Restore MongoDB CDC support:** MongoDB currently uses batch refresh; CDC remains disabled until implemented and validated. Debezium requires MongoDB change streams from a replica set or sharded cluster, not a standalone server.
+  - [ ] Add a separate, persistent single-node replica-set fixture to the test database setup without replacing or resetting the existing standalone MongoDB data. Configure authentication, initialization, readiness and addresses reachable by ReportHub and Kafka Connect; a second member is unnecessary for basic CDC tests.
+  - [ ] Review the existing MongoDB connector configuration and implement validated snapshot and change-event handling, including document identity, BSON/nested values, updates, deletes, ordering, replay, offsets and oplog-retention recovery.
+  - [ ] Exercise snapshot plus insert/update/delete propagation end-to-end through Debezium, Kafka, real workers and ClickHouse using disposable resources. Test restart, retries, concurrent changes and failure recovery before enabling the control-plane CDC option.
+  - [ ] Preserve existing MongoDB batch sources and the mode-change safety gate. Separately design and test any future MongoDB batch/CDC transitions, rebuilds and cleanup; a single-node fixture does not test replication or failover.
 - [x] Configure optional Oracle CDB/PDB and separate LogMiner credentials; verify insert, update, and delete CDC flows for the local PostgreSQL, MySQL, Oracle, and SQL Server test sources.
 - [x] Exercise the scheduled-ingestion dispatcher and task through a temporary Celery Beat schedule; the actual hourly tick was not observed directly.
-- [x] **Safe single-table CDC rebuild:** Create a dedicated connector/topic generation, snapshot into a staging table, checkpoint snapshot completion and offsets, and cut over under the source-ingestion lock using ClickHouse `Atomic` table exchange/rename. Expose durable status and an admin action.
-- [x] Test the admin rebuild action and read-only status view; prevent administrators from creating, editing, or deleting rebuild checkpoints through the admin.
+- [x] **Safe single-table CDC rebuild:** Create a dedicated connector/topic generation, snapshot into a staging table, checkpoint snapshot completion and offsets, and cut over under the source-ingestion lock using ClickHouse `Atomic` table exchange/rename. Expose durable status.
+- [x] Move CDC rebuild initiation from Django admin into the control plane with a confirmation step, source authorization, eligibility rechecks, and `queue_cdc` dispatch.
+- [x] Test control-plane rebuild initiation and verify the Django admin no longer exposes a rebuild action; prevent administrators from creating, editing, or deleting rebuild checkpoints through the admin.
 - [x] Add source-authorized control-plane rebuild monitoring showing source, table, status, last update, and required attention; let authorized administrators resume cutover-pending rebuilds while keeping checkpoint internals in Django admin.
 - [x] Route post-cutover changes through a dedicated consumer group initialized at the snapshot end offsets; verify local SQL Server `northwind.dbo.Categories`, PostgreSQL `chinook.public.artist`, MySQL `northwind.customers`, and Oracle `APP_USER.invoices` rebuilds plus insert/update/delete propagation.
 - [x] Test a paused MySQL rebuild with a snapshot backlog and source writes before cutover; verify continuation drains the checkpoint before replacement.
@@ -103,12 +134,14 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
 - [x] Inject a MySQL cutover failure after connector routing is saved but before rebuild status is saved; verify ingestion is blocked and manual resume does not repeat the exchange.
 - [x] Terminate an isolated MySQL rebuild worker after table exchange, wait for a shortened test lock to expire, and verify manual resume and subsequent CDC ingestion.
 - [x] Terminate an isolated MySQL rebuild worker after snapshot checkpoint persistence but before Kafka offset commit; manually resume and verify replay, subsequent changes, and source/warehouse values.
-- [ ] Add manual cleanup to the control plane: authorized administrators review retained connector generations, PostgreSQL slots/publications, Kafka resources, and ClickHouse tables, then confirm cleanup. Recheck that resources are obsolete and not needed by active or unfinished rebuilds; record outcomes and support retries. Do not automatically delete retained resources.
-  - [x] Stop automatically deleting superseded and failed rebuild connectors; retain them for operator review. The administrator-initiated cleanup workflow remains to be implemented.
-  - [ ] After administrator confirmation, run cleanup in a Celery task on a dedicated maintenance queue, separate from the UX and CDC workers.
-  - [ ] Recheck each resource's eligibility at execution time, including active connectors and unfinished rebuilds or transitions; reject resources that cannot be safely verified.
-  - [ ] Persist per-resource progress, outcomes, and errors; expose queued, running, completed, and failed states with results in the control plane.
-  - [ ] Make retries and interruption recovery safe and idempotent, without repeating completed deletions; require explicit administrator initiation rather than automatic cleanup.
+- [ ] Validate and complete manual cleanup in the control plane: administrators review retained rebuild-generation resources and explicitly confirm cleanup. Do not automatically delete retained resources.
+  - [x] Stop automatically deleting superseded and failed rebuild connectors; retain them for operator review.
+  - [x] Implement staff-only read-only inventory and explicit confirmation, with cleanup dispatched to a dedicated maintenance queue.
+  - [x] Recheck resource ownership and eligibility before each deletion; block active references, unfinished rebuilds/transitions, and unverified resources.
+  - [x] Persist per-resource progress, outcomes, and errors, and expose job states and recovery controls in the control plane.
+  - [x] Run focused cleanup view and service tests; all 12 tests pass in the isolated Django test database.
+  - [x] Reconcile historical cleanup-field defaults with migration `0048`; verify migration consistency, focused tests and an upgrade preserving historical records in isolated SQLite.
+  - [ ] Validate permissions and interruption behavior against disposable external services before using the workflow on shared resources.
 - [ ] Validate source-specific snapshot behavior and permissions, including schema changes, concurrent source writes, retention, retries, and recovery after interruption.
 - [ ] Add end-to-end multi-database tests and operational guidance for lag, restart/replay, and failed cutovers.
 - [ ] Implement a manually initiated source-wide CDC-to-batch transition with coordinated refresh and cutover, safe handling of active rebuilds and queued work, failure recovery, and tests for ongoing writes and deletes.
@@ -117,11 +150,11 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [x] Add an opt-in one-shot migration service with explicit migration credentials and successful-completion dependencies for all application services. Runtime startup migrations are disabled only in this mode; default startup remains unchanged and migration failures stop startup. Standalone startup and Compose tests pass; production deployment, existing-object ownership and live deployment orchestration remain outstanding. This does not fence writers.
   - [x] Validate candidate non-superuser PostgreSQL migration/runtime and database-scoped ClickHouse runtime identities in disposable isolated containers. The full migration chain and positive/negative runtime probes pass, including actual staging and own-query cancellation. Production provisioning, existing-object ownership and full worker/source coverage remain outstanding; database-wide runtime grants are not a source-scoped fence.
   - [x] Fix report and bounded ETL query-ID propagation using driver settings for queries, commands and inserts; share parameterized cancellation and log ETL cancellation failures. Fourteen isolated workflow/permission probes and 15 host tests pass, including active-query cancellation, actual report/batch refresh execution and retained uncertain operations after timeouts/simulated interruptions. Immediate UI cancellation and delayed-request recovery remain unimplemented; query IDs are not an external-write fence.
-  - [x] Exercise report and ingestion cancellation through real Celery workers, control-plane flags, process termination, delayed requests and dropped responses. Report cancellation remains cooperative until a blocking query returns. Source deactivation is rechecked after ingestion reads and writes and before table publication; an in-flight database or ClickHouse request is not preempted. Seven isolated worker scenarios pass, including the case where a delayed request executes after termination and a successful cancellation found no active query. Source cancellation is recorded with status `CANCELLED` through migration `0041`.
+  - [x] Exercise report and ingestion cancellation through real Celery workers, control-plane flags, process termination, delayed requests and dropped responses. Report cancellation remains cooperative until a blocking query returns. Source deactivation during a delayed staging insert is applied after the insert returns, with staging removed and the active table retained; in-flight requests are not preempted. Eight isolated worker scenarios pass, including the case where a delayed request executes after termination and a successful cancellation found no active query. Source cancellation is recorded with status `CANCELLED` through migration `0041`.
   - [ ] Design and validate recovery/fencing for uncertain or delayed external requests. A successful cancellation or absent query does not prove a delayed request cannot execute; keep CDC-to-batch switching disabled until outstanding operations can be proven stopped.
-  - [ ] Define and test a repeatable PostgreSQL existing-object ownership/grant transition on disposable populated databases, covering existing tables/sequences and future migration-created objects. Default privileges alone are not retroactive.
-  - [ ] Expand restricted-runtime validation to real workers, report execution/cancellation, batch refreshes and CDC ingestion/rebuilds across supported source databases; verify both required operations and denied privileges.
-  - [ ] Exercise the dedicated migration service with real roles and failed-migration deployment orchestration in isolation; prove each deployment runs a fresh migration job before upgraded application processes start.
+  - [ ] Define and review a production PostgreSQL existing-object ownership/grant transition. A repeatable single-legacy-owner candidate is tested on a disposable populated database, including existing tables, serial and identity sequences, migration history, future grants and denied runtime DDL. It is not a production procedure; inventory multiple owners, schemas, extensions, existing grants and shared objects before rollout. Default privileges alone are not retroactive.
+  - [ ] Expand restricted-runtime validation to CDC ingestion/rebuilds and all supported source databases. Isolated real workers now run report cancellation, batch ingestion and cancellation scenarios with restricted PostgreSQL/ClickHouse identities, checking worker identity and denied administration. A separate table-scoped read-only PostgreSQL source also passes successful initial/replacement full refreshes through keyset-paginated continuations and a completed CSV export with exact row checks; source writes/DDL and ungranted table reads are denied. Cancellation scenarios still use privileged source connections.
+  - [ ] Complete coordinated deployment validation for the dedicated migration service and prove each deployment runs a fresh migration job before upgraded application processes start. An isolated Compose probe now verifies real non-superuser roles, authentication and migration DDL failures blocking a runtime probe, and two successful deployments with a forced fresh migration. Existing processes, actual production web/worker commands and all deployment paths remain untested.
   - [ ] Remove administrator credentials from runtime environment variables and mounted configuration through an approved coordinated rollout; selecting `APP_*` credentials does not remove access to legacy credentials. Retire old workers, clients, identities and sessions without changing shared credentials or restarting services without approval.
   - [x] Fail closed in the queued experimental executor even when its configuration flags are enabled; tests may replace the gate for isolated prototype validation. This guard is not a deployment fence and does not protect direct calls to private primitives or old workers.
   - [ ] Expose confirmed switch and resume actions on the source page only after fencing and recovery are enforceable.
@@ -173,7 +206,17 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [ ] Evaluate monotonic ID/sequence watermarks for explicitly append-only sources, with initial-load checkpoints, stable paging, retry safety, concurrent transaction ordering, and a documented policy for late or lower IDs. Updates and deletes require another mechanism or reconciliation.
   - [ ] Evaluate SQL Server `rowversion` and other source-specific change tokens with correct binary/type handling, transaction visibility and safe high-water marks; updates and inserts can be captured, but deletes require separate tracking or reconciliation.
   - [ ] Provide strategy-aware backend validation and a warehouse configuration selector only after source semantics are supported and tested; document timestamp ties, precision, nulls, backfills, and delete behavior.
-- [ ] **S3/Parquet sources:** Design source configuration, access controls, file/schema discovery, incremental file/version tracking, and ClickHouse ingestion or query integration; test failure recovery and credential handling before adding this source type.
+- [ ] **Inbound file ingestion (proposal; not implemented):** Build a governed onboarding pipeline for files, separate from the existing outbound SFTP report-delivery workflow. Keep this proposal behind the Phase 5 source/tenant authorization work.
+  - [ ] **Design the trust boundary and lifecycle:** Define authorized owners, retention, limits, audit data, and explicit states from receipt through scan, schema approval, load, and failure. Do not treat a directory path or MinIO prefix alone as authorization or isolation.
+  - [ ] **Integrate the user-owned ScanHub API (deployment details pending):** Complete ScanHub's security hardening in its own project before exposing it; its owner plans to externalize secrets through protected environment configuration such as an uncommitted `.env`. After ScanHub is installed and its owner provides deployment and interface details, verify network reachability, authentication, TLS, upload/stream behavior, size limits, timeout/error semantics, health endpoints, and available engine/signature metadata. Call it from Celery workers rather than synchronous web requests; configure credentials as secrets and restrict service access. Bind each clean verdict to the exact immutable object version/content hash and record scan time, engine/signature version, and correlation ID. Treat unavailable, errored, timed-out, or ambiguous scans as not clean; never parse or load them.
+  - [ ] **Add durable file registration and quarantine:** Store originals in a private untrusted MinIO area under generated, non-overwriting keys; record source, object version, SHA-256, size, uploader/partner, state, scan result, attempts, and errors. Promote only the exact scanned bytes to trusted staging. Enforce file and archive-expansion limits, deduplicate by content/source policy rather than filename alone, and retain rejected files according to an explicit quarantine policy.
+  - [ ] **Prove multi-format ingestion in the first release:** Map one authorized customer inbox/folder to one logical dataset and ClickHouse target. Support a deliberately small set of record formats (initially CSV and a selected JSON record shape), with explicit mappings into the same typed target and append-only loading. Apply size quotas and stream large files; defer arbitrary formats, upserts, and snapshot replacement.
+  - [ ] **Add versioned schema profiles and review:** Scope profiles to an authorized customer and logical dataset, using detected format plus a schema fingerprint rather than filename extension or path alone. Show bounded metadata previews (headers by default; redact or require explicit authorization for row samples). Reuse approved profiles; pause unknown or breaking schemas for review and a new mapping, classify additive changes separately, preserve the original file, and never silently reinterpret types or meanings.
+  - [ ] **Map input schemas into logical datasets:** Treat each configured customer folder/inbox as a logical dataset, not as the security boundary or necessarily a literal ClickHouse table. Define a typed canonical schema and explicit, versioned mappings from each accepted input schema; multiple formats may append to the same target only when row grain, key meaning, units, timestamps, and null semantics agree. Preserve file and mapping provenance; avoid one ClickHouse table per header variant unless isolation requires it, and keep volatile extras in JSON/Map only when query needs justify it.
+  - [ ] **Separate ingestion from cross-dataset linking:** Files with different schemas mapped to one logical dataset are normalized into its common rows; files in other folders create separate datasets. Link those datasets later through explicit, authorized reference mappings with compatible keys, defined cardinality, and safeguards against duplicate or row-exploding joins. Do not treat row normalization and relational joins as the same operation.
+  - [ ] **Define inbound transport and expand sources:** Plan for both pulling files from a partner's SFTP server and receiving pushes to a ReportHub-managed SFTP endpoint; choose implementation order after assessing deployment needs. Route both through the same file-registration, scanning, schema-review, and loading pipeline. For pull, use read-only credentials, pinned host keys, allowed paths, and durable discovery checkpoints. For push, isolate customer accounts and folders, restrict permissions, and define a reliable upload-completion protocol so partial files are not processed. Define duplicate and retry behavior for both, and keep inbound credentials and workflows separate from outbound delivery destinations. Evaluate portal uploads and external S3/Parquet as additional transports/formats.
+  - [ ] **Add correction and snapshot modes only with guarantees:** For keyed updates, require stable keys and deterministic versions/tie-breaking; account for `ReplacingMergeTree` deduplication being eventual. For full snapshots, allow partition replacement only when the file is a complete, validated replacement for the exact target partition. Make retries idempotent and document delete/late-arrival behavior.
+  - [ ] **Validate end to end before production:** Test ScanHub outages, unknown verdicts, changed object versions, infected and oversized/archive-bomb samples, schema approval/drift, duplicates, partial uploads, worker restarts, concurrent arrivals, retention, and large-file memory/disk bounds against disposable MinIO, ScanHub, SFTP, Celery, and ClickHouse services.
 
 ---
 
@@ -197,20 +240,41 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
 
 ---
 
-## Phase 7: SFTP & File Transfer Protocol Integration
-- [ ] **Transfer Destinations Model:** Create configuration models to securely store SFTP, FTP, or cloud storage target credentials (hosts, ports, authentication keys).
-- [ ] **Automated Export Pipelines:** Hook generated report files into a downstream task that handles automated transfers using appropriate Python libraries.
+## Phase 7: SFTP & Enterprise Cloud Delivery
+- FTP and FTPS are outside the supported and planned destination scope.
+- [x] **SFTP Transfer Destinations:** Reusable SFTP configuration with protocol-specific authentication and validation. Future cloud destinations are tracked separately below.
+  - [x] Add SFTP destination configuration and staff-only control-plane create/edit/delete screens with search and pagination. Passwords, private keys and key passphrases use encrypted model fields, are never rendered back to the browser and are excluded from configuration history. Validate server fingerprints, ports, directories and supported private keys; destinations default to inactive. Saving a destination alone does not connect to its server.
+  - [x] Add an SFTP fixture alongside Mailpit in the test Compose stack, with Docker-managed upload and SSH host-key volumes, loopback-only host access and a private client key generated outside Git. A disposable real-SFTP probe verifies upload/download, persistence and host-key stability after container recreation, rejection of a wrong pinned key and denied writes outside the upload directory.
+  - [x] Match the Data Sources list/edit styling, breadcrumbs and aligned action buttons; use Active/Inactive status and Activate/Deactivate controls. Add Save & Test Connection to create/edit, preserve saved settings if queuing fails, and only show/submit credential fields for the selected authentication method.
+- [x] **SFTP Automated Export Pipelines:** Deliver stored report artifacts through independent downstream Celery tasks.
+  - [x] Add a dedicated transfer queue/worker, strict SHA256 host-key pinning, password/key authentication, bounded connection/I/O/task timeouts and staging/non-overwriting publication. Expose a searchable multi-select in Automated File Delivery on report create/edit, independently of email.
+  - [x] Generate once and track each execution/destination independently, including failure messages, attempt/retry counts and confirmed manual resend of failed deliveries only. Existing matching remote files are recognized on retry; different content is not overwritten. Delivery remains at-least-once if recipients remove files before acknowledgement. Interrupted running tasks require operator reconciliation rather than automatic resend.
+  - [x] Verify actual CSV generation, multi-destination delivery, authentication-failure isolation, host-key rejection and lost-acknowledgement retry through a real prefork Celery worker against disposable PostgreSQL, Redis, ClickHouse, MinIO and SFTP.
+  - [x] Add a standalone background SFTP connection-test action without generating a report. Verify the pinned host key, authentication and remote directory without writing files, show polled results and safe errors, and support staff-only Activate/Deactivate actions with audited configuration changes.
+  - [x] Verify the final forms and actions with 36 focused destination/delivery tests, live local SFTP checks, and desktop/mobile browser checks. Connection tests do not verify write permission; delivery remains at-least-once, and interrupted running transfers need operator reconciliation.
+- [ ] **Enterprise Cloud Destinations (evaluation):**
+  - [ ] Evaluate S3-compatible delivery first, reusing existing SDK experience and MinIO for isolated tests. Keep customer export destinations and their credentials separate from ReportHub's internal report storage.
+  - [ ] Evaluate Azure Blob Storage and Google Cloud Storage according to customer requirements, preferring workload/managed identities and short-lived credentials over stored long-lived keys.
+  - [ ] Define destination authorization and tenant isolation, least-privilege bucket/container-prefix access, TLS verification, encryption requirements, safe object naming, retry/idempotency behavior and delivery audit records before exposing cloud destination choices. Reuse the report destination selector and delivery history rather than creating a separate workflow.
 
 ---
 
 ## Phase 8: UI Framework, Navigation & Global Polish
 - [x] **Pure Tailwind CSS (Slate Palette):** Styling components (like action dropdowns, tables, and modals) using clean slate utilities (`slate-900`, `slate-800`, `slate-700`) and Alpine.js for lightweight interactivity.
-- [x] **Admin Navigation Dropdown:** Grouping administrative tools into clear categories:
-  - Users & Access Management (Profiles, Source Access, Connection Permissions)
-  - System Operations & Monitoring (DLQ, Task/Worker Status, Global Pipeline History)
-  - Integrations & Infrastructure (Email Settings)
+- [x] **Admin Navigation:** Split administrative links into Data & Pipelines, Operations, History, Governance, and Integrations menus; page breadcrumbs link back to relevant lists.
 - [x] **Global Cursor/Selection Optimization:** Applied a clean app-wide `select-none` approach on structural/UI chrome while targeted `select-text` preserves copy-paste usability on essential audit logs, error traces, and recipient strings.
-- [ ] Evaluate optional accessible widget navigation menus for filtered destinations where they add value; retain clear direct links for simple destinations and test keyboard, mobile, and empty-state behavior.
+- [x] Evaluate optional accessible widget navigation menus: the email-delivery widget offers a native disclosure with sent/delivered/failed/bounced audit links, while retaining its direct "View all" link. Simple pipeline, report, CDC failure and DLQ destinations retain direct links. Keyboard activation, Escape/focus return, outside-click dismissal, mobile sizing and empty-state links are verified.
+- [ ] **Contextual operations widget (proposal):** Add an optional compact dashboard card highlighting relevant recorded operational issues and linking to existing control-plane workflows. Existing operational records and dashboard components make this feasible; evaluate the implementation against the application's needs rather than assuming a specific architecture. Start with deterministic relevance rules; an LLM is not required.
+  - [ ] Start with a staff-only, read-only card using a small set of existing signals, such as a CDC rebuild awaiting cutover, a recently recorded CDC execution failure, or a failed report file delivery. Link to the authorized rebuild or audit page; actions remain in their existing workflows. Define severity, event windows and stable tie-breaking, and distinguish an unresolved state from a historical failure that may already have been addressed. Avoid repeatedly presenting old failures as current incidents.
+  - [ ] Scope every candidate and destination to the user's permissions before ranking; don't expose names, counts or details from inaccessible records. Staff access is the initial boundary for these signals, not tenant isolation. Non-staff or tenant-specific cards depend on Phase 5's consistent source/workspace authorization and tenant filtering, plus corresponding authorization on the linked pages. Do not assume an organization model or user-profile organization exists.
+  - [ ] Show the record's timestamp and what it actually establishes; a recorded failure does not prove a connector is currently unhealthy, and a recorded running state does not prove a worker is alive. Define an honest no-recent-notices state and an unavailable/stale state for failed or incomplete lookups; never infer that all pipelines, CDC streams or ClickHouse are healthy from the absence of records.
+  - [ ] Integrate with dashboard widget preferences and accessible responsive styling. Choose a refresh mechanism consistent with the dashboard and bound its frequency and queries; avoid expensive external checks on each request, surface refresh failures, and evaluate background aggregation only if measurement justifies it.
+  - [ ] Add inbound file/schema-review notices only after the Phase 4 inbound pipeline exists; the current SFTP feature is outbound report delivery. Add lag or volume-anomaly notices only after reliable metrics, thresholds, freshness and recovery semantics are implemented and validated. Optional AI wording can be evaluated later alongside the operations assistant, with restricted data, privacy review and deterministic facts; it must not determine severity or invent health claims.
+  - [ ] Test ranking and tie-breaking, stale and resolved/historical notices, empty and unavailable states, query bounds, role/source isolation and linked-page authorization. Verify polling, failure feedback, keyboard access and mobile layout in a browser.
+- [ ] **AI operations assistant:** Add a floating **Ask ReportHub** button across the control plane, opening an accessible, dismissible chat-style panel rather than a permanent breadcrumb-area panel. Support mobile and keyboard use. Offer suggested questions and read-only answers grounded in current operational records, such as emails sent today, recorded report delivery statuses and recent failures; link answers to the relevant histories.
+  - [ ] Use a bounded set of validated query types, with no arbitrary model-generated SQL or operational actions. Enforce existing permissions and source/tenant visibility, restrict the data sent to the model, and surface unavailable, incomplete or stale information rather than inventing answers.
+  - [ ] Define time zones and counting semantics, distinguish sent from delivered, and handle missing audit records and stalled tasks. Existing records alone do not prove every scheduled report ran or was delivered.
+  - [ ] Start without persistent question history or personalized prediction. Review application and AI-service logs, retention and privacy boundaries before deployment; provide suggested questions without recording individual usage.
 
 ---
 
@@ -219,16 +283,21 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
 - [x] Provide a searchable Dead Letter Queue interface for failed task inspection and requeue actions.
 - [x] Track report-email delivery states and provide email audit history and administrative actions.
 - [x] Provide pipeline and report execution history views.
-- [ ] Add dedicated file-transfer audit tracking for SFTP/FTP/object-storage deliveries.
+- [x] Add SFTP delivery audit tracking with search/status filters, per-destination errors and retry counts, confirmed failed-only resend and a staff-only optional dashboard widget.
+- [ ] Extend delivery audit tracking to future cloud object-storage deliveries.
 - [ ] Add consolidated ETL ingestion metrics and dedicated security/login audit views.
 
 ---
 
 ## Phase 10: Codebase Audit, Cleanup & Optimization (Active Phase 🎯)
+- [ ] **Codebase simplification:** Identify and remove verified unused code, obsolete paths and unnecessary duplication. Simplify complex flows and clarify naming where useful, preserving behavior and public interfaces; validate affected functionality with focused tests and update related documentation.
 - [ ] **Dependency & Configuration Pruning:**
-  - [ ] Consolidate duplicate package declarations in `requirements.txt` (`celery`, `pymysql`, `psycopg2-binary`).
+  - [x] Consolidate duplicate package declarations in `requirements.txt` (`celery`, `pymysql`, `psycopg2-binary`); verified all declared package names are unique.
   - [ ] Evaluate unused stack dependencies (FastAPI, Uvicorn, AsyncPG) to trim container build overhead if not servicing separate microservice endpoints.
   - [ ] Evaluate reducing duplicated Compose environment configuration without changing variable precedence, service-specific settings, or secret exposure.
+- [ ] **Upgrade to Django 6.1:** Stay on Django 5.2 for now. The released `django-celery-beat` 2.9.0 requires Django <6.1; track [upstream support](https://github.com/celery/django-celery-beat/issues/1079) before upgrading.
+  - [ ] Upgrade the application image and development environment to a supported Python version (3.12 or newer), then review Django and third-party dependency compatibility, including CSP, encrypted fields, sessions, history and Celery.
+  - [ ] Review Django 6.0 and 6.1 settings and breaking changes; test migrations, scheduling, authentication, report delivery and existing application behavior in an isolated environment before deployment.
 - [ ] **Audit Trail & Encryption Hardening:**
   - [ ] Audit `changes_data` JSON serialization in `control_plane/models.py` / `admin.py` to ensure encrypted credential fields are explicitly masked before historical snapshots are persisted.
 - [ ] **Task & Memory Safety Safeguards:**
@@ -237,6 +306,8 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
 - [ ] **Frontend & HTMX Polish:**
   - [ ] Audit templates and event bindings against the configured CSP, using delegated listeners where appropriate, and test the resulting behavior.
   - [ ] Verify clean termination on HTMX polling triggers (`hx-trigger="every 2s"`) upon reaching terminal execution states.
+    - [x] Check data-source, SFTP connection-test and report status responses: they poll only while queued or running and stop emitting polling attributes on terminal states. Remove duplicate polling from the source and report lists.
+    - [ ] Verify polling behavior in a browser. Dashboard active-work widgets deliberately continue polling when empty so newly started work can appear.
 
 ---
 
@@ -244,7 +315,7 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
 - [x] **Multi-Tiered Storage & Lifecycle Indexing:**
   - [x] Track report execution lifecycle metadata in PostgreSQL (`pending`, `running`, `completed`, `failed`, `cancelled`).
   - [x] Upload completed report artifacts to MinIO and persist their object paths with execution records.
-  - [ ] Add atomic/recoverable consistency handling between MinIO uploads and PostgreSQL execution updates.
+  - [x] Add recoverable consistency handling between MinIO uploads and PostgreSQL execution updates. Each upload attempt has a unique object path and records its expected size and SHA-256 before upload; completion verifies the stored size and checksum metadata. Staff can reconcile the current uncertain attempt from report history. Missing or mismatched objects are retained for review and never automatically deleted. Reconciliation finalizes the artifact only; it does not replay email or file-delivery fan-out.
 - [ ] **Dynamic Query Builder & Join Engine:**
   - [x] Build the `ReportDefinition` model and report configuration interface.
   - [x] Generate validated direct `LEFT JOIN` queries against ClickHouse analytical tables using stored `SourceRelationship` foreign keys.
@@ -261,8 +332,14 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [x] Improve PDF readability with adaptive page layout, wrapped cells, and repeating headers.
   - [x] Add an optional AI report-design draft workflow using validated schema metadata and natural-language requests.
   - [x] Add optional aggregate-only AI summaries to PDF, Excel, and JSON exports.
+  - [ ] **Evaluate AI-assisted ClickHouse analytics and observability (proposal; not implemented):**
+    - [ ] Extend natural-language report drafting to answer analytical questions through a constrained, validated report/query specification and the existing safe SQL builder; do not execute arbitrary model-generated SQL. Require source/tenant authorization, read-only ClickHouse access, and query/result limits before execution.
+    - [ ] Curate business metric definitions and table/column descriptions in PostgreSQL, retrieve relevant metadata for ambiguous terms, and evaluate `pgvector` only if simpler metadata search proves insufficient. Do not send raw event rows to the model.
+    - [ ] Offer opt-in, staff-visible query diagnostics using sanitized ClickHouse query-log and `EXPLAIN` data; generate reviewed optimization suggestions only, never automatic schema or query changes.
+    - [ ] Explore scheduled anomaly checks over bounded aggregate metrics with explicit baselines and thresholds; use AI only to summarize detected changes, and require configured human-reviewed alerting.
   - [ ] Implement chunked streaming exports (CSV, Excel/pandas, ReportLab PDF) to keep Celery memory utilization low.
   - [ ] Add tokenized, time-expiring report-sharing URLs with tenant-scoped authorization.
-  - [ ] Improve grouped-output labeling and calculate AI summary metrics with awareness of aggregate semantics.
+  - [x] Include aggregate functions in Grouped Summary output labels while preserving configured display labels.
+  - [ ] Calculate AI summary metrics with awareness of aggregate semantics.
   - [ ] Evaluate richer AI-assisted report layout drafts and metadata retrieval while retaining validated structured output and the existing safe SQL builder; define permissions, prompt-injection defenses, model/network privacy boundaries, and human review before execution.
   - [ ] Document and test backup/restore for Django PostgreSQL, ClickHouse, MinIO, Kafka state, and Ollama model storage; local deployment alone does not guarantee privacy or recovery.

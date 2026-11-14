@@ -71,9 +71,12 @@ class ReportCutoverGuardTests(TransactionTestCase):
             self.assertEqual(report.pk, self.report.pk)
 
     @patch("reports.tasks.Minio")
+    @patch("reports.tasks.report_artifact_matches", return_value=True)
     @patch("reports.tasks.clickhouse_connect.get_client")
     @patch("reports.tasks.set_task_progress")
-    def test_preparing_transition_report_completes(self, progress, client, minio):
+    def test_preparing_transition_report_completes(
+        self, progress, client, artifact_matches, minio
+    ):
         client.return_value.query.return_value.result_rows = [(42,)]
         result = execute_report_task.apply(args=[self.report.pk], throw=True).get()
         self.assertIn("successfully executed", result)
@@ -300,9 +303,12 @@ class TrackedReportCutoverGuardTests(TransactionTestCase):
         minio.assert_not_called()
 
     @patch("reports.tasks.Minio")
+    @patch("reports.tasks.report_artifact_matches", return_value=True)
     @patch("reports.tasks.clickhouse_connect.get_client")
     @patch("reports.tasks.set_task_progress")
-    def test_report_task_clears_record_after_successful_query(self, progress, client, minio):
+    def test_report_task_clears_record_after_successful_query(
+        self, progress, client, artifact_matches, minio
+    ):
         client.return_value.query.return_value.result_rows = [(42,)]
         execute_report_task.apply(args=[self.report.pk], throw=True).get()
         self.assertFalse(CdcSourceExternalOperation.objects.filter(source=self.source).exists())
@@ -490,6 +496,35 @@ class ReportManagementDownloadTests(TestCase):
             response,
             reverse("reports:report_download", args=[execution.pk]),
         )
+
+    def test_report_status_polls_once_until_execution_finishes(self):
+        status_url = reverse("reports:report_status", args=[self.report.pk])
+        list_url = reverse("reports:report_list")
+        for url in (list_url, status_url):
+            with self.subTest(status="never run", url=url):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.content.decode().count(f'hx-get="{status_url}"'), 0)
+
+        with patch("reports.views.execute_report_task.delay") as dispatch:
+            response = self.client.post(reverse("reports:report_run", args=[self.report.pk]))
+        self.assertRedirects(response, list_url)
+        execution = self.report.executions.get()
+        self.assertEqual(execution.status, "pending")
+        dispatch.assert_called_once_with(str(self.report.pk), str(execution.pk))
+        for status in ("pending", "running", "completed", "failed", "cancelled"):
+            ReportExecution.objects.filter(pk=execution.pk).update(status=status)
+            for url in (list_url, status_url):
+                with self.subTest(status=status, url=url):
+                    response = self.client.get(url)
+                    self.assertEqual(response.status_code, 200)
+                    content = response.content.decode()
+                    self.assertEqual(content.count(f'id="report-status-{self.report.pk}"'), 1)
+                    active = status in ("pending", "running")
+                    self.assertEqual(content.count(f'hx-get="{status_url}"'), int(active))
+                    self.assertEqual(content.count('hx-trigger="every 2s"'), int(active))
+                    if status == "pending":
+                        self.assertIn("Queued...", content)
 
     def test_download_is_hidden_again_after_report_is_edited(self):
         execution = ReportExecution.objects.create(
@@ -1129,7 +1164,7 @@ class ClickHouseReportQueryTests(TestCase):
             query,
         )
         self.assertIn("GROUP BY t0.`customer_id`", query)
-        self.assertEqual(headers, ["Customer", "Order count"])
+        self.assertEqual(headers, ["Customer", "COUNT(Order count)"])
         self.assertEqual(aggregates, ["", "COUNT"])
 
     def test_grouped_summary_without_dimensions_returns_one_overall_row(self):

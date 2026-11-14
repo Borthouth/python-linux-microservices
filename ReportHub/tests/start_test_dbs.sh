@@ -234,6 +234,7 @@ if ! docker network inspect reporthub_shared_network >/dev/null 2>&1; then
 fi
 
 echo "🚀 Starting ReportHub test databases..."
+"$SCRIPT_DIR/start_test_sftp.sh" --prepare-only
 docker compose -f "$COMPOSE_FILE" up -d
 
 # 5. Fully automated wait & import loop

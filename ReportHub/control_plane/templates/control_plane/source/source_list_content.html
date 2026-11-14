@@ -42,15 +42,10 @@
                                 {% endif %}
                             </td>
                             <td class="py-3.5 px-4">
-                                <!-- HTMX Polling Container for Background Celery State -->
-                                <div id="source-status-{{ source.pk }}" 
-                                   hx-get="{% url 'control_plane:source_status' source.pk %}"
-                                   hx-trigger="{% if source.last_sync_status == 'RUNNING' %}every 2s{% else %}none{% endif %}"
-                                   hx-swap="outerHTML">
-                                    
-                                    {% url 'control_plane:source_status' source.pk as status_url %}
-                                    {% include 'control_plane/components/celery_status.html' with component_id='source-status-'|add:source.pk|stringformat:'s' status=source.last_sync_status timestamp=source.last_synced error_message=source.last_sync_error poll_url=status_url %}
-                                </div>
+                                {% url 'control_plane:source_status' source.pk as status_url %}
+                                {% with source_id=source.pk|stringformat:'s' %}
+                                    {% include 'control_plane/components/celery_status.html' with component_id='source-status-'|add:source_id status=source.last_sync_status timestamp=source.last_synced error_message=source.last_sync_error poll_url=status_url %}
+                                {% endwith %}
                             </td>
                             <td class="py-3.5 px-4 text-right">
                                 <div class="inline-flex items-center space-x-1.5 justify-end">

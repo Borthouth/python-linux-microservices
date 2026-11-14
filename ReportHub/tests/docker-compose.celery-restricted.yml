@@ -1,0 +1,10 @@
+services:
+  probe:
+    environment:
+      CANCELLATION_RESTRICTED_IDENTITY: "1"
+      CANCELLATION_MIGRATION_PASSWORD: ${CANCELLATION_MIGRATION_PASSWORD:?Required isolated migration password}
+      CANCELLATION_RUNTIME_PASSWORD: ${CANCELLATION_RUNTIME_PASSWORD:?Required isolated runtime password}
+      APP_POSTGRES_USER: cancellation_runtime
+      APP_POSTGRES_PASSWORD: ${CANCELLATION_RUNTIME_PASSWORD:?Required isolated runtime password}
+      APP_CLICKHOUSE_USER: cancellation_runtime
+      APP_CLICKHOUSE_PASSWORD: ${CANCELLATION_RUNTIME_PASSWORD:?Required isolated runtime password}

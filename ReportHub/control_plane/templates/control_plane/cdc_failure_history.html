@@ -3,45 +3,5 @@
 {% block title %}CDC Execution Failures - ReportHub{% endblock %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto px-6 py-8">
-    <div class="mb-6">
-        <h1 class="text-2xl font-extrabold text-white">CDC Execution Failures</h1>
-        <p class="text-slate-400 text-xs mt-1">Historical failures, including sources that have since recovered. Use the task ID to find details in the ETL worker logs.</p>
-    </div>
-
-    {% url 'control_plane:cdc_failure_history' as search_action_url %}
-    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search by source, database type, task ID or error..." search_query=search_query %}
-
-    <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-x-auto">
-        <table class="w-full text-left border-collapse">
-            <thead>
-                <tr class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400 bg-slate-950/40">
-                    <th class="py-3.5 px-4">Source</th>
-                    <th class="py-3.5 px-4">Database Type</th>
-                    <th class="py-3.5 px-4">Failed At</th>
-                    <th class="py-3.5 px-4">Task ID</th>
-                    <th class="py-3.5 px-4">Error</th>
-                </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-800/60 text-sm">
-                {% for failure in page_obj %}
-                <tr class="hover:bg-slate-800/40 transition">
-                    <td class="py-3.5 px-4 font-medium text-white">{{ failure.source.name }}</td>
-                    <td class="py-3.5 px-4 text-slate-400 text-xs font-mono">{{ failure.source.db_type }}</td>
-                    <td class="py-3.5 px-4 text-slate-400 text-xs whitespace-nowrap">{{ failure.failed_at|date:"M j, Y H:i:s" }}</td>
-                    <td class="py-3.5 px-4 text-slate-400 text-xs font-mono">{{ failure.task_id|default:"—" }}</td>
-                    <td class="py-3.5 px-4 text-slate-300">{{ failure.error_message }}</td>
-                </tr>
-                {% empty %}
-                <tr>
-                    <td colspan="5" class="py-12 text-center text-slate-500 text-sm">
-                        {% if search_query %}No CDC execution failures match your search.{% else %}No recorded CDC execution failures.{% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-    {% include 'control_plane/components/pagination.html' %}
-</div>
+    {% include 'control_plane/cdc/cdc_failure_history_content.html' %}
 {% endblock %}

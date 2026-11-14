@@ -50,7 +50,7 @@ from reports.models import ReportDefinition
 from reports.query_builder import source_table_clickhouse_name
 
 
-def create_source_engine(profile):
+def create_source_engine(profile, connect_args=None):
     """Build a SQLAlchemy engine for a supported relational source."""
     if profile.db_type == DbChoice.MYSQL:
         url = sa.engine.URL.create(
@@ -91,7 +91,7 @@ def create_source_engine(profile):
         )
     else:
         raise ValueError(f"Unsupported SQL database type: {profile.db_type}")
-    return sa.create_engine(url)
+    return sa.create_engine(url, connect_args=connect_args or {})
 
 
 def _clickhouse_ingestion_settings():
@@ -2000,6 +2000,23 @@ def rebuild_cdc_table_task(self, source_table_pk, rebuild_pk=None):
         )
 
 
+def create_cdc_table_rebuild_record(table):
+    generation = uuid4()
+    suffix = generation.hex[:12]
+    connector_name = f"reporthub-source-{table.source_id}-table-{table.pk}-{suffix}"
+    active_table_name = source_table_clickhouse_name(table)
+    return CdcTableRebuild.objects.create(
+        source_table=table,
+        generation=generation,
+        connector_name=connector_name,
+        topic_prefix=connector_name,
+        notification_topic=f"{connector_name}.notifications",
+        consumer_group=f"{connector_name}-rebuild",
+        staging_table=f"{active_table_name}__rebuild_{suffix}",
+        previous_connector_name=table.cdc_connector_name,
+    )
+
+
 def _rebuild_cdc_table(self, source_table_pk, rebuild_pk=None, *, expected_source_pk=None):
     from etl.cdc import (
         _clickhouse_table_uuid,
@@ -2058,23 +2075,7 @@ def _rebuild_cdc_table(self, source_table_pk, rebuild_pk=None, *, expected_sourc
                 status__in=active_statuses
             ).first()
             if recovery is None:
-                generation = uuid4()
-                suffix = generation.hex[:12]
-                connector_name = (
-                    f"reporthub-source-{profile.pk}-table-{table.pk}-{suffix}"
-                )
-                topic_prefix = connector_name
-                active_table_name = source_table_clickhouse_name(table)
-                recovery = CdcTableRebuild.objects.create(
-                    source_table=table,
-                    generation=generation,
-                    connector_name=connector_name,
-                    topic_prefix=topic_prefix,
-                    notification_topic=f"{connector_name}.notifications",
-                    consumer_group=f"{connector_name}-rebuild",
-                    staging_table=f"{active_table_name}__rebuild_{suffix}",
-                    previous_connector_name=table.cdc_connector_name,
-                )
+                recovery = create_cdc_table_rebuild_record(table)
             rebuild_pk = recovery.pk
         else:
             recovery = CdcTableRebuild.objects.get(

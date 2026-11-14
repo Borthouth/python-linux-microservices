@@ -41,6 +41,7 @@ class FaultState:
             )
             should_hold = (
                 (mode == "delay-query" and kind == "query" and is_target_query)
+                or (mode == "delay-insert" and kind == "insert" and is_target_query)
                 or (mode == "delay-kill" and kind == "kill")
             )
             if not should_hold:
@@ -93,7 +94,8 @@ class Handler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get("Content-Length", "0"))
             value = json.loads(self.rfile.read(content_length) or b"{}")
             if value.get("mode") not in {
-                "pass", "delay-query", "delay-kill", "drop-kill-response",
+                "pass", "delay-query", "delay-insert", "delay-kill",
+                "drop-kill-response",
             }:
                 self._reply_json(400, {"error": "Unsupported fault mode"})
             else:
@@ -106,21 +108,40 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    def _read_body(self):
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            chunks = []
+            while True:
+                size = int(self.rfile.readline().split(b";", 1)[0].strip(), 16)
+                if size == 0:
+                    while self.rfile.readline().strip():
+                        pass
+                    return b"".join(chunks)
+                chunks.append(self.rfile.read(size))
+                if self.rfile.read(2) != b"\r\n":
+                    raise ValueError("Invalid chunked ClickHouse request.")
+        content_length = int(self.headers.get("Content-Length", "0"))
+        return self.rfile.read(content_length) if content_length else None
+
     def _forward(self):
         parsed = urlsplit(self.path)
         if self._handle_control(parsed.path):
             return
 
-        content_length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(content_length) if content_length else None
+        body = self._read_body()
         query_parameters = parse_qs(parsed.query)
         statement = query_parameters.get("query", [b""])[0]
         if isinstance(statement, str):
             statement = statement.encode("utf-8")
         statement = statement or (body or b"")
         is_kill = b"KILL QUERY" in statement.upper()
+        is_insert = (
+            statement.lstrip().upper().startswith(b"INSERT INTO")
+            or self.headers.get("Content-Type", "").split(";", 1)[0].lower()
+            == "application/octet-stream"
+        )
         query_id = query_parameters.get("query_id", [None])[0]
-        kind = "kill" if is_kill else "query"
+        kind = "kill" if is_kill else "insert" if is_insert else "query"
 
         STATE.hold_if_configured(kind, query_id)
 

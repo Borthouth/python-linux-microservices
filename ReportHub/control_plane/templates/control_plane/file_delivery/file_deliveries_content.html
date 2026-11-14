@@ -1,0 +1,73 @@
+<div class="max-w-7xl mx-auto px-6 py-8">
+    <div class="mb-6">
+        <h1 class="text-2xl font-extrabold text-white">File Delivery Audit</h1>
+        <p class="text-slate-400 text-xs mt-1">Monitor report file transfers, inspect failures, and resend failed deliveries.</p>
+    </div>
+
+    {% url 'control_plane:file_delivery_audit' as search_action_url %}
+    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search report, execution UUID, destination, path or error..." filter_name="status" filter_value=status_filter filter_label="All Statuses" filter_options=filter_options search_query=search_query %}
+
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-x-auto mb-6">
+        <table class="w-full text-left text-xs">
+            <thead class="text-slate-400 uppercase bg-slate-950/40">
+                <tr class="border-b border-slate-800">
+                    <th scope="col" class="px-4 py-3">Timestamp</th>
+                    <th scope="col" class="px-4 py-3">Report / Execution</th>
+                    <th scope="col" class="px-4 py-3">Destination / Remote Path</th>
+                    <th scope="col" class="px-4 py-3">Status</th>
+                    <th scope="col" class="px-4 py-3">Retries</th>
+                    <th scope="col" class="px-4 py-3">Errors</th>
+                    <th scope="col" class="px-4 py-3 text-right">Actions</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/60 text-slate-300">
+                {% for delivery in page_obj %}
+                <tr class="hover:bg-slate-800/40">
+                    <td class="px-4 py-3 whitespace-nowrap font-mono">
+                        {{ delivery.created_at|date:"Y-m-d H:i:s" }}
+                        {% if delivery.completed_at %}<div class="text-slate-400 mt-1">Completed: {{ delivery.completed_at|date:"Y-m-d H:i:s" }}</div>{% endif %}
+                    </td>
+                    <td class="px-4 py-3">
+                        <div class="font-medium text-white">{% if delivery.report %}{{ delivery.report.name }}{% else %}Deleted report{% endif %}</div>
+                        {% if delivery.execution %}
+                        <div class="mt-1">{{ delivery.execution }}</div>
+                        <div class="text-slate-400 font-mono mt-1 break-all">{{ delivery.execution_id }}</div>
+                        {% else %}<div class="text-slate-500 mt-1">No execution available</div>{% endif %}
+                        <div class="text-slate-500 font-mono mt-1 break-all">Delivery: {{ delivery.pk }}</div>
+                    </td>
+                    <td class="px-4 py-3 break-all">
+                        <div>{% if delivery.destination_name %}{{ delivery.destination_name }}{% elif delivery.destination %}{{ delivery.destination.name }}{% else %}Deleted destination{% endif %}</div>
+                        <div class="font-mono text-slate-400 mt-1">{{ delivery.remote_path|default:"—" }}</div>
+                    </td>
+                    <td class="px-4 py-3 whitespace-nowrap">
+                        <span class="px-2 py-1 rounded-full border {% if delivery.status == 'failed' %}bg-red-500/10 text-red-400 border-red-500/20{% elif delivery.status == 'succeeded' %}bg-emerald-500/10 text-emerald-400 border-emerald-500/20{% else %}bg-blue-500/10 text-blue-400 border-blue-500/20{% endif %}">{{ delivery.get_status_display }}</span>
+                    </td>
+                    <td class="px-4 py-3 font-mono">
+                        {{ delivery.retry_count }}
+                        <div class="text-slate-500 mt-1">Attempts: {{ delivery.attempt_count }}</div>
+                    </td>
+                    <td class="px-4 py-3 text-rose-400">
+                        {% if delivery.error_message %}
+                        <details>
+                            <summary class="cursor-pointer rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400">{{ delivery.error_message|truncatechars:100 }}</summary>
+                            <pre class="whitespace-pre-wrap break-all mt-2 text-xs">{{ delivery.error_message }}</pre>
+                        </details>
+                        {% else %}<span class="text-slate-500">—</span>{% endif %}
+                    </td>
+                    <td class="px-4 py-3 text-right whitespace-nowrap">
+                        {% if delivery.status == 'failed' %}
+                        <form method="post" action="{% url 'control_plane:file_delivery_resend' delivery.pk %}" data-confirm-resend>
+                            {% csrf_token %}
+                            <button type="submit" class="px-3 py-2 rounded-lg border border-sky-500/20 bg-sky-500/10 text-sky-400 hover:bg-sky-500/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400" aria-label="Resend failed delivery {{ delivery.pk }}">Resend</button>
+                        </form>
+                        {% else %}<span class="text-slate-500">—</span>{% endif %}
+                    </td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="7" class="p-8 text-center text-slate-500">No file delivery audit records found.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% include 'control_plane/components/pagination.html' %}
+</div>

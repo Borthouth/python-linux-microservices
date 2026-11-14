@@ -125,6 +125,7 @@ CELERY_TASK_QUEUES = {
     'queue_hot': {'exchange': 'queue_hot', 'routing_key': 'queue_hot'},
     'queue_cdc': {'exchange': 'queue_cdc', 'routing_key': 'queue_cdc'},
     'queue_warm': {'exchange': 'queue_warm', 'routing_key': 'queue_warm'},
+    'queue_transfers': {'exchange': 'queue_transfers', 'routing_key': 'queue_transfers'},
     'queue_cold': {'exchange': 'queue_cold', 'routing_key': 'queue_cold'},
     'queue_backfill': {
         'exchange': 'queue_backfill',
@@ -135,6 +136,10 @@ CELERY_TASK_QUEUES = {
         'routing_key': 'queue_periodic',
     },
     'queue_dlq': {'exchange': 'queue_dlq', 'routing_key': 'queue_dlq'},
+    'queue_maintenance': {
+        'exchange': 'queue_maintenance',
+        'routing_key': 'queue_maintenance',
+    },
 }
 
 CELERY_TASK_DEFAULT_QUEUE = 'queue_warm'
@@ -158,9 +163,13 @@ KAFKA_CONNECT_URL = env(
 
 # Explicit Task Routing Map
 CELERY_TASK_ROUTES = {
+    'reports.tasks.deliver_report_file_task': {'queue': 'queue_transfers'},
+    'control_plane.tasks.test_transfer_destination_task': {'queue': 'queue_transfers'},
     'control_plane.tasks.test_source_connection_task': {'queue': 'queue_ux'},
     'control_plane.tasks.test_external_logging_task': {'queue': 'queue_ux'},
     'control_plane.tasks.sync_data_source_task': {'queue': 'queue_hot'},
+    'control_plane.tasks.scan_cdc_resources_task': {'queue': 'queue_maintenance'},
+    'control_plane.tasks.cleanup_cdc_resources_task': {'queue': 'queue_maintenance'},
     'etl.tasks.introspect_source_schema_task': {'queue': 'queue_periodic'},
 }
 

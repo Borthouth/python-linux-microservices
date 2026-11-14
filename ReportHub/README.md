@@ -3,6 +3,8 @@
 
 `ReportHub` is an analytics platform designed to ingest, unify, and report on data from multiple distributed source databases (PostgreSQL, MySQL, Microsoft SQL Server, MongoDB, and Oracle) into a centralized analytical warehouse—**without hardcoding source-data models**. Built with a Django control plane, a **ClickHouse** analytical engine, **MinIO** S3-compatible object storage, and Celery-driven background tasks, ReportHub provides schema reflection, source-access configuration, scheduled task governance, asynchronous email notifications, and report generation.
 
+For overall progress and future work, see [ROADMAP.md](./ROADMAP.md). The [CDC-to-batch handoff](./CDC_TO_BATCH_HANDOFF.md) is the detailed tracker and next-task guide for CDC work.
+
 ---
 
 ## 🏗️ Core Architecture & Design
@@ -15,11 +17,11 @@
 - **Django Control Plane & Standardized Shell Layout:** Centralized `base.html`, role-based access configuration, self-service profile management, source database profiles, scheduled ETL task management, and user widget preferences. Collaborative workspaces and report sharing links are not currently implemented.
 - **Audit History:** Selected control-plane models use historical records, pipeline automation changes have a dedicated audit log, and `/control-plane/audit/` displays available configuration history. Separate email-delivery and failed-task (DLQ) audit/management pages are also available; a consolidated multi-domain audit suite is not implemented.
 - **Dead Letter Queue (DLQ) & Background Task Governance:** Redis-backed storage (`dlq:task:*`) requiring JSON decoding, attribute normalization, and robust timestamp parsing via `django.utils.dateparse`. Fully searchable and paginated management UI (`/control-plane/dlq/`) with matched container widths (`max-w-7xl`) and modular dashboard grid widgets for tracking, inspecting stack traces, and re-queuing failed background tasks across the 7-tier Celery infrastructure.
-- **Active pipeline telemetry:** The dashboard shows the five most recent tasks last reported as running. The full searchable, paginated list is under **Administration > Operations & History > Active Pipeline Executions**, with a fixed current-step filter; table and collection names can be found using search. Redis progress records are not a live worker census: interrupted or completed batch tasks may remain marked running until their records expire.
-- **Active report generations:** The dashboard shows the five newest report executions recorded as running. The full list is searchable by report name, filterable by current step, and paginated under **Administration > Operations & History > Active Report Generations**. Steps reflect last-saved progress; an unrecognized progress value is shown as Unknown. A recorded running status does not guarantee that its worker is still running.
+- **Active pipeline telemetry:** The dashboard refreshes the five most recent tasks last reported as running every three seconds. The full searchable, paginated list is under **Operations > Active Pipeline Executions**, with a fixed current-step filter; table and collection names can be found using search. Redis progress records are not a live worker census: interrupted or completed batch tasks may remain marked running until their records expire.
+- **Active report generations:** The dashboard refreshes the five newest report executions recorded as running every three seconds. The full list is searchable by report name, filterable by current step, and paginated under **Operations > Active Report Generations**. Steps reflect last-saved progress; an unrecognized progress value is shown as Unknown. A recorded running status does not guarantee that its worker is still running.
 - **Asynchronous Email Delivery & Status Auditing:** Celery-driven background email dispatches backed by Django's email backend and a local development test email server. Includes an **Email Delivery Audit & Governance Module** tracking delivery lifecycles (`sent`, `delivered`, `failed`, `bounced`), retry counts, error tracebacks, inspection modals, and re-queue/delete workflows.
   Staff users can view the five latest audit records on the dashboard and toggle the widget under **Customize Widgets**; the widget links to the full audit page.
-- **Asynchronous UI Status & Toast Notification Architecture:** Real-time database connection testing driven by HTMX polling (`every 2s`), backed by CSP-compliant event-driven (`htmx:afterSwap`) floating toast notifications and robust fallback UI states ("Ready", "Running...", "Failed").
+- **Asynchronous UI Status & Toast Notification Architecture:** Database connection testing uses HTMX polling (`every 2s` while running), backed by CSP-compliant event-driven (`htmx:afterSwap`) floating toast notifications and robust fallback UI states ("Ready", "Running...", "Failed"). Polling stops when the test succeeds or fails.
 - **Dynamic Warehouse Provisioning:** Rather than hardcoding models, ReportHub inspects source databases (`information_schema` / catalog views), allows selective field mapping via an interactive master-detail UI, and provisions analytical tables with source namespacing and logical foreign-key metadata.
 - **Multi-Source Ingestion:** ClickHouse table names include the source ID for source identification. Reports can join directly related tables within one source; cross-source linking and reporting are planned, not implemented.
 - **Security & Access Configuration:**
@@ -27,8 +29,8 @@
   2. *Role-Based Access Control (RBAC):* Viewer, Analyst/Builder, and System Admin roles (`is_admin`).
   3. *Tenant Row-Level Security:* Company-scoped `company_id` query injection is not currently implemented.
   4. *Security Hardening:* Includes `django-csp`, HttpOnly session/CSRF cookies, and configured Django security headers. Compose publishes database, Redis, ClickHouse, and MinIO-console ports to the host; restrict them with firewall/network settings for deployments.
-- **Operational Audit Views:** Available views include configuration history, DLQ task management, email delivery audit, and pipeline/report execution histories. Dedicated file-transfer, consolidated ETL metrics, and login-security audit views remain future work.
-- **Report Executions & Artifact Downloads:** Track report execution status and history (`ReportExecution`), store completed exports in MinIO, and provide authenticated downloads to administrators.
+- **Operational Audit Views:** Available views include configuration history, DLQ task management, email and SFTP delivery audit, and pipeline/report execution histories. Consolidated ETL metrics and login-security audit views remain future work.
+- **Report Executions & Artifact Downloads:** Track report execution status and history (`ReportExecution`), store completed exports in MinIO, and provide authenticated downloads to administrators. The report list polls while an execution is queued or running and stops when it finishes. Each upload attempt uses a unique object path and records expected size and SHA-256 before upload; completion verifies the stored size and checksum metadata. Staff can reconcile the current uncertain attempt from **All Report Runs**. Missing or mismatched objects are retained for review and never automatically deleted. Reconciliation finalizes artifact state only; it does not replay email or file-delivery fan-out.
 - **Visual Report Exports:** Configure bar, line, or pie charts from report columns and include them in PDF and Excel exports; Excel workbooks also include a filtered data sheet and a separate chart.
 - **Tabular and Grouped Reports:** Tabular Detail returns selected source records. Grouped Summary groups by selected columns without an aggregate and applies `COUNT`, `SUM`, `AVG`, `MIN`, or `MAX` to aggregated columns; selecting aggregates for every column produces one overall summary row.
 - **Readable PDF Exports:** Wide reports use landscape layout, wrapped cells, and repeated table headers. PDF output is capped to a configured row limit.
@@ -151,6 +153,19 @@ restarts do not rerun this deployment gate; the two-step procedure is required
 for each new deployment. The existing `reporthub-stack.sh` helper does not
 include these optional overrides and must not be used to deploy this mode.
 
+An opt-in disposable Compose probe applies the actual migration override to an
+isolated test stack. It checks that incorrect credentials and a PostgreSQL DDL
+failure prevent runtime startup, then verifies a restricted runtime after a
+successful migration and after a second, forced fresh migration run. The test
+uses a runtime probe in place of the production web and worker commands; it
+does not validate stopping existing production processes or every deployment
+path. Run it from `ReportHub/`:
+
+```bash
+REPORTHUB_MIGRATION_GATE_TEST=1 python3 -m unittest discover \
+  -s tests/infrastructure -t . -p test_migration_gate.py -v
+```
+
 Outside this override, `MIGRATIONS_ON_STARTUP` defaults to `1`; explicit `0`
 skips startup migrations, and any other value fails startup. Disabling it
 outside an equivalent migration-gated deployment is unsafe. This separation
@@ -189,6 +204,12 @@ The candidate permission model is exercised by
 - PostgreSQL migration identity: owns the isolated database and `public` schema
   and objects it creates; no superuser, role/database creation, replication or
   RLS-bypass attributes. It applies the complete Django migration chain.
+- A separate populated PostgreSQL database tests a candidate transfer from a
+  legacy owner: the isolated administrator runs `REASSIGN OWNED`, sets schema
+  ownership and grants for existing and future objects, and repeats the
+  operation. Existing data, serial and identity sequences, migration history,
+  a subsequent migration, and positive and negative runtime permissions are
+  checked. This is a probe, not a production migration procedure.
 - PostgreSQL runtime identity: database `CONNECT`, schema `USAGE`, table
   `SELECT/INSERT/UPDATE/DELETE`, and sequence `USAGE/SELECT`. Default privileges
   belonging to the migration role cover future tables and sequences. It has no
@@ -223,17 +244,21 @@ removed after success or failure; do not run the probe script directly against
 an existing stack.
 
 These are candidate grants verified on PostgreSQL 15.19 and ClickHouse
-26.10.3.7, not a production provisioning or upgrade procedure. Existing
-PostgreSQL objects need a separately reviewed ownership/grant transition;
-default privileges are not retroactive and only apply to objects created by
-the specified role. The runtime can change all application metadata and
+26.10.3.7, not a production provisioning or upgrade procedure. The isolated
+existing-object probe assumes one legacy owner and a disposable database;
+production needs an inventory and review of all owners, schemas, extensions,
+grants, default privileges, connections and shared objects before any transfer.
+`REASSIGN OWNED` affects all objects owned by the role in the current database
+and shared objects; it is not a source-scoped operation. Default privileges
+are not retroactive and only apply to objects created by the specified role.
+The runtime can change all application metadata and
 create/drop/rename/exchange every table in its ClickHouse database. It cannot
 fence different sources or old workers sharing that identity. System-table
 reads may also reveal server metadata; this is not tenant isolation.
 
-Live Kafka/Debezium, real workers, all supported source databases, production
-role rollout, existing-object ownership and interrupted-operation recovery are
-not covered. Report and bounded ETL requests assign their IDs through driver
+Live Kafka/Debezium, all supported source databases, production role rollout
+and interrupted-operation recovery are not covered by the identity probe.
+Report and bounded ETL requests assign their IDs through driver
 `settings={"query_id": ...}`; `transport_settings` carries HTTP headers and does
 not assign the query ID. Isolated tests verify exact IDs for queries, commands
 and inserts, active-query cancellation through the driver, and actual report
@@ -245,17 +270,160 @@ even after a cancellation command finds no active query.
 UI cancellation remains cooperative, not immediate. Report cancellation flags
 are checked after blocking queries return. Ingestion rechecks whether its source
 is active after source reads and ClickHouse writes and before publishing a
-staging table; deactivation during a read cancels the task, removes staging and
-preserves the existing ClickHouse table. The source sync status is recorded as
+staging table; deactivation during a read or a request delayed before a staging
+insert reaches ClickHouse cancels the task after the request returns, removes
+staging and preserves the existing ClickHouse table. The source sync status is recorded as
 `CANCELLED`. These checks do not preempt a database or ClickHouse request already
 in progress.
 
-Seven opt-in, disposable real-worker scenarios cover report and ingestion
+Eight opt-in, disposable real-worker scenarios cover report and ingestion
 control-plane flags, worker termination, delayed ClickHouse requests and dropped
 cancellation responses. They also demonstrate that a delayed request can still
 execute after worker termination and after a cancellation found no active
 query. This behavior is tested, but uncertain-request recovery and fencing are
 not implemented. Keep CDC-to-batch switching disabled.
+
+The same real-worker scenarios can additionally run with candidate restricted
+PostgreSQL and ClickHouse runtime identities. The worker's actual identities
+and denied administration are checked, along with report and batch-ingestion
+cancellation. Another scenario uses a separate PostgreSQL source database and
+a table-scoped read-only account, verifies denied writes/DDL and ungranted
+table reads, then runs initial and replacement full refreshes with two-row
+keyset pagination through real worker continuations. It verifies exact rows,
+physical-table replacement and staging cleanup, and downloads a completed
+CSV export from MinIO to check its contents. The cancellation scenarios still
+use a privileged source test account. CDC worker operations, other source engines and production role
+rollout are not covered. Enable both flags from `ReportHub/`:
+
+```bash
+REPORTHUB_CELERY_CANCELLATION_TEST=1 REPORTHUB_CELERY_RESTRICTED_TEST=1 \
+  python3 -m unittest discover -s tests/infrastructure -t . \
+  -p test_celery_cancellation.py -v
+```
+
+## Dashboard navigation
+
+Global administrators now have separate **Data & Pipelines**, **Operations**,
+**History**, **Governance**, and **Integrations** menus. Breadcrumbs return to
+the relevant list or section, with the current page shown as the final item.
+
+The Recent Email Deliveries widget retains a direct link to the full audit
+page and offers an optional **Filter email deliveries** disclosure for sent,
+delivered, failed and bounced records. Open it with Enter or Space, tab to a
+filter, or press Escape to close it and return focus to the disclosure.
+Clicking outside closes it too. Filters remain available when the widget is
+empty. Widgets with a single destination retain their direct links.
+
+## Automated SFTP report delivery
+
+Staff users can manage destinations under **Integrations > Transfer
+Destinations**. Apply the current control-plane and reports migrations
+using the deployment's migration identity before deploying updated workers.
+Only SFTP is currently supported.
+FTP and FTPS are outside the product scope. Cloud object-storage destinations
+are planned for enterprise evaluation, not available protocol choices.
+
+The destination pages follow the Data Sources layout, with standard action
+buttons and breadcrumbs that return to the destination list. Search by name or
+host and filter by Active/Inactive status; pagination preserves both filters.
+Use **Test** to queue a Celery connection check, including the pinned host key,
+authentication and remote directory. **Last Tested** updates automatically.
+The create/edit form also offers **Save & Test Connection**, using the same
+button styling as Data Sources. It saves valid settings before queuing the
+test; if queuing fails, the saved settings are retained and an error is shown.
+The separate **Save Destination** button does not queue a connection test.
+Tests also work on inactive destinations and do not write files or verify write
+permission. Editing connection settings clears an earlier test result.
+Connection tests have a 60-second soft and 90-second hard task limit; queued
+tests expire after 120 seconds. If the worker never reports back, polling or
+another Test request marks the old attempt failed after five minutes, allowing
+a new attempt.
+**Activate/Deactivate** changes report delivery availability immediately; deactivating
+does not cancel transfers already in progress. Both actions require a staff
+account and a CSRF-protected POST.
+
+Configure the hostname or IP (without a scheme or port), port (default 22),
+username, absolute remote directory and server's `SHA256:` host-key fingerprint.
+Obtain the fingerprint from the server administrator through a trusted channel;
+do not treat an unverified first connection as proof of the server's identity.
+Choose password authentication or an OpenSSH/PEM RSA, Ed25519 or NIST ECDSA
+private key, supplying a passphrase when the key is encrypted.
+The form only shows fields for the selected authentication method; hidden
+credential fields are excluded from submission when switching methods.
+
+Credentials use the existing `FIELD_ENCRYPTION_KEY` encryption mechanism. Keep
+that key available and outside version control; losing it makes saved
+credentials unreadable. Passwords, private keys and passphrases are never
+rendered back to the browser and are excluded from configuration history.
+Leave credential fields blank when editing to preserve the saved values for the
+same authentication method. Changing methods removes obsolete credentials.
+When replacing an encrypted key with an unencrypted one, explicitly select
+**Clear the saved key passphrase**. Deleting a destination removes its saved
+credentials, retaining only non-secret configuration history.
+
+Destinations default to inactive. Saving or activating one does **not** itself
+connect to the server. In report create/edit, enable **Automated File Delivery**
+and use its searchable multi-select to choose one or more active destinations.
+Email distribution is independent and can be enabled alongside SFTP.
+
+After generation stores the artifact, one Celery task per destination reads
+that same artifact. The dedicated `celery_transfer_worker` consumes
+`queue_transfers`; report generation continues on the existing report queue.
+Upgrade workers that execute reports as well as starting the transfer worker.
+Rebuild application/worker images with `docker compose build` after dependency
+changes; stopping and starting an old image does not install new requirements.
+No transfer runs in the web request. SSH host keys must match the configured
+SHA256 fingerprint; SSH agents, automatically discovered client keys and
+trust-on-first-use are disabled. Connection/authentication timeouts are 10
+seconds, channel I/O is limited to 30 seconds, and tasks have a 300-second soft
+and 330-second hard limit.
+
+Remote filenames include the execution and delivery UUIDs. Files are uploaded
+to a `.part` path and published with a non-overwriting SFTP rename. A retry
+recognizes an already-published file only if its size and SHA256 match the
+stored artifact; different existing content is never overwritten. Partial
+uploads can remain after a failure and be replaced by a later retry.
+Delivery is **at-least-once**, not exactly-once: if a recipient consumes or
+moves a file before acknowledgement is recorded, a resend can produce a
+downstream duplicate. Recipients should deduplicate using the filename IDs.
+
+The optional **Recent File Deliveries** dashboard widget follows the existing
+widget customization controls. Its full audit page shows each destination's
+status, errors, attempts and retry count, with a confirmed **Resend** action
+for failed deliveries only. Retries are manual, independently queued and
+counted; they do not regenerate the report or resend successful destinations.
+Inactive/removed destinations, changed connection targets and unavailable
+artifacts block resend. Credential rotation for an otherwise unchanged target
+is allowed. An abruptly terminated task can remain `running`; it is not
+automatically resent and requires operator reconciliation after the old
+worker/request is known to have ended. Connection tests are separate from
+report deliveries and do not create delivery audit records.
+
+Run focused configuration, delivery and monitoring tests with a disposable
+test database:
+
+```bash
+python manage.py test reports.test_file_delivery control_plane.test_file_deliveries \
+  control_plane.tests.TransferDestinationTests
+```
+
+Verification on 2026-11-12 included 36 focused destination/delivery tests after
+the final form changes, real Celery/SFTP report fanout and retry integration,
+and live **Test** and **Save & Test Connection** checks against the local SFTP
+fixture. Browser checks verified authentication-specific field visibility,
+exclusion of hidden credentials from submission, matching Data Sources form
+styles, and layouts at 375, 768 and 1280 pixels without page overflow.
+The agreed SFTP scope is complete; cloud destinations and automatic recovery
+of interrupted running deliveries remain outside that completed scope.
+
+The enterprise cloud direction is S3-compatible delivery first, with MinIO for
+local testing; Azure Blob Storage and Google Cloud Storage can follow customer
+requirements. These would be customer-selected export targets, separate from
+ReportHub's internal report storage, using the same report destination selector
+and delivery history as SFTP. Destination authorization, tenant isolation,
+least-privilege access, workload identities or short-lived credentials, verified
+TLS, encryption and safe retry behavior must be designed and tested before
+cloud delivery is exposed.
 
 ## Starting and stopping ReportHub with CDC
 
@@ -300,6 +468,7 @@ container logs rather than resetting its persistent volume.
 | **MongoDB** | `localhost` | `27018` | `test_user` / `test_password` | `app_analytics` (auth DB: `admin`) |
 | **Oracle** | `localhost` | `1522` | `app_user` / `YourStrongPassword123!` | `FREEPDB1` |
 | **Test Email Server** | `localhost` | `1025` / `8025` | *None (Development SMTP/Web UI)* | `mailpit` / local SMTP sink |
+| **Test SFTP Server** | `127.0.0.1` | `2222` | `reporthub` / generated SSH private key | `/upload` |
 
 When ReportHub itself runs in Docker, use the Compose service hostnames and internal ports instead: `postgres-test:5432`, `mysql-test:3306`, `mssql-test:1433`, `mongo-test:27017`, and `oracle-test:1521`.
 
@@ -318,6 +487,95 @@ If the test MongoDB container previously ran with replica-set options, recreate 
 # Optional: remove test containers and erase all their data, then start fresh
 ./tests/start_test_dbs.sh --reset
 ```
+
+The reset option also deletes test SFTP uploads and host keys. Previously saved
+SFTP destination fingerprints will need to be updated from the new trusted
+server fingerprint after a reset.
+
+### Persistent test SFTP server
+
+The `sftp-test` service lives beside Mailpit in
+`tests/docker-compose.test.yml`. Its uploaded files are stored in the
+`sftp_test_data` named volume, not the container's writable layer or the Git
+checkout. A second named volume, `sftp_test_host_keys`, persists `/etc/ssh`
+(including server configuration and host keys), keeping the server fingerprint
+stable when its container is recreated. Do not remove these volumes to restart
+the server.
+
+Start **only SFTP**, without restarting the databases, email or ReportHub:
+
+```bash
+./tests/start_test_sftp.sh
+```
+
+The helper requires Docker Compose, Python 3 and `ssh-keygen`. It creates an
+unencrypted development-only Ed25519 client key in
+`~/.local/share/reporthub/sftp-test/client_ed25519`, outside the repository,
+with restricted directory/file permissions. Only its public key is mounted into
+the server. Existing keys are reused. The main test-stack startup script
+prepares this key automatically as well.
+
+The helper prints the server's SHA256 fingerprint obtained directly from its
+container. Configure a destination in **Transfer Destinations** with:
+
+- Host: `sftp-test` and port: `22` when ReportHub runs in Docker.
+- Username: `reporthub`; authentication: **SSH private key**.
+- Private key: the generated client key's contents; leave the passphrase blank.
+  Do not commit the key or paste it into chat, issues or logs.
+- Server host-key fingerprint: the helper's printed `SHA256:` value.
+- Remote directory: `/upload` (the account is chrooted; its root is not writable).
+
+Saving the destination does not send anything by itself. Enable it, select it
+under **Automated File Delivery** on a report, save the report, then run it.
+Monitor the dashboard widget or its full file-delivery audit page. Use a clear
+name such as **Local Test SFTP** to distinguish this fixture from production
+destinations.
+
+For manual SFTP from the Ubuntu host, use:
+
+```bash
+sftp -i "$HOME/.local/share/reporthub/sftp-test/client_ed25519" \
+  -P 2222 reporthub@127.0.0.1
+```
+
+Verify the fingerprint against the helper's output before accepting the host
+key. Host port `2222` is bound to loopback only; it is not exposed to the LAN.
+ReportHub containers reach it over the existing shared Docker network.
+Optionally set `SFTP_TEST_PORT` or an absolute `SFTP_TEST_KEY_DIR` in the
+environment or local `.env`; the key directory must remain outside Git.
+
+Inspect or copy uploaded files without changing their volume:
+
+```bash
+docker compose -f tests/docker-compose.test.yml exec sftp-test ls -l /home/reporthub/upload
+mkdir -p "$HOME/ReportHub-SFTP-downloads"
+docker cp reporthub-sftp-test:/home/reporthub/upload/. "$HOME/ReportHub-SFTP-downloads/"
+
+# Stop just SFTP; preserve files and host keys
+./tests/start_test_sftp.sh --stop
+```
+
+Run the disposable integration probe without touching this persistent service
+or its volumes:
+
+```bash
+REPORTHUB_SFTP_TEST=1 python3 -m unittest discover \
+  -s tests/infrastructure -t . -p test_sftp_server.py -v
+```
+
+For complete report generation and delivery through a real prefork Celery
+worker, isolated PostgreSQL, Redis, ClickHouse, MinIO and SFTP:
+
+```bash
+docker compose build celery_transfer_worker
+REPORTHUB_REPORT_SFTP_TEST=1 python3 -m unittest discover \
+  -s tests/infrastructure -t . -p test_report_sftp.py -v
+```
+
+This probe checks multi-destination CSV delivery, authentication-failure
+isolation, host-key rejection and an idempotent retry after a simulated lost
+acknowledgement. It uses synthetic data and removes its own containers,
+networks, volumes and client keys afterward.
 
 ## ClickHouse ingestion and backfills
 
@@ -379,11 +637,15 @@ Deploy queue changes to all producers and workers together. Let active tasks fin
 
 ### Rebuilding one CDC-managed table
 
-For a CDC-managed relational table with a discovered primary key, use the Django admin **Source tables** action **Safely rebuild selected CDC warehouse tables**. The rebuild creates a dedicated Debezium connector and Kafka topic generation, loads a staging ClickHouse table, waits for Debezium's successful snapshot notification and drains the snapshot offsets, then cuts over under the normal source-ingestion lock. The durable rebuild record and its status are available in the read-only **CDC table rebuilds** admin view; records cannot be created, edited, or deleted there. Do not drop or recreate the active ClickHouse table manually.
+For a CDC-managed relational table with a discovered primary key, global administrators can start a rebuild from the table's **Warehouse Field Selection** panel; the **CDC Table Rebuilds** page also lists eligible tables for source-scoped administrators. A confirmation page explains the operation, and the control plane rechecks source access, CDC eligibility, active rebuilds, and active mode transitions before reserving a generation and queueing work on `queue_cdc`. The Django admin no longer has a rebuild action. The task creates a dedicated Debezium connector and Kafka topic generation, loads a staging ClickHouse table, waits for Debezium's successful snapshot notification and drains the snapshot offsets, then cuts over under the normal source-ingestion lock. The **CDC Table Rebuilds** page monitors status and allows authorized users to resume cutover-pending rebuilds. Do not drop or recreate the active ClickHouse table manually.
 
-If a rebuild remains **Cutover pending**, inspect its `last_error` and resolve the underlying problem, then run the same action again on that source table to resume it. If ClickHouse already exchanged the table, normal CDC ingestion for the source fails safely until the rebuild is resumed; it does not automatically retry a failed rebuild. A source lock left by an interrupted worker may take up to 15 minutes to expire. After a worker crash, an immediate retry may fail to acquire Kafka partitions until the previous consumer's group session expires; retry the rebuild once the group has rebalanced.
+If a rebuild remains **Cutover pending**, inspect its `last_error`, resolve the underlying problem, and use **Resume cutover** on the **CDC Table Rebuilds** page. Starting a new rebuild is blocked while an active generation exists. If ClickHouse already exchanged the table, normal CDC ingestion for the source fails safely until the rebuild is resumed; it does not automatically retry a failed rebuild. A source lock left by an interrupted worker may take up to 15 minutes to expire. After a worker crash, an immediate retry may fail to acquire Kafka partitions until the previous consumer's group session expires; retry once the group has rebalanced.
 
-After a successful exchange, the prior ClickHouse table remains under the rebuild record's `staging_table` name; it is not automatically removed. Superseded per-table connectors and connectors created by failed rebuilds are also retained, potentially still running and producing Kafka events. This can consume connector capacity and Kafka storage; PostgreSQL replication slots may retain WAL even if a connector stops. Monitor connector health, Kafka retention and disk usage, and have an operator verify that a connector, slot, publication, or retained table is no longer needed before cleaning it up. Do not remove resources belonging to an active connector or an unfinished rebuild. An administrator-initiated cleanup workflow has not yet been implemented.
+After a successful exchange, the prior ClickHouse table remains under the rebuild record's `staging_table` name; it is not automatically removed. Superseded per-table connectors and connectors created by failed rebuilds are also retained, potentially still running and producing Kafka events. This can consume connector capacity and Kafka storage; PostgreSQL replication slots may retain WAL even if a connector stops. Monitor connector health, Kafka retention and disk usage.
+
+The control plane's **CDC Resource Cleanup** page provides a staff-only, two-stage workflow for resources belonging to recorded rebuild generations: it first performs a read-only inventory, then requires an administrator to review and explicitly confirm cleanup. It runs on the dedicated `queue_maintenance` worker, rechecks generation ownership and eligibility before each deletion, records per-resource outcomes, and stops on errors. Interrupted attempts require a fresh inventory; the workflow never retries or deletes resources automatically. Legacy resources without a durable rebuild-generation record are not inferred as candidates. Cleanup uses the configured runtime identities and will fail visibly if they lack the required privileges; it does not elevate permissions.
+
+Migration `0048` reconciles historical cleanup-field defaults. Migration consistency, the 12 focused cleanup view and service tests, and an upgrade preserving existing audit records pass with isolated SQLite. The workflow has not yet been validated against disposable external services. Do not use it against production or shared resources until isolated connector/PostgreSQL/Kafka/ClickHouse validation is complete. Never remove resources belonging to an active connector or an unfinished rebuild.
 
 The ClickHouse database must use the `Atomic` engine. Apply Django migrations and restart Celery workers when deploying this feature so workers load the rebuild model and task. Local single-table rebuilds and post-cutover insert/update/delete flows have been verified with SQL Server `northwind.dbo.Categories`, PostgreSQL `chinook.public.artist`, MySQL `northwind.customers`, and Oracle `APP_USER.invoices`. MySQL tests also paused a rebuild with a snapshot backlog and source writes, and terminated isolated test workers after ClickHouse exchange and after saving the snapshot checkpoint but before committing Kafka offsets; both rebuilds were manually resumed. The post-exchange crash test shortened the source lock to 45 seconds; production uses a 15-minute lock. Other crash boundaries, broader concurrency cases, and deployment-specific source permissions still require further validation. Source-wide batch/CDC mode transitions are not implemented.
 
@@ -454,7 +716,7 @@ The AI draft currently does not configure charts, export format, sorting, email 
 
 PDF, Excel, and JSON reports can optionally include an AI-generated summary based on aggregate statistics calculated from the report result rows; individual source row values are not sent to Ollama. For Grouped Summary reports, those statistics describe the grouped output, not the underlying source records. Excel places the summary near the top of the Report sheet with a blank row above and below it, and JSON includes it as a top-level `ai_summary` property. If a PDF is truncated, the summary is limited to the rows included in that PDF. Enable **Include AI summary** while creating or editing a report configured for PDF, Excel, or JSON export.
 
-Note: grouped-query aggregates are currently displayed under the selected field label (for example, `Track ID` for `COUNT(track_id)`). Choose a descriptive label such as `Track Count` when configuring the field.
+Grouped Summary output labels identify the aggregate function as well as the configured display label (for example, `COUNT(Track Count)`).
 
 Ollama is included in the main Compose stack. It is not published to the host, and model files persist in the `ollama_data` Docker volume.
 

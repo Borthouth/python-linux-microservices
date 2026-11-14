@@ -1,0 +1,87 @@
+x-probe-environment: &probe-environment
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONPATH: /app
+  DJANGO_SETTINGS_MODULE: config.settings
+  SECRET_KEY: isolated-migration-gate-only
+  FIELD_ENCRYPTION_KEY: ${GATE_FIELD_KEY:?Required isolated test key}
+  POSTGRES_DB: reporthub
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+
+x-runtime: &runtime
+  image: ${REPORTHUB_MIGRATION_APP_IMAGE:-reporthub-app}
+  entrypoint: ["/app/entrypoint.sh"]
+  command: ["python", "tests/integration/migration_gate_probe.py", "runtime"]
+  environment:
+    <<: *probe-environment
+    APP_POSTGRES_USER: gate_runtime
+    APP_POSTGRES_PASSWORD: ${GATE_RUNTIME_PASSWORD:?Required isolated runtime password}
+  volumes:
+    - .:/app:ro
+    - /dev/null:/app/.env:ro
+  tmpfs:
+    - /app/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: reporthub
+      POSTGRES_USER: gate_admin
+      POSTGRES_PASSWORD: ${GATE_ADMIN_PASSWORD:?Required isolated admin password}
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "gate_admin", "-d", "reporthub"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  provision:
+    image: ${REPORTHUB_MIGRATION_APP_IMAGE:-reporthub-app}
+    entrypoint: ["python", "tests/integration/migration_gate_probe.py", "provision"]
+    working_dir: /app
+    environment:
+      <<: *probe-environment
+      GATE_ADMIN_PASSWORD: ${GATE_ADMIN_PASSWORD:?Required isolated admin password}
+      GATE_RUNTIME_PASSWORD: ${GATE_RUNTIME_PASSWORD:?Required isolated runtime password}
+      GATE_MIGRATION_PASSWORD: ${GATE_MIGRATION_PASSWORD:?Required isolated migration password}
+    volumes:
+      - .:/app:ro
+      - /dev/null:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  migrations:
+    image: ${REPORTHUB_MIGRATION_APP_IMAGE:-reporthub-app}
+    entrypoint: ["/app/entrypoint.sh"]
+    working_dir: /app
+    environment: *probe-environment
+    volumes: !override
+      - .:/app:ro
+      - /dev/null:/app/.env:ro
+    tmpfs:
+      - /app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      provision:
+        condition: service_completed_successfully
+
+  app: *runtime
+  celery_ux_worker: *runtime
+  celery_warm_worker: *runtime
+  celery_cdc_worker: *runtime
+  celery_maintenance_worker: *runtime
+  celery_batch_worker: *runtime
+  celery_cold_worker: *runtime
+  celery_periodic_worker: *runtime
+  celery_beat: *runtime
+
+networks:
+  default:
+    internal: true

@@ -30,5 +30,18 @@
             </tbody>
         </table>
     </div>
-    <a href="{% url 'control_plane:email_audit_logs' %}" class="block mt-4 text-right text-xs text-indigo-400 hover:text-indigo-300">View all email delivery audit records &rarr;</a>
+    <div class="mt-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <details data-widget-navigation class="relative w-full sm:w-auto">
+            <summary class="min-h-[44px] cursor-pointer rounded-lg border border-slate-700 px-3 py-3 text-xs text-slate-300 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400">
+                Filter email deliveries
+            </summary>
+            <nav aria-label="Email delivery status filters" class="absolute left-0 z-10 mt-2 w-full sm:w-56 rounded-xl border border-slate-700 bg-slate-900 p-2 shadow-xl">
+                <a href="{% url 'control_plane:email_audit_logs' %}?status=failed" class="block rounded-lg px-3 py-3 text-sm text-red-300 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400">Failed emails</a>
+                <a href="{% url 'control_plane:email_audit_logs' %}?status=bounced" class="block rounded-lg px-3 py-3 text-sm text-amber-300 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400">Bounced emails</a>
+                <a href="{% url 'control_plane:email_audit_logs' %}?status=sent" class="block rounded-lg px-3 py-3 text-sm text-slate-300 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400">Sent emails</a>
+                <a href="{% url 'control_plane:email_audit_logs' %}?status=delivered" class="block rounded-lg px-3 py-3 text-sm text-emerald-300 hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-400">Delivered emails</a>
+            </nav>
+        </details>
+        <a href="{% url 'control_plane:email_audit_logs' %}" class="min-h-[44px] py-3 text-right text-xs text-indigo-400 hover:text-indigo-300 rounded-lg focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400">View all email delivery audit records &rarr;</a>
+    </div>
 </div>

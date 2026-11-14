@@ -27,7 +27,9 @@ services:
   app: *runtime-migrations
   celery_ux_worker: *runtime-migrations
   celery_warm_worker: *runtime-migrations
+  celery_transfer_worker: *runtime-migrations
   celery_cdc_worker: *runtime-migrations
+  celery_maintenance_worker: *runtime-migrations
   celery_batch_worker: *runtime-migrations
   celery_cold_worker: *runtime-migrations
   celery_periodic_worker: *runtime-migrations

@@ -7,7 +7,7 @@
         
         <div class="flex items-center space-x-5">
             <!-- Upgraded nav container from text-xs to text-sm -->
-            <nav class="hidden md:flex space-x-6 text-sm font-medium items-center h-full">
+            <nav class="hidden md:flex space-x-4 text-sm font-medium items-center h-full">
                 <!-- Dashboard -->
                 <a href="{% url 'control_plane:dashboard' %}" 
                    class="h-full flex items-center border-b-2 transition-all {% if request.resolver_match.url_name == 'dashboard' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
@@ -27,56 +27,70 @@
                         Reports
                     </a>                
                     
-                    <!-- Administration Dropdown Menu -->
                     <div class="relative h-full flex items-center" x-data="{ open: false }">
-                        <button @click="open = !open" @click.away="open = false" type="button" 
-                            class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'source_list,source_add,source_create,source_edit,source_delete,warehouse_list,warehouse_field_selection,pipeline_automation_list,pipeline_automation_create,pipeline_automation_edit,pipeline_history,cdc_failure_history,cdc_rebuild_list,cdc_rebuild_resume,active_pipeline_executions,active_report_generations,report_history,dlq_list,dlq_requeue,user_management,user_edit,user_edit_access,audit_log,email_audit_logs' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
-                            <span>Administration</span>
-                            <svg class="h-4 w-4 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-                            </svg>
+                        <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'source_list,source_add,source_create,source_edit,source_delete,source_sync,source_status,source_toggle_active,source_cdc_to_batch_status,source_cdc_to_batch_staging,warehouse_list,warehouse_field_selection,pipeline_automation_list,pipeline_automation_create,pipeline_automation_edit,pipeline_automation_toggle,pipeline_automation_run,pipeline_automation_delete,cdc_rebuild_start' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                            <span>Data &amp; Pipelines</span>
+                            <svg class="h-4 w-4 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
                         </button>
-
-                        <!-- Dropdown Panel -->
-                        <div x-show="open" 
-                             x-transition:enter="transition ease-out duration-100" 
-                             x-transition:enter-start="transform opacity-0 scale-95" 
-                             x-transition:enter-end="transform opacity-100 scale-100" 
-                             x-transition:leave="transition ease-in duration-75" 
-                             x-transition:leave-start="transform opacity-100 scale-100" 
-                             x-transition:leave-end="transform opacity-0 scale-95" 
-                             class="absolute left-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 focus:outline-none z-50 py-1" 
-                             style="display: none;">
-                            
-                            <!-- Section 1: Data & Pipelines -->
-                            <div class="py-1">
-                                <div class="px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Pipelines & Storage</div>
-                                <a href="{% url 'control_plane:source_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Data Sources</a>
-                                <a href="{% url 'control_plane:warehouse_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Warehouse Mapping</a>
-                                <a href="{% url 'control_plane:pipeline_automation_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Pipeline Automations</a>
-                            </div>
-
-                            <!-- Section 2: Operational history -->
-                            <div class="py-1">
-                                <div class="px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Operations & History</div>
-                                <a href="{% url 'control_plane:active_pipeline_executions' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Active Pipeline Executions</a>
-                                <a href="{% url 'control_plane:active_report_generations' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Active Report Generations</a>
-                                <a href="{% url 'control_plane:pipeline_history' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Pipeline History</a>
-                                <a href="{% url 'control_plane:cdc_failure_history' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">CDC Execution Failures</a>
-                                <a href="{% url 'control_plane:cdc_rebuild_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">CDC Table Rebuilds</a>
-                                <a href="{% url 'control_plane:report_history' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">All Report Runs</a>
-                                <a href="{% url 'control_plane:dlq_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Dead Letter Queue</a>
-                            </div>
-
-                            <!-- Section 3: Access & Diagnostics -->
-                            <div class="py-1">
-                                <div class="px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Governance</div>
-                                <a href="{% url 'control_plane:user_management' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Users & Access</a>
-                                <a href="{% url 'control_plane:audit_log' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Audit Logs</a>
-                                <a href="{% url 'control_plane:email_audit_logs' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Email Audit Logs</a>
-                            </div>
+                        <div x-show="open" x-transition class="absolute left-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 z-50 py-1" style="display: none;">
+                            <a href="{% url 'control_plane:source_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Data Sources</a>
+                            <a href="{% url 'control_plane:warehouse_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Warehouse Mapping</a>
+                            <a href="{% url 'control_plane:pipeline_automation_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Pipeline Automations</a>
                         </div>
                     </div>
+
+                    <div class="relative h-full flex items-center" x-data="{ open: false }">
+                        <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'active_pipeline_executions,active_report_generations,dlq_list,dlq_requeue' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                            <span>Operations</span>
+                            <svg class="h-4 w-4 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+                        <div x-show="open" x-transition class="absolute left-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 z-50 py-1" style="display: none;">
+                            <a href="{% url 'control_plane:active_pipeline_executions' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Active Pipeline Executions</a>
+                            <a href="{% url 'control_plane:active_report_generations' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Active Report Generations</a>
+                            <a href="{% url 'control_plane:dlq_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Dead Letter Queue</a>
+                        </div>
+                    </div>
+
+                    <div class="relative h-full flex items-center" x-data="{ open: false }">
+                        <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'pipeline_history,cdc_failure_history,cdc_rebuild_list,cdc_rebuild_resume,cdc_cleanup_list,cdc_cleanup_scan,cdc_cleanup_confirm,cdc_cleanup_recover,report_history' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                            <span>History</span>
+                            <svg class="h-4 w-4 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+                        <div x-show="open" x-transition class="absolute left-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 z-50 py-1" style="display: none;">
+                            <a href="{% url 'control_plane:pipeline_history' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Pipeline History</a>
+                            <a href="{% url 'control_plane:cdc_failure_history' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">CDC Execution Failures</a>
+                            <a href="{% url 'control_plane:cdc_rebuild_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">CDC Table Rebuilds</a>
+                            <a href="{% url 'control_plane:cdc_cleanup_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">CDC Resource Cleanup</a>
+                            <a href="{% url 'control_plane:report_history' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">All Report Runs</a>
+                        </div>
+                    </div>
+
+                    <div class="relative h-full flex items-center" x-data="{ open: false }">
+                        <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'user_management,user_edit,user_edit_access,audit_log,email_audit_logs,file_delivery_audit' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                            <span>Governance</span>
+                            <svg class="h-4 w-4 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+                        <div x-show="open" x-transition class="absolute left-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 z-50 py-1" style="display: none;">
+                            <a href="{% url 'control_plane:user_management' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Users &amp; Access</a>
+                            <a href="{% url 'control_plane:audit_log' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Audit Logs</a>
+                            <a href="{% url 'control_plane:email_audit_logs' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Email Audit Logs</a>
+                            {% if request.user.is_active and request.user.is_staff %}
+                            <a href="{% url 'control_plane:file_delivery_audit' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">File Delivery Audit</a>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    {% if request.user.is_staff %}
+                    <div class="relative h-full flex items-center" x-data="{ open: false }">
+                        <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'transfer_destination_list,transfer_destination_create,transfer_destination_edit,transfer_destination_delete,transfer_destination_toggle,transfer_destination_test,transfer_destination_test_status' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                            <span>Integrations</span>
+                            <svg class="h-4 w-4 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+                        <div x-show="open" x-transition class="absolute left-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 z-50 py-1" style="display: none;">
+                            <a href="{% url 'control_plane:transfer_destination_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Transfer Destinations</a>
+                        </div>
+                    </div>
+                    {% endif %}
                 {% endif %}
             </nav>
             <div class="flex items-center space-x-4 border-l border-slate-800 pl-5">

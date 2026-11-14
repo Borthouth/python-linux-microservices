@@ -1,10 +1,16 @@
+import base64
 import json
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from uuid import uuid4
 from unittest.mock import Mock, patch
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
+from django.db import connection
 from django.db import IntegrityError, close_old_connections, transaction
 from django.test import (
     Client, RequestFactory, SimpleTestCase, TestCase, TransactionTestCase, override_settings,
@@ -12,6 +18,8 @@ from django.test import (
 )
 from django.urls import reverse
 from django.utils import timezone
+from kombu.exceptions import OperationalError
+import paramiko
 
 from control_plane.models import (
     CdcExecutionFailure,
@@ -25,17 +33,653 @@ from control_plane.models import (
     SourceField,
     SourceProfile,
     SourceTable,
+    SyncStatus,
     TrackedUser,
+    TransferDestination,
     UserSourceAccess,
     WarehouseDatasetMapping,
     UserWidgetPreference,
 )
+from control_plane.forms.transfer_destinations import TransferDestinationForm
+from control_plane.tasks import test_transfer_destination_task
 from control_plane.views.dlq import dlq_requeue_view
 from control_plane.views.dashboard import update_widget_preferences
 from etl.progress import PIPELINE_STEPS, PREPARING_INGESTION
 from etl.tasks import stage_cdc_to_batch_transition_task
 from reports.models import EmailAuditLog, ReportDefinition, ReportExecution
 from reports.progress import REPORT_RUNNING_STEPS, ReportProgress
+from reports.sftp import DeliveryError
+
+
+class BreadcrumbRouteTests(SimpleTestCase):
+    def test_registered_breadcrumb_links_resolve(self):
+        from control_plane.breadcrumbs import BREADCRUMB_REGISTRY
+
+        for page_name, crumbs in BREADCRUMB_REGISTRY.items():
+            for crumb in crumbs:
+                target = crumb["url"]
+                if not target:
+                    continue
+                if ":" not in target:
+                    target = f"control_plane:{target}"
+                with self.subTest(page_name=page_name, target=target):
+                    self.assertTrue(reverse(target).startswith("/"))
+
+
+@override_settings(CACHES={
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
+})
+class NavbarNavigationTests(TestCase):
+    def setUp(self):
+        admin = get_user_model().objects.create_user(
+            username="navigation-admin",
+            is_staff=True,
+        )
+        self.client.force_login(admin)
+
+    def test_admin_navigation_is_split_into_linked_groups(self):
+        response = self.client.get(
+            reverse("control_plane:transfer_destination_list")
+        )
+
+        for label in (
+            "Data &amp; Pipelines",
+            "Operations",
+            "History",
+            "Governance",
+            "Integrations",
+        ):
+            self.assertContains(response, label)
+        self.assertContains(
+            response,
+            f'href="{reverse("control_plane:active_pipeline_executions")}"',
+        )
+        self.assertContains(
+            response,
+            f'href="{reverse("control_plane:cdc_rebuild_list")}"',
+        )
+        self.assertNotContains(response, "Administration")
+
+    def test_history_route_uses_its_active_menu_and_working_breadcrumb(self):
+        response = self.client.get(reverse("control_plane:cdc_rebuild_list"))
+
+        self.assertContains(
+            response,
+            'border-indigo-500 text-white">\n                            <span>History</span>',
+        )
+        self.assertEqual(response.context["breadcrumbs"], [
+            {"name": "Dashboard", "url": reverse("control_plane:dashboard")},
+            {"name": "CDC Table Rebuilds", "url": ""},
+        ])
+
+
+@override_settings(CACHES={
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
+})
+class SourceConnectionPollingTests(TestCase):
+    def setUp(self):
+        admin = get_user_model().objects.create_user(
+            username="source-polling-admin", is_staff=True,
+        )
+        self.client.force_login(admin)
+        self.source = SourceProfile.objects.create(
+            name="Polling test source",
+            db_type=DbChoice.POSTGRESQL,
+            host="localhost",
+            port=5432,
+            database_name="test_db",
+            username="test_user",
+        )
+
+    def test_list_and_status_poll_once_only_while_running(self):
+        status_url = reverse("control_plane:source_status", args=[self.source.pk])
+        for status in (SyncStatus.RUNNING, SyncStatus.SUCCESS, SyncStatus.FAILED):
+            with self.subTest(status=status):
+                SourceProfile.objects.filter(pk=self.source.pk).update(
+                    last_sync_status=status,
+                )
+                for url in (reverse("control_plane:source_list"), status_url):
+                    with self.subTest(url=url):
+                        response = self.client.get(url)
+                        self.assertContains(
+                            response, f'id="source-status-{self.source.pk}"', count=1,
+                        )
+                        if status == SyncStatus.RUNNING:
+                            self.assertContains(response, f'hx-get="{status_url}"', count=1)
+                            self.assertContains(response, 'hx-trigger="every 2s"', count=1)
+                        else:
+                            self.assertNotContains(response, f'hx-get="{status_url}"')
+
+
+class TransferDestinationTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = get_user_model().objects.create_user(
+            username="transfer-admin", is_staff=True
+        )
+        key = ed25519.Ed25519PrivateKey.generate()
+        cls.key_text = key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ).decode()
+        cls.encrypted_key_text = key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+            serialization.BestAvailableEncryption(b"synthetic-passphrase"),
+        ).decode()
+        cls.openssh_key_text = key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH,
+            serialization.NoEncryption(),
+        ).decode()
+
+    def setUp(self):
+        self.client.force_login(self.admin)
+        self.list_url = reverse("control_plane:transfer_destination_list")
+        self.create_url = reverse("control_plane:transfer_destination_create")
+
+    def destination_data(self, **overrides):
+        data = {
+            "name": "Synthetic SFTP target",
+            "host": "sftp.example.test",
+            "port": "22",
+            "username": "report_writer",
+            "authentication": "password",
+            "password": " synthetic-password ",
+            "private_key": "",
+            "private_key_passphrase": "",
+            "host_key_sha256": "SHA256:" + base64.b64encode(bytes(range(32))).decode().rstrip("="),
+            "remote_directory": "/incoming/reports",
+        }
+        data.update(overrides)
+        return data
+
+    def create_destination(self, **overrides):
+        form = TransferDestinationForm(self.destination_data(**overrides))
+        self.assertTrue(form.is_valid(), form.errors)
+        return form.save()
+
+    def test_staff_only_for_all_destination_endpoints(self):
+        destination = self.create_destination()
+        urls = [
+            self.list_url, self.create_url,
+            reverse("control_plane:transfer_destination_edit", args=[destination.pk]),
+            reverse("control_plane:transfer_destination_delete", args=[destination.pk]),
+            reverse("control_plane:transfer_destination_toggle", args=[destination.pk]),
+            reverse("control_plane:transfer_destination_test", args=[destination.pk]),
+            reverse("control_plane:transfer_destination_test_status", args=[destination.pk]),
+        ]
+        users = [
+            None,
+            get_user_model().objects.create_user(username="transfer-reader"),
+            get_user_model().objects.create_user(username="transfer-inactive", is_staff=True, is_active=False),
+            get_user_model().objects.create_user(username="transfer-nonstaff-superuser", is_superuser=True),
+        ]
+        for user in users:
+            self.client.logout()
+            if user:
+                self.client.force_login(user)
+            for url in urls:
+                for method in ("get", "post"):
+                    with self.subTest(user=user, url=url, method=method):
+                        response = getattr(self.client, method)(url, self.destination_data(name="Forbidden"))
+                        self.assertEqual(response.status_code, 302)
+                        self.assertTrue(response.url.startswith(reverse("control_plane:login")))
+        self.assertEqual(TransferDestination.objects.count(), 1)
+        destination.refresh_from_db()
+        self.assertEqual(destination.name, "Synthetic SFTP target")
+
+    def test_create_encrypts_password_and_excludes_all_secrets_from_history(self):
+        response = self.client.post(self.create_url, self.destination_data())
+        self.assertRedirects(response, self.list_url)
+        destination = TransferDestination.objects.get()
+        self.assertEqual(destination.password, " synthetic-password ")
+        self.assertFalse(destination.is_active)
+        self.assertEqual(destination.created_by, self.admin)
+        self.assertEqual(destination.history.get().history_user, self.admin)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT password FROM control_plane_transferdestination WHERE id = %s", [destination.pk])
+            encrypted = cursor.fetchone()[0]
+        self.assertNotIn("synthetic-password", encrypted)
+        self.assertNotEqual(encrypted, destination.password)
+        historical_fields = {field.name for field in destination.history.model._meta.fields}
+        self.assertTrue({"password", "private_key", "private_key_passphrase"}.isdisjoint(historical_fields))
+
+    def test_key_and_passphrase_are_encrypted_and_blank_edit_keeps_them(self):
+        destination = self.create_destination(
+            authentication="private_key", password="",
+            private_key=self.encrypted_key_text, private_key_passphrase="synthetic-passphrase",
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT private_key, private_key_passphrase FROM control_plane_transferdestination WHERE id = %s",
+                [destination.pk],
+            )
+            encrypted_key, encrypted_passphrase = cursor.fetchone()
+        self.assertNotIn("PRIVATE KEY", encrypted_key)
+        self.assertNotIn("synthetic-passphrase", encrypted_passphrase)
+        url = reverse("control_plane:transfer_destination_edit", args=[destination.pk])
+        response = self.client.post(url, self.destination_data(
+            name="Renamed target", authentication="private_key", password="",
+        ))
+        self.assertRedirects(response, self.list_url)
+        destination.refresh_from_db()
+        self.assertEqual(destination.private_key, self.encrypted_key_text)
+        self.assertEqual(destination.private_key_passphrase, "synthetic-passphrase")
+        self.assertEqual(destination.updated_by, self.admin)
+
+    def test_blank_password_edit_preserves_it_and_rotation_replaces_it(self):
+        destination = self.create_destination()
+        url = reverse("control_plane:transfer_destination_edit", args=[destination.pk])
+        for submitted, expected in [("", " synthetic-password "), ("replacement-password", "replacement-password")]:
+            response = self.client.post(url, self.destination_data(password=submitted))
+            self.assertRedirects(response, self.list_url)
+            destination.refresh_from_db()
+            self.assertEqual(destination.password, expected)
+
+    def test_secrets_are_never_rendered_even_after_invalid_submission(self):
+        destination = self.create_destination(
+            authentication="private_key", password="",
+            private_key=self.encrypted_key_text, private_key_passphrase="synthetic-passphrase",
+        )
+        url = reverse("control_plane:transfer_destination_edit", args=[destination.pk])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("no-store", response.headers["Cache-Control"])
+        self.assertNotContains(response, self.encrypted_key_text)
+        self.assertNotContains(response, "synthetic-passphrase")
+        response = self.client.post(url, self.destination_data(
+            authentication="private_key", password="", private_key="invalid-private-key-marker",
+            private_key_passphrase="invalid-passphrase-marker",
+        ))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Enter a valid SSH private key")
+        self.assertNotContains(response, "invalid-private-key-marker")
+        self.assertNotContains(response, "invalid-passphrase-marker")
+        response = self.client.post(self.create_url, self.destination_data(
+            name="", password="invalid-password-marker",
+        ))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "invalid-password-marker")
+
+    def test_switching_authentication_removes_obsolete_credentials(self):
+        destination = self.create_destination()
+        url = reverse("control_plane:transfer_destination_edit", args=[destination.pk])
+        response = self.client.post(url, self.destination_data(
+            authentication="private_key", password="", private_key=self.openssh_key_text,
+        ))
+        self.assertRedirects(response, self.list_url)
+        destination.refresh_from_db()
+        self.assertEqual(destination.password, "")
+        self.assertEqual(destination.private_key, self.openssh_key_text)
+        response = self.client.post(url, self.destination_data(password="new-password"))
+        self.assertRedirects(response, self.list_url)
+        destination.refresh_from_db()
+        self.assertEqual(destination.password, "new-password")
+        self.assertEqual(destination.private_key, "")
+        self.assertEqual(destination.private_key_passphrase, "")
+
+    def test_replacing_encrypted_key_can_explicitly_clear_passphrase(self):
+        destination = self.create_destination(
+            authentication="private_key", password="",
+            private_key=self.encrypted_key_text, private_key_passphrase="synthetic-passphrase",
+        )
+        data = self.destination_data(
+            authentication="private_key", password="", private_key=self.key_text,
+        )
+        form = TransferDestinationForm(data, instance=destination)
+        self.assertFalse(form.is_valid())
+        self.assertIn("private_key", form.errors)
+        destination.refresh_from_db()
+        data["clear_private_key_passphrase"] = "on"
+        form = TransferDestinationForm(data, instance=destination)
+        self.assertTrue(form.is_valid(), form.errors)
+        form.save()
+        destination.refresh_from_db()
+        self.assertEqual(destination.private_key_passphrase, "")
+        destination.full_clean()
+
+    def test_invalid_destinations_and_authentication_are_rejected(self):
+        cases = [
+            ("host", "sftp://server.test/path"), ("host", "host.test:22"),
+            ("host", "host name"), ("host", "::::"),
+            ("port", "0"), ("port", "-1"), ("port", "65536"), ("port", "abc"),
+            ("remote_directory", "relative/path"), ("remote_directory", "/safe/../other"),
+            ("remote_directory", "/safe\nother"), ("remote_directory", "//other"),
+            ("host_key_sha256", "SHA256:not-a-valid-fingerprint"),
+            ("host_key_sha256", "SHA256:" + "B" * 43),
+            ("authentication", "ftp"), ("password", ""),
+        ]
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                form = TransferDestinationForm(self.destination_data(**{field: value}))
+                self.assertFalse(form.is_valid())
+                self.assertIn(field, form.errors)
+        for host in ["localhost", "192.0.2.10", "2001:db8::1", "sftp.internal.test."]:
+            form = TransferDestinationForm(self.destination_data(host=host))
+            self.assertTrue(form.is_valid(), form.errors)
+
+    def test_missing_invalid_or_conflicting_key_credentials_are_rejected(self):
+        for key, passphrase in [("", ""), ("not a key", ""), (self.encrypted_key_text, "wrong-passphrase")]:
+            form = TransferDestinationForm(self.destination_data(
+                authentication="private_key", password="", private_key=key,
+                private_key_passphrase=passphrase,
+            ))
+            self.assertFalse(form.is_valid())
+            self.assertIn("private_key", form.errors)
+        form = TransferDestinationForm(self.destination_data(private_key=self.key_text))
+        self.assertFalse(form.is_valid())
+        self.assertIn("private_key", form.errors)
+        destination = TransferDestination(**self.destination_data(private_key=self.key_text))
+        with self.assertRaises(ValidationError):
+            destination.full_clean()
+
+    def test_list_search_breadcrumbs_and_metadata_history(self):
+        destination = self.create_destination()
+        self.create_destination(name="Other destination", host="other.example.test")
+        response = self.client.get(self.list_url, {"q": "SFTP"})
+        self.assertContains(response, destination.name)
+        self.assertNotContains(response, "Other destination")
+        self.assertNotContains(response, "synthetic-password")
+        self.assertEqual(
+            response.context["breadcrumbs"][1],
+            {"name": "Transfer Destinations", "url": ""},
+        )
+        self.assertContains(response, "Configure SFTP destinations for automated report file delivery.")
+        response = self.client.get(self.create_url)
+        self.assertContains(response, "active destinations can be selected for report file delivery.")
+        self.assertContains(response, "Allow reports with file delivery enabled to transfer files to this destination.")
+        self.assertNotContains(response, "Configuration only")
+        url = reverse("control_plane:transfer_destination_edit", args=[destination.pk])
+        response = self.client.post(url, self.destination_data(name="Renamed target", password=""))
+        self.assertRedirects(response, self.list_url)
+        response = self.client.get(reverse("control_plane:audit_log"))
+        self.assertContains(response, "Renamed target")
+        self.assertNotContains(response, "synthetic-password")
+
+    def test_destination_breadcrumbs_link_back_to_the_list(self):
+        destination = self.create_destination()
+        pages = [
+            (self.list_url, "Transfer Destinations"),
+            (self.create_url, "Add SFTP Destination"),
+            (reverse("control_plane:transfer_destination_edit", args=[destination.pk]), "Edit SFTP Destination"),
+            (reverse("control_plane:transfer_destination_delete", args=[destination.pk]), "Delete SFTP Destination"),
+        ]
+        for url, title in pages:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                expected = [
+                    {"name": "Dashboard", "url": reverse("control_plane:dashboard")},
+                ]
+                if url == self.list_url:
+                    expected.append({"name": title, "url": ""})
+                else:
+                    expected.extend([
+                        {"name": "Transfer Destinations", "url": self.list_url},
+                        {"name": title, "url": ""},
+                    ])
+                self.assertEqual(response.context["breadcrumbs"], expected)
+
+    def test_status_filter_combines_with_search_and_pagination(self):
+        for number in range(16):
+            self.create_destination(name=f"Target {number:02}", is_active=True)
+        disabled = self.create_destination(name="Target disabled")
+        self.create_destination(name="Other destination", is_active=True)
+        response = self.client.get(self.list_url, {"q": "target", "status": "active"})
+        self.assertEqual(response.context["page_obj"].paginator.count, 16)
+        self.assertContains(response, "?page=2&q=target&status=active")
+        self.assertNotContains(response, disabled.name)
+        self.assertContains(response, 'value="active" selected')
+        self.assertContains(response, "Clear")
+        response = self.client.get(self.list_url, {"q": "target", "status": "active", "page": 2})
+        self.assertEqual([item.name for item in response.context["page_obj"]], ["Target 15"])
+        self.assertContains(response, "?page=1&q=target&status=active")
+        response = self.client.get(self.list_url, {"q": "target", "status": "inactive"})
+        self.assertEqual([item.pk for item in response.context["page_obj"]], [disabled.pk])
+        self.assertContains(response, 'value="inactive" selected')
+
+    def test_deletion_requires_post_and_retains_only_nonsecret_history(self):
+        destination = self.create_destination()
+        url = reverse("control_plane:transfer_destination_delete", args=[destination.pk])
+        self.assertEqual(self.client.get(url).status_code, 200)
+        self.assertTrue(TransferDestination.objects.filter(pk=destination.pk).exists())
+        self.assertEqual(self.client.put(url).status_code, 405)
+        self.assertRedirects(self.client.post(url), self.list_url)
+        self.assertFalse(TransferDestination.objects.filter(pk=destination.pk).exists())
+        history = TransferDestination.history.filter(id=destination.pk).latest()
+        self.assertEqual(history.history_type, "-")
+        self.assertEqual(history.history_user, self.admin)
+
+    def test_mutations_require_csrf_token(self):
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.admin)
+        response = client.get(self.create_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(client.post(self.create_url, self.destination_data()).status_code, 403)
+        token = client.cookies["csrftoken"].value
+        response = client.post(self.create_url, self.destination_data(), HTTP_X_CSRFTOKEN=token)
+        self.assertRedirects(response, self.list_url)
+
+    def test_toggle_requires_post_csrf_and_records_audit_without_changing_credentials(self):
+        destination = self.create_destination()
+        url = reverse("control_plane:transfer_destination_toggle", args=[destination.pk])
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.admin)
+        client.get(self.list_url)
+        self.assertEqual(client.get(url).status_code, 405)
+        self.assertEqual(client.post(url).status_code, 403)
+        token = client.cookies["csrftoken"].value
+        for expected in [True, False]:
+            response = client.post(url, HTTP_X_CSRFTOKEN=token)
+            self.assertRedirects(response, self.list_url)
+            destination.refresh_from_db()
+            self.assertEqual(destination.is_active, expected)
+            self.assertEqual(destination.password, " synthetic-password ")
+            self.assertEqual(destination.history.latest().is_active, expected)
+            self.assertEqual(destination.history.latest().history_user, self.admin)
+            page = client.get(self.list_url)
+            self.assertContains(page, ">Deactivate</button>" if expected else ">Activate</button>")
+            self.assertContains(page, ">Active</span>" if expected else ">Inactive</span>")
+
+    @patch("control_plane.tasks.test_transfer_destination_task.apply_async")
+    def test_connection_test_is_post_csrf_and_queued_once_even_when_disabled(self, publish):
+        destination = self.create_destination()
+        url = reverse("control_plane:transfer_destination_test", args=[destination.pk])
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.admin)
+        client.get(self.list_url)
+        self.assertEqual(client.get(url).status_code, 405)
+        self.assertEqual(client.post(url).status_code, 403)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = client.post(url, HTTP_X_CSRFTOKEN=client.cookies["csrftoken"].value)
+        self.assertRedirects(response, self.list_url)
+        destination.refresh_from_db()
+        self.assertFalse(destination.is_active)
+        self.assertEqual(destination.last_test_status, TransferDestination.TestStatus.QUEUED)
+        publish.assert_called_once_with(
+            args=[destination.pk], task_id=destination.last_test_task_id,
+            queue="queue_transfers", expires=120,
+        )
+        response = self.client.post(url, follow=True)
+        self.assertContains(response, "already queued or running")
+        self.assertEqual(publish.call_count, 1)
+
+    @patch("control_plane.tasks.sftp_connection")
+    def test_connection_task_checks_directory_without_writing_and_ignores_duplicates(self, connection):
+        destination = self.create_destination()
+        task_id = str(uuid4())
+        TransferDestination.objects.filter(pk=destination.pk).update(
+            last_test_status=TransferDestination.TestStatus.QUEUED, last_test_task_id=task_id,
+        )
+        sftp = connection.return_value.__enter__.return_value
+        sftp.stat.return_value.st_mode = stat.S_IFDIR | 0o755
+        for _ in range(2):
+            test_transfer_destination_task.apply(args=[destination.pk], task_id=task_id, throw=True)
+        destination.refresh_from_db()
+        self.assertEqual(destination.last_test_status, TransferDestination.TestStatus.SUCCESS)
+        self.assertIsNotNone(destination.last_tested_at)
+        connection.assert_called_once()
+        sftp.stat.assert_called_once_with(destination.remote_directory)
+        sftp.open.assert_not_called()
+        sftp.putfo.assert_not_called()
+        response = self.client.get(reverse("control_plane:transfer_destination_test_status", args=[destination.pk]))
+        self.assertContains(response, "Passed")
+        self.assertNotContains(response, "hx-trigger")
+        self.assertIn("no-store", response.headers["Cache-Control"])
+
+    def test_connection_status_polls_only_while_queued_or_running(self):
+        destination = self.create_destination()
+        status_url = reverse(
+            "control_plane:transfer_destination_test_status", args=[destination.pk],
+        )
+        for status in (
+            TransferDestination.TestStatus.QUEUED,
+            TransferDestination.TestStatus.RUNNING,
+            TransferDestination.TestStatus.SUCCESS,
+            TransferDestination.TestStatus.FAILED,
+        ):
+            with self.subTest(status=status):
+                TransferDestination.objects.filter(pk=destination.pk).update(
+                    last_test_status=status, last_tested_at=timezone.now(),
+                    last_test_error="Connection failed" if status == TransferDestination.TestStatus.FAILED else "",
+                )
+                for url in (self.list_url, status_url):
+                    with self.subTest(url=url):
+                        response = self.client.get(url)
+                        self.assertContains(
+                            response, f'id="destination-test-{destination.pk}"', count=1,
+                        )
+                        if status in (
+                            TransferDestination.TestStatus.QUEUED,
+                            TransferDestination.TestStatus.RUNNING,
+                        ):
+                            self.assertContains(response, f'hx-get="{status_url}"', count=1)
+                            self.assertContains(response, 'hx-trigger="every 2s"', count=1)
+                        else:
+                            self.assertNotContains(response, f'hx-get="{status_url}"')
+
+    @patch("control_plane.tasks.sftp_connection")
+    def test_connection_failures_are_safe_and_non_directory_is_rejected(self, connection):
+        destination = self.create_destination()
+        cases = [
+            (paramiko.AuthenticationException("synthetic-secret-marker"), "authentication failed"),
+            (OSError("synthetic-secret-marker"), "Unable to connect"),
+            (DeliveryError("Server host-key fingerprint mismatch."), "fingerprint mismatch"),
+            (None, "not a directory"),
+        ]
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__):
+                task_id = str(uuid4())
+                TransferDestination.objects.filter(pk=destination.pk).update(
+                    last_test_status=TransferDestination.TestStatus.QUEUED, last_test_task_id=task_id,
+                )
+                connection.return_value.__enter__.side_effect = error
+                connection.return_value.__enter__.return_value.stat.return_value.st_mode = stat.S_IFREG
+                with self.assertRaises(DeliveryError):
+                    test_transfer_destination_task.apply(args=[destination.pk], task_id=task_id, throw=True)
+                destination.refresh_from_db()
+                self.assertEqual(destination.last_test_status, TransferDestination.TestStatus.FAILED)
+                self.assertIn(expected, destination.last_test_error)
+                self.assertNotIn("synthetic-secret-marker", destination.last_test_error)
+
+    @patch("control_plane.tasks.test_transfer_destination_task.apply_async", side_effect=OperationalError("synthetic-secret-marker"))
+    def test_broker_failure_marks_test_failed_without_exposing_details(self, publish):
+        destination = self.create_destination()
+        with self.assertRaises(DeliveryError), self.captureOnCommitCallbacks(execute=True):
+            self.client.post(reverse("control_plane:transfer_destination_test", args=[destination.pk]))
+        destination.refresh_from_db()
+        self.assertEqual(destination.last_test_status, TransferDestination.TestStatus.FAILED)
+        self.assertIn("Unable to queue", destination.last_test_error)
+        self.assertNotIn("synthetic-secret-marker", destination.last_test_error)
+
+    @patch("control_plane.tasks.sftp_connection")
+    def test_connection_setting_edits_invalidate_pending_and_inflight_results(self, connection):
+        destination = self.create_destination()
+        url = reverse("control_plane:transfer_destination_edit", args=[destination.pk])
+        task_id = str(uuid4())
+        TransferDestination.objects.filter(pk=destination.pk).update(
+            last_test_status=TransferDestination.TestStatus.QUEUED, last_test_task_id=task_id,
+        )
+        def change_settings(path):
+            response = self.client.post(url, self.destination_data(host="changed.example.test", password=""))
+            self.assertRedirects(response, self.list_url)
+            return Mock(st_mode=stat.S_IFDIR)
+        connection.return_value.__enter__.return_value.stat.side_effect = change_settings
+        test_transfer_destination_task.apply(args=[destination.pk], task_id=task_id, throw=True)
+        destination.refresh_from_db()
+        self.assertEqual(destination.last_test_status, TransferDestination.TestStatus.NOT_TESTED)
+        self.assertEqual(destination.last_test_task_id, "")
+        connection.reset_mock()
+        test_transfer_destination_task.apply(args=[destination.pk], task_id=task_id, throw=True)
+        connection.assert_not_called()
+
+    @patch("control_plane.tasks.test_transfer_destination_task.apply_async")
+    def test_expired_tests_show_failure_and_allow_a_new_attempt(self, publish):
+        destination = self.create_destination()
+        old_task = str(uuid4())
+        TransferDestination.objects.filter(pk=destination.pk).update(
+            last_test_status=TransferDestination.TestStatus.RUNNING, last_test_task_id=old_task,
+            last_tested_at=timezone.now() - timedelta(minutes=6),
+        )
+        response = self.client.get(reverse("control_plane:transfer_destination_test_status", args=[destination.pk]))
+        self.assertContains(response, "timed out")
+        self.assertNotContains(response, "hx-trigger")
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(reverse("control_plane:transfer_destination_test", args=[destination.pk]))
+        destination.refresh_from_db()
+        self.assertEqual(destination.last_test_status, TransferDestination.TestStatus.QUEUED)
+        self.assertNotEqual(destination.last_test_task_id, old_task)
+        publish.assert_called_once()
+
+    @patch("control_plane.tasks.test_transfer_destination_task.apply_async")
+    def test_save_and_test_queues_new_then_updated_configuration(self, publish):
+        response = self.client.get(self.create_url)
+        self.assertContains(response, 'name="save_and_test"')
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(self.create_url, self.destination_data(save_and_test="true"))
+        self.assertRedirects(response, self.list_url)
+        destination = TransferDestination.objects.get()
+        self.assertEqual(destination.last_test_status, TransferDestination.TestStatus.QUEUED)
+        self.assertEqual(publish.call_args.kwargs["args"], [destination.pk])
+        initial_task_id = destination.last_test_task_id
+        url = reverse("control_plane:transfer_destination_edit", args=[destination.pk])
+        response = self.client.get(url)
+        self.assertContains(response, 'name="save_and_test"')
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(url, self.destination_data(
+                host="changed.example.test", password="", save_and_test="true",
+            ))
+        self.assertRedirects(response, self.list_url)
+        destination.refresh_from_db()
+        self.assertEqual(destination.host, "changed.example.test")
+        self.assertEqual(destination.password, " synthetic-password ")
+        self.assertEqual(destination.last_test_status, TransferDestination.TestStatus.QUEUED)
+        self.assertNotEqual(destination.last_test_task_id, initial_task_id)
+        self.assertEqual(publish.call_count, 2)
+
+    @patch("control_plane.views.transfer_destinations.queue_destination_test")
+    def test_plain_save_and_invalid_save_and_test_do_not_queue(self, queue_test):
+        destination = self.create_destination()
+        url = reverse("control_plane:transfer_destination_edit", args=[destination.pk])
+        response = self.client.post(url, self.destination_data(name="Plain save", password=""))
+        self.assertRedirects(response, self.list_url)
+        response = self.client.post(url, self.destination_data(
+            name="Invalid save", password="", port="0", save_and_test="true",
+        ))
+        self.assertEqual(response.status_code, 200)
+        destination.refresh_from_db()
+        self.assertEqual(destination.name, "Plain save")
+        queue_test.assert_not_called()
+
+    @patch("control_plane.views.transfer_destinations.queue_destination_test", side_effect=DeliveryError("Unable to queue the connection test."))
+    def test_save_and_test_queue_failure_keeps_saved_configuration(self, queue_test):
+        destination = self.create_destination()
+        url = reverse("control_plane:transfer_destination_edit", args=[destination.pk])
+        response = self.client.post(url, self.destination_data(
+            name="Saved despite queue failure", password="", save_and_test="true",
+        ), follow=True)
+        self.assertContains(response, "Destination saved, but the connection test could not be queued")
+        destination.refresh_from_db()
+        self.assertEqual(destination.name, "Saved despite queue failure")
+        self.assertEqual(destination.password, " synthetic-password ")
 
 
 class CdcToBatchCheckpointTests(TestCase):
@@ -636,6 +1280,9 @@ class CdcToBatchCancellationConcurrencyTests(TransactionTestCase):
         self.assertEqual(transition.status, CdcToBatchTransition.Status.PREPARING)
 
 
+@override_settings(CACHES={
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
+})
 class CdcTableRebuildAdminTests(TestCase):
     def setUp(self):
         user = get_user_model().objects.create_user(
@@ -659,27 +1306,13 @@ class CdcTableRebuildAdminTests(TestCase):
             cdc_managed=True,
         )
 
-    @patch("control_plane.admin.rebuild_cdc_table_task.delay")
-    def test_action_queues_eligible_and_skips_ineligible_tables(self, delay):
-        keyless = SourceTable.objects.create(
-            source=self.source,
-            schema_name="public",
-            table_name="keyless",
-            cdc_managed=True,
-        )
-        response = self.client.post(
-            reverse("admin:control_plane_sourcetable_changelist"),
-            {
-                "action": "rebuild_selected_cdc_tables",
-                "_selected_action": [self.table.pk, keyless.pk],
-            },
-            follow=True,
+    def test_rebuild_start_is_not_available_as_an_admin_action(self):
+        response = self.client.get(
+            reverse("admin:control_plane_sourcetable_changelist")
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Queued 1 CDC table rebuild(s).")
-        self.assertContains(response, "Skipped 1 ineligible table(s).")
-        delay.assert_called_once_with(self.table.pk)
+        self.assertNotContains(response, "Safely rebuild selected CDC warehouse tables")
 
     def test_rebuild_checkpoint_is_visible_but_cannot_be_added_or_deleted(self):
         recovery = CdcTableRebuild.objects.create(
@@ -721,6 +1354,184 @@ class CdcTableRebuildAdminTests(TestCase):
         )
         recovery.refresh_from_db()
         self.assertEqual(recovery.status, CdcTableRebuild.Status.CUTOVER_PENDING)
+
+
+@override_settings(CACHES={
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
+})
+class CdcRebuildStartViewTests(TestCase):
+    def setUp(self):
+        self.admin = get_user_model().objects.create_user(
+            username="cdc-start-admin", is_staff=True
+        )
+        self.client.force_login(self.admin)
+        self.source = SourceProfile.objects.create(
+            name="CDC rebuild start source",
+            db_type=DbChoice.POSTGRESQL,
+            host="localhost",
+            port=5432,
+            database_name="test_db",
+            username="test_user",
+            ingestion_mode=IngestionMode.CDC,
+        )
+        self.table = SourceTable.objects.create(
+            source=self.source,
+            schema_name="public",
+            table_name="events",
+            primary_key_fields=["id"],
+            cdc_managed=True,
+        )
+        self.url = reverse("control_plane:cdc_rebuild_start", args=[self.table.pk])
+
+    def test_confirmation_page_describes_the_selected_table(self):
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Confirm CDC table rebuild")
+        self.assertContains(response, "public.events")
+        self.assertContains(response, "does not clean up old CDC resources")
+
+    def test_confirmed_start_queues_the_rebuild_on_the_cdc_queue(self):
+        with patch(
+            "control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async"
+        ) as apply_async:
+            response = self.client.post(self.url, {"confirm": "yes"})
+            rebuild = CdcTableRebuild.objects.get(source_table=self.table)
+
+        self.assertRedirects(response, reverse("control_plane:cdc_rebuild_list"))
+        apply_async.assert_called_once_with(
+            args=[self.table.pk, rebuild.pk],
+            queue="queue_cdc",
+        )
+
+    def test_duplicate_start_is_blocked_after_generation_reservation(self):
+        with patch(
+            "control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async"
+        ) as apply_async:
+            self.client.post(self.url, {"confirm": "yes"})
+            response = self.client.post(
+                self.url,
+                {"confirm": "yes"},
+                follow=True,
+            )
+
+        self.assertContains(response, "already in progress or pending cutover")
+        self.assertEqual(CdcTableRebuild.objects.filter(source_table=self.table).count(), 1)
+        apply_async.assert_called_once()
+
+    def test_queue_failure_marks_the_reserved_generation_failed(self):
+        with patch(
+            "control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async",
+            side_effect=RuntimeError("broker unavailable"),
+        ):
+            response = self.client.post(
+                self.url,
+                {"confirm": "yes"},
+                follow=True,
+            )
+
+        self.assertContains(response, "The CDC rebuild could not be queued")
+        rebuild = CdcTableRebuild.objects.get(source_table=self.table)
+        self.assertEqual(rebuild.status, CdcTableRebuild.Status.FAILED)
+        self.assertEqual(
+            rebuild.last_error,
+            "Could not queue the initial CDC rebuild task.",
+        )
+
+    def test_start_requires_confirmation(self):
+        with patch(
+            "control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async"
+        ) as apply_async:
+            response = self.client.post(self.url)
+
+        self.assertRedirects(response, reverse("control_plane:cdc_rebuild_list"))
+        apply_async.assert_not_called()
+
+    def test_post_rechecks_for_an_active_transition(self):
+        CdcToBatchTransition.objects.create(source=self.source)
+
+        with patch(
+            "control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async"
+        ) as apply_async:
+            response = self.client.post(
+                self.url,
+                {"confirm": "yes"},
+                follow=True,
+            )
+
+        self.assertContains(response, "A CDC-to-batch transition is active")
+        apply_async.assert_not_called()
+
+    def test_post_rechecks_source_activity_after_confirmation(self):
+        self.assertEqual(self.client.get(self.url).status_code, 200)
+        self.source.is_active = False
+        self.source.save(update_fields=["is_active"])
+
+        with patch(
+            "control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async"
+        ) as apply_async:
+            response = self.client.post(
+                self.url,
+                {"confirm": "yes"},
+                follow=True,
+            )
+
+        self.assertContains(response, "source must be active")
+        apply_async.assert_not_called()
+
+    def test_start_is_blocked_while_a_rebuild_is_active(self):
+        CdcTableRebuild.objects.create(
+            source_table=self.table,
+            connector_name="start-active-generation",
+            topic_prefix="start-active-generation",
+            notification_topic="start-active-generation.notifications",
+            consumer_group="start-active-generation-group",
+            staging_table="source_events_start_active",
+            status=CdcTableRebuild.Status.SNAPSHOTTING,
+        )
+
+        response = self.client.get(self.url, follow=True)
+
+        self.assertContains(response, "already in progress or pending cutover")
+
+    def test_source_admin_can_start_but_viewer_cannot(self):
+        source_admin = get_user_model().objects.create_user(
+            username="cdc-start-source-admin"
+        )
+        UserSourceAccess.objects.create(
+            user=source_admin,
+            source=self.source,
+            role=Role.ADMIN,
+        )
+        self.client.force_login(source_admin)
+        response = self.client.get(reverse("control_plane:cdc_rebuild_list"))
+        self.assertContains(response, self.url)
+        response = self.client.get(self.url)
+        self.assertContains(
+            response,
+            reverse("control_plane:cdc_rebuild_list"),
+        )
+
+        with patch(
+            "control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async"
+        ) as apply_async:
+            response = self.client.post(self.url, {"confirm": "yes"})
+            rebuild = CdcTableRebuild.objects.get(source_table=self.table)
+
+        self.assertRedirects(response, reverse("control_plane:cdc_rebuild_list"))
+        apply_async.assert_called_once_with(
+            args=[self.table.pk, rebuild.pk],
+            queue="queue_cdc",
+        )
+
+        viewer = get_user_model().objects.create_user(username="cdc-start-viewer")
+        UserSourceAccess.objects.create(
+            user=viewer,
+            source=self.source,
+            role=Role.VIEWER,
+        )
+        self.client.force_login(viewer)
+        self.assertEqual(self.client.get(self.url).status_code, 404)
 
 
 class CdcRebuildMonitorTests(TestCase):
@@ -997,7 +1808,6 @@ class CdcFailureDashboardTests(TestCase):
         self.assertNotContains(response, "Recent CDC Execution Failures")
         self.assertEqual(response.context["breadcrumbs"], [
             {"name": "Dashboard", "url": reverse("control_plane:dashboard")},
-            {"name": "Administration", "url": ""},
             {"name": "Pipeline History", "url": ""},
         ])
 
@@ -1008,7 +1818,6 @@ class CdcFailureDashboardTests(TestCase):
         self.assertContains(response, "RuntimeError: CDC execution failed.")
         self.assertEqual(response.context["breadcrumbs"], [
             {"name": "Dashboard", "url": reverse("control_plane:dashboard")},
-            {"name": "Administration", "url": ""},
             {"name": "CDC Execution Failures", "url": ""},
         ])
 
@@ -1063,7 +1872,7 @@ class CdcFailureDashboardTests(TestCase):
         response = self.client.get(reverse("control_plane:cdc_failure_history"))
         self.assertContains(
             response,
-            'border-indigo-500 text-white">\n                            <span>Administration</span>',
+            'border-indigo-500 text-white">\n                            <span>History</span>',
         )
 
     @patch("control_plane.views.dashboard.get_redis_client")
@@ -1131,6 +1940,10 @@ class EmailAuditDashboardTests(TestCase):
         response = self.client.get(url)
         self.assertContains(response, "No email delivery audit records found.")
         self.assertContains(response, 'id="widget-email_audit-wrapper"')
+        audit_url = reverse("control_plane:email_audit_logs")
+        for status in ("failed", "bounced", "sent", "delivered"):
+            self.assertContains(response, f'href="{audit_url}?status={status}"')
+        self.assertContains(response, 'aria-label="Email delivery status filters"')
         preference_url = reverse("control_plane:update_widget_preferences")
         for visible in (False, True):
             response = self.client.post(
@@ -1194,7 +2007,8 @@ class EmailAuditDashboardTests(TestCase):
         self.assertNotContains(response, "Failed / Bounced Emails")
         self.assertContains(response, "Recent Email Deliveries")
         audit_url = reverse("control_plane:email_audit_logs")
-        for status in ("failed", "bounced"):
+        for status in ("failed", "bounced", "sent", "delivered"):
+            self.assertContains(response, f'href="{audit_url}?status={status}"')
             filtered = self.client.get(audit_url, {"status": status})
             self.assertEqual(
                 {log.status for log in filtered.context["page_obj"]},
@@ -1212,8 +2026,7 @@ class EmailAuditBreadcrumbTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["breadcrumbs"], [
             {"name": "Dashboard", "url": reverse("control_plane:dashboard")},
-            {"name": "Administration", "url": ""},
-            {"name": "Email Delivery Audit", "url": ""},
+            {"name": "Email Audit Logs", "url": ""},
         ])
 
     def test_audit_controls_use_escaped_data_without_missing_script(self):
@@ -1307,11 +2120,10 @@ class ActivePipelineExecutionsTests(TestCase):
         response = self.client.get(url, {"q": "missing"})
         self.assertContains(response, "No active pipeline executions match")
 
-    def test_breadcrumbs_include_administration(self):
+    def test_breadcrumbs_link_to_the_dashboard(self):
         response = self.client.get(reverse("control_plane:active_pipeline_executions"))
         self.assertEqual(response.context["breadcrumbs"], [
             {"name": "Dashboard", "url": reverse("control_plane:dashboard")},
-            {"name": "Administration", "url": ""},
             {"name": "Active Pipeline Executions", "url": ""},
         ])
 
@@ -1498,11 +2310,10 @@ class ActiveReportGenerationsTests(TestCase):
         for _, label, _ in REPORT_RUNNING_STEPS:
             self.assertContains(response, label)
 
-    def test_breadcrumbs_include_administration(self):
+    def test_breadcrumbs_link_to_the_dashboard(self):
         response = self.client.get(reverse("control_plane:active_report_generations"))
         self.assertEqual(response.context["breadcrumbs"], [
             {"name": "Dashboard", "url": reverse("control_plane:dashboard")},
-            {"name": "Administration", "url": ""},
             {"name": "Active Report Generations", "url": ""},
         ])
 
@@ -1663,6 +2474,27 @@ class WarehouseFieldSelectionTests(TestCase):
         self.assertContains(response, "No modified-at column is required")
         self.assertContains(response, "Primary Key")
         self.assertContains(response, "event_id")
+
+    def test_field_page_links_to_rebuild_only_for_eligible_cdc_tables(self):
+        self.source.ingestion_mode = IngestionMode.CDC
+        self.source.save(update_fields=["ingestion_mode"])
+        self.table.cdc_managed = True
+        self.table.save(update_fields=["cdc_managed"])
+        rebuild_url = reverse("control_plane:cdc_rebuild_start", args=[self.table.pk])
+        field_page_url = reverse(
+            "control_plane:warehouse_field_selection",
+            args=[self.source.pk],
+        )
+
+        response = self.client.get(field_page_url)
+
+        self.assertContains(response, rebuild_url)
+        self.table.primary_key_fields = []
+        self.table.save(update_fields=["primary_key_fields"])
+
+        response = self.client.get(field_page_url)
+
+        self.assertNotContains(response, rebuild_url)
 
     def test_field_page_prompts_sync_when_primary_key_metadata_is_missing(self):
         self.table.primary_key_fields = []

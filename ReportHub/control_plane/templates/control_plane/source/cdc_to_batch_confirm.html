@@ -3,27 +3,5 @@
 {% block title %}Confirm CDC staging - ReportHub{% endblock %}
 
 {% block content %}
-<div class="max-w-2xl mx-auto px-6 py-8">
-    <h1 class="text-2xl font-bold text-white">Confirm staging action</h1>
-    <p class="mt-4 text-slate-300">
-        {% if action == 'start' %}
-            Prepare batch staging tables for {{ profile.name }}? This uses source and ClickHouse resources.
-        {% elif action == 'retry' %}
-            Retry batch staging for {{ profile.name }}? Check that a previous staging task is no longer running.
-        {% elif action == 'abandon_pending' %}
-            Abandon the pending cutover for {{ profile.name }}? This is only allowed if no table exchange has occurred or is uncertain. Staging and generation tables will be retained.
-        {% else %}
-            Cancel staging for {{ profile.name }}? Existing staging tables will be retained.
-        {% endif %}
-        The source remains in CDC mode; this will not switch it to batch.
-    </p>
-    <form method="post" action="{% url 'control_plane:source_cdc_to_batch_staging' profile.pk %}" class="mt-6 flex gap-3">
-        {% csrf_token %}
-        <input type="hidden" name="action" value="{{ action }}">
-        {% if transition_generation %}<input type="hidden" name="transition" value="{{ transition_generation }}">{% endif %}
-        <input type="hidden" name="confirm" value="yes">
-        <button type="submit" class="px-4 py-2 bg-sky-500/10 text-sky-400 border border-sky-500/20 rounded-lg">Confirm</button>
-        <a href="{% url 'control_plane:source_edit' profile.pk %}" class="px-4 py-2 bg-slate-800 text-slate-300 rounded-lg">Go back</a>
-    </form>
-</div>
+    {% include 'control_plane/source/cdc_to_batch_confirm_content.html' %}
 {% endblock %}

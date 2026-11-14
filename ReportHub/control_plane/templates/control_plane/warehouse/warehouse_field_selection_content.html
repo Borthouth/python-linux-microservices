@@ -44,9 +44,12 @@
                                 <h2 class="text-lg font-bold text-white font-mono uppercase break-all">📦 {{ source_table.table_name }}</h2>
                                 <p class="text-xs text-slate-400 mt-0.5 break-all">Schema: <span class="text-slate-300">{{ source_table.schema_name }}</span></p>
                             </div>
-                            <div class="flex space-x-2 text-xs">
+                            <div class="flex flex-wrap items-center gap-2 text-xs">
                                 <button type="button" onclick="toggleTableFields('{{ source_table.table_name }}', true)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 transition-all">Select All</button>
                                 <button type="button" onclick="toggleTableFields('{{ source_table.table_name }}', false)" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 transition-all">Deselect All</button>
+                                {% if source_table.can_start_cdc_rebuild %}
+                                <a href="{% url 'control_plane:cdc_rebuild_start' source_table.pk %}" class="px-3 py-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 font-medium">Rebuild CDC table</a>
+                                {% endif %}
                             </div>
                         </div>
 

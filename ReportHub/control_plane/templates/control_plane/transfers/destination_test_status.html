@@ -1,0 +1,19 @@
+<div id="destination-test-{{ destination.pk }}" class="flex flex-col"
+     {% if destination.last_test_status == 'QUEUED' or destination.last_test_status == 'RUNNING' %}
+     hx-get="{% url 'control_plane:transfer_destination_test_status' destination.pk %}" hx-trigger="every 2s" hx-swap="outerHTML"
+     {% endif %}
+     aria-live="polite">
+    {% if destination.last_tested_at %}
+        <span class="text-slate-200 text-xs">{{ destination.last_tested_at|date:"Y-m-d H:i" }}</span>
+    {% endif %}
+    {% if destination.last_test_status == 'SUCCESS' %}
+        <span class="text-emerald-400 text-xs mt-0.5" title="Connection and directory verified. Write permission is not tested.">Passed</span>
+    {% elif destination.last_test_status == 'QUEUED' or destination.last_test_status == 'RUNNING' %}
+        <span class="text-sky-400 text-xs mt-0.5 animate-pulse">{{ destination.get_last_test_status_display }}...</span>
+    {% elif destination.last_test_status == 'FAILED' %}
+        <span class="text-red-400 text-xs mt-0.5">Failed</span>
+        <span class="text-red-400 text-xs mt-1 max-w-xs">{{ destination.last_test_error }}</span>
+    {% else %}
+        <span class="text-slate-500 text-xs">Not tested</span>
+    {% endif %}
+</div>

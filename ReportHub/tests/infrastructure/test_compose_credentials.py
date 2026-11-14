@@ -12,6 +12,7 @@ SERVICES = (
     "celery_ux_worker",
     "celery_warm_worker",
     "celery_cdc_worker",
+    "celery_maintenance_worker",
     "celery_batch_worker",
     "celery_cold_worker",
     "celery_periodic_worker",

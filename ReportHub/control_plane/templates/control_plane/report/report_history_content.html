@@ -39,6 +39,21 @@
                             {% endif %}
                         </td>
                         <td class="py-3.5 px-4 text-right">
+                            {% if exec.current_artifact_attempt and exec.current_artifact_attempt.error_message %}
+                                {% if exec.current_artifact_attempt.status == 'uploading' or exec.current_artifact_attempt.status == 'verified' %}
+                                    <p class="mb-2 text-amber-400 text-xs" role="status">
+                                        Artifact verification needs review. The stored object was retained and not deleted.
+                                    </p>
+                                {% endif %}
+                            {% endif %}
+                            {% if exec.artifact_reconciliation_available %}
+                                <form method="post" action="{% url 'control_plane:report_artifact_reconcile' exec.pk exec.current_artifact_attempt_id %}" class="inline-block">
+                                    {% csrf_token %}
+                                    <button type="submit" class="text-amber-300 hover:text-amber-200 font-medium text-xs bg-amber-950/40 border border-amber-900/50 px-3.5 py-1.5 rounded-lg transition">
+                                        Reconcile artifact
+                                    </button>
+                                </form>
+                            {% endif %}
                             {% if exec.status == 'completed' and exec.file_path %}
                                 <a href="{% url 'control_plane:download_report' exec.pk %}" class="text-emerald-400 hover:text-emerald-300 font-medium text-xs bg-emerald-950/40 border border-emerald-900/50 px-3.5 py-1.5 rounded-lg transition inline-flex items-center space-x-1.5 shadow-sm">
                                     <span>📥</span>

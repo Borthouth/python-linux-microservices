@@ -1,0 +1,30 @@
+<div class="max-w-7xl mx-auto px-6 py-8">
+    <div class="max-w-2xl mx-auto">
+        <div class="mb-6">
+            <h1 class="text-2xl font-extrabold tracking-tight text-white">{% if destination.pk %}Edit SFTP Destination: {{ destination.name }}{% else %}Add SFTP Destination{% endif %}</h1>
+            <p class="text-slate-400 text-sm mt-1">Configure connection parameters for an SFTP server.</p>
+        </div>
+
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-8 shadow-xl">
+            <form method="post" class="space-y-5">
+                {% csrf_token %}
+                <p class="text-sm text-slate-400">Credentials are encrypted at rest and are never shown again; active destinations can be selected for report file delivery. Save Destination stores settings without connecting. Save &amp; Test Connection also checks server access. Neither action transfers report files.</p>
+                {% if destination.pk %}<p class="text-sm text-slate-300">Leave credential fields blank to keep saved credentials for the same authentication method. Changing methods removes the previous method's credentials.</p>{% endif %}
+                {% if form.non_field_errors %}<div role="alert" class="text-red-400 text-sm">{{ form.non_field_errors }}</div>{% endif %}
+                {% for field in form %}
+                    <div data-transfer-field>
+                        <label for="{{ field.id_for_label }}" class="block text-xs font-medium text-slate-300 uppercase tracking-wider mb-2">{{ field.label }}{% if field.field.required %} <span aria-hidden="true">*</span>{% endif %}</label>
+                        {{ field }}
+                        {% if field.help_text %}<p id="{{ field.auto_id }}_helptext" class="text-xs text-slate-500 mt-1">{{ field.help_text }}</p>{% endif %}
+                        {% if field.errors %}<div id="{{ field.auto_id }}_error" role="alert" class="text-sm text-red-400 mt-2">{% for error in field.errors %}<p>{{ error }}</p>{% endfor %}</div>{% endif %}
+                    </div>
+                {% endfor %}
+                <div class="pt-6 flex flex-col sm:flex-row sm:items-center sm:justify-end gap-3 border-t border-slate-800">
+                    <a href="{% url 'control_plane:transfer_destination_list' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all text-center">Cancel</a>
+                    <button type="submit" name="save_and_test" value="true" class="px-5 py-2.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 text-sm font-medium rounded-xl border border-sky-500/20 transition-all">Save &amp; Test Connection</button>
+                    <button type="submit" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">Save Destination</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>

@@ -331,6 +331,42 @@
                     </div>
                 </section>
 
+                {% if request.user.is_staff %}
+                <section class="rounded-xl border border-slate-800 bg-slate-900/50 p-4 space-y-3"
+                         x-data="{ destinationSearch: '' }">
+                    <div class="flex flex-wrap justify-between items-center gap-3">
+                        <div>
+                            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">Automated File Delivery</h3>
+                            <p class="mt-1 text-xs text-slate-400">Deliver the same completed export to one or more SFTP destinations using background Celery tasks.</p>
+                        </div>
+                        <a href="{% url 'control_plane:transfer_destination_list' %}" target="_blank" rel="noopener" class="text-xs text-sky-400 hover:text-sky-300">Manage destinations (new tab)</a>
+                    </div>
+                    <label class="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-700 px-3 py-3 text-xs text-slate-300">
+                        {{ form.is_file_delivery_active }}
+                        <span>Enable automated file delivery upon successful execution</span>
+                    </label>
+                    {% for error in form.is_file_delivery_active.errors %}<p role="alert" class="text-xs text-red-400">{{ error }}</p>{% endfor %}
+                    <fieldset>
+                        <legend class="text-xs font-semibold text-slate-300 mb-2">Transfer destinations</legend>
+                        <label for="destination-search" class="sr-only">Search transfer destinations</label>
+                        <input id="destination-search" type="search" x-model="destinationSearch" placeholder="Search destinations..."
+                               class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white mb-2">
+                        <p class="mb-2 text-xs text-slate-400">Select multiple destinations. Email delivery is independent. Clear the search to review all selections.</p>
+                        <div class="max-h-60 overflow-y-auto space-y-1">
+                            {% for checkbox in form.transfer_destinations %}
+                            <label class="flex cursor-pointer items-center gap-3 rounded-lg border border-slate-800 px-3 py-3 text-sm text-slate-300"
+                                   x-show="$el.textContent.toLowerCase().includes(destinationSearch.toLowerCase())">
+                                {{ checkbox.tag }} <span>{{ checkbox.choice_label }}</span>
+                            </label>
+                            {% empty %}
+                            <p class="text-xs text-slate-400">No enabled destinations. Add and enable an SFTP destination first.</p>
+                            {% endfor %}
+                        </div>
+                        {% for error in form.transfer_destinations.errors %}<p role="alert" class="mt-2 text-xs text-red-400">{{ error }}</p>{% endfor %}
+                    </fieldset>
+                </section>
+                {% endif %}
+
                 <input type="hidden" name="config_json" :value="JSON.stringify({reportType, selectedColumns, selectedRelationships, showTotals, summaryPosition, chart})">
             </div>
 

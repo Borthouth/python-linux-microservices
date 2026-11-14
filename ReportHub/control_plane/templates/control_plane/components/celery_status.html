@@ -1,5 +1,5 @@
 <div id="{{ component_id }}" class="flex flex-col" 
-     {% if status == 'RUNNING' or status == 'running' %}
+     {% if status == 'RUNNING' or status == 'running' or poll_pending and status == 'pending' %}
          hx-get="{{ poll_url }}" 
          hx-trigger="every 2s" 
          hx-swap="outerHTML"
@@ -16,6 +16,10 @@
 
     {% if status == 'SUCCESS' or status == 'completed' %}
         <span class="text-emerald-400 text-[10px] font-medium mt-0.5">Ready</span>
+    {% elif poll_pending and status == 'pending' %}
+        <span id="{{ component_id }}-spinner" class="text-sky-400 text-[10px] font-medium flex items-center space-x-1 mt-0.5 animate-pulse">
+            <span>⏳</span> <span>Queued...</span>
+        </span>
     {% elif status == 'RUNNING' or status == 'running' %}
         <span id="{{ component_id }}-spinner" class="text-sky-400 text-[10px] font-medium flex items-center space-x-1 mt-0.5 animate-pulse">
             <span>⏳</span> <span>Running...</span>

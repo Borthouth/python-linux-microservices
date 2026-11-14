@@ -17,9 +17,9 @@ from psycopg2 import errors
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
-def postgres_connection(user, password):
+def postgres_connection(user, password, database="reporthub"):
     return psycopg2.connect(
-        host="postgres", dbname="reporthub", user=user, password=password,
+        host="postgres", dbname=database, user=user, password=password,
     )
 
 
@@ -27,6 +27,180 @@ def clickhouse_client(user, password):
     return clickhouse_connect.get_client(
         host="clickhouse", username=user, password=password,
     )
+
+
+def probe_existing_database_transition():
+    legacy_password = os.environ["IDENTITY_RUNTIME_PASSWORD"]
+    migration_password = os.environ["IDENTITY_MIGRATION_PASSWORD"]
+    admin = postgres_connection("identity_admin", os.environ["POSTGRES_PASSWORD"])
+    admin.autocommit = True
+    try:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "CREATE ROLE reporthub_legacy LOGIN NOSUPERUSER NOCREATEDB "
+                "NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %s",
+                (legacy_password,),
+            )
+            cursor.execute("CREATE DATABASE identity_existing OWNER reporthub_legacy")
+    finally:
+        admin.close()
+
+    legacy_environment = os.environ.copy()
+    legacy_environment.update({
+        "POSTGRES_DB": "identity_existing",
+        "APP_POSTGRES_USER": "reporthub_legacy",
+        "APP_POSTGRES_PASSWORD": legacy_password,
+    })
+    subprocess.run(
+        [sys.executable, "manage.py", "migrate", "--noinput", "--verbosity", "0"],
+        env=legacy_environment, check=True, timeout=180,
+    )
+    with postgres_connection(
+        "reporthub_legacy", legacy_password, "identity_existing",
+    ) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "CREATE TABLE identity_existing_data "
+                "(id bigserial PRIMARY KEY, generated_id bigint "
+                "GENERATED ALWAYS AS IDENTITY, value text NOT NULL)"
+            )
+            cursor.execute(
+                "INSERT INTO identity_existing_data (value) VALUES ('preserved')"
+            )
+            cursor.execute("SELECT count(*) FROM django_migrations")
+            migrations_before = cursor.fetchone()[0]
+
+    admin = postgres_connection(
+        "identity_admin", os.environ["POSTGRES_PASSWORD"], "identity_existing",
+    )
+    admin.autocommit = True
+    try:
+        for _ in range(2):
+            with admin.cursor() as cursor:
+                cursor.execute(
+                    "REASSIGN OWNED BY reporthub_legacy TO reporthub_migrator"
+                )
+                cursor.execute("ALTER SCHEMA public OWNER TO reporthub_migrator")
+                cursor.execute("REVOKE ALL ON DATABASE identity_existing FROM PUBLIC")
+                cursor.execute(
+                    "GRANT CONNECT ON DATABASE identity_existing TO reporthub_runtime"
+                )
+                cursor.execute(
+                    "GRANT CONNECT ON DATABASE identity_existing TO reporthub_legacy"
+                )
+                cursor.execute("REVOKE ALL ON SCHEMA public FROM PUBLIC")
+                cursor.execute("GRANT USAGE ON SCHEMA public TO reporthub_runtime")
+                cursor.execute(
+                    "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public "
+                    "TO reporthub_runtime"
+                )
+                cursor.execute(
+                    "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public "
+                    "TO reporthub_runtime"
+                )
+                cursor.execute(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE reporthub_migrator IN SCHEMA public "
+                    "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO reporthub_runtime"
+                )
+                cursor.execute(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE reporthub_migrator IN SCHEMA public "
+                    "GRANT USAGE, SELECT ON SEQUENCES TO reporthub_runtime"
+                )
+    finally:
+        admin.close()
+
+    migration_environment = legacy_environment.copy()
+    migration_environment.update({
+        "APP_POSTGRES_USER": "reporthub_migrator",
+        "APP_POSTGRES_PASSWORD": migration_password,
+    })
+    for migration in ("0040", "0041"):
+        subprocess.run(
+            [sys.executable, "manage.py", "migrate", "control_plane", migration,
+             "--noinput", "--verbosity", "0"],
+            env=migration_environment, check=True, timeout=180,
+        )
+    with postgres_connection(
+        "reporthub_migrator", migration_password, "identity_existing",
+    ) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM django_migrations")
+            if cursor.fetchone()[0] != migrations_before:
+                raise AssertionError("Existing migration history was not preserved.")
+            cursor.execute("ALTER TABLE identity_existing_data ADD COLUMN extra text")
+            cursor.execute("CREATE TABLE identity_existing_future (id bigserial PRIMARY KEY)")
+            cursor.execute(
+                "SELECT pg_get_userbyid(datdba) FROM pg_database "
+                "WHERE datname = 'identity_existing'"
+            )
+            if cursor.fetchone() != ("reporthub_migrator",):
+                raise AssertionError("Existing database ownership was not transferred.")
+            cursor.execute(
+                "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'public' AND pg_get_userbyid(c.relowner) = 'reporthub_legacy'"
+            )
+            if cursor.fetchone()[0]:
+                raise AssertionError("Legacy identity still owns objects in public.")
+
+    with postgres_connection(
+        "reporthub_runtime", legacy_password, "identity_existing",
+    ) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id, generated_id, value FROM identity_existing_data")
+            if cursor.fetchall() != [(1, 1, "preserved")]:
+                raise AssertionError("Existing data or generated IDs were not preserved.")
+            cursor.execute(
+                "INSERT INTO identity_existing_data (value) VALUES ('runtime') "
+                "RETURNING id, generated_id"
+            )
+            if cursor.fetchone() != (2, 2):
+                raise AssertionError("Runtime could not use existing sequences.")
+            cursor.execute("INSERT INTO identity_existing_future DEFAULT VALUES RETURNING id")
+            if cursor.fetchone() != (1,):
+                raise AssertionError("Runtime could not use future sequence grants.")
+            cursor.execute(
+                "UPDATE identity_existing_data SET value = 'updated' WHERE id = 2"
+            )
+            cursor.execute("DELETE FROM identity_existing_data WHERE id = 2")
+            cursor.execute("SELECT count(*) FROM django_migrations")
+            if cursor.fetchone()[0] != migrations_before:
+                raise AssertionError("Runtime could not read existing migration history.")
+
+    runtime = postgres_connection(
+        "reporthub_runtime", legacy_password, "identity_existing",
+    )
+    runtime.autocommit = True
+    try:
+        with runtime.cursor() as cursor:
+            for statement in (
+                "ALTER TABLE public.identity_existing_data ADD COLUMN forbidden text",
+                "TRUNCATE TABLE public.identity_existing_data",
+                "DROP TABLE public.identity_existing_data",
+            ):
+                try:
+                    cursor.execute(statement)
+                except errors.InsufficientPrivilege:
+                    pass
+                else:
+                    raise AssertionError(f"Runtime was unexpectedly allowed: {statement}")
+    finally:
+        runtime.close()
+
+    legacy = postgres_connection("reporthub_legacy", legacy_password, "identity_existing")
+    legacy.autocommit = True
+    try:
+        with legacy.cursor() as cursor:
+            try:
+                cursor.execute(
+                    "ALTER TABLE public.identity_existing_data ADD COLUMN forbidden text"
+                )
+            except errors.InsufficientPrivilege:
+                pass
+            else:
+                raise AssertionError("Legacy identity retained table ownership.")
+    finally:
+        legacy.close()
+    print("EXISTING_DATABASE_TRANSITION_TEST_PASSED", flush=True)
 
 
 def provision_and_migrate():
@@ -57,6 +231,8 @@ def provision_and_migrate():
                 "ALTER DEFAULT PRIVILEGES FOR ROLE reporthub_migrator IN SCHEMA public "
                 "GRANT USAGE, SELECT ON SEQUENCES TO reporthub_runtime"
             )
+
+    probe_existing_database_transition()
 
     client = clickhouse_client("identity_admin", os.environ["CLICKHOUSE_PASSWORD"])
     try:
@@ -442,7 +618,9 @@ class RuntimePermissionTests(unittest.TestCase):
             "SELECT queryID()", ["query_id"], [None],
         )), patch(
             "reports.tasks.clickhouse_connect.get_client", return_value=client,
-        ), patch("reports.tasks.Minio") as minio, patch("reports.tasks.set_task_progress"):
+        ), patch("reports.tasks.Minio") as minio, patch(
+            "reports.tasks.report_artifact_matches", return_value=True,
+        ), patch("reports.tasks.set_task_progress"):
             execute_report_task.apply(args=[report.pk, execution.pk], throw=True).get()
         execution.refresh_from_db()
         self.assertEqual(execution.status, "completed")

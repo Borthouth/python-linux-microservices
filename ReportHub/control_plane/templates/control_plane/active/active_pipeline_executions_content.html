@@ -1,0 +1,34 @@
+<div class="max-w-7xl mx-auto px-6 py-8">
+    <h1 class="text-2xl font-extrabold text-white">Active Pipeline Executions</h1>
+    <p class="text-slate-400 text-xs mt-1 mb-6">Tasks last reported as running. Entries can remain after a worker stops unexpectedly and expire after 24 hours.</p>
+    {% url 'control_plane:active_pipeline_executions' as search_action_url %}
+    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search source, task ID, database type or step..." filter_name="step" filter_label="All Current Steps" filter_value=step_filter %}
+    {% if unlisted_step %}
+    <p class="text-slate-400 text-xs mb-4">The selected step is not in the fixed list: {{ step_filter }}. Clear the filter to select a listed step.</p>
+    {% endif %}
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-x-auto">
+        <table class="w-full text-left text-sm">
+            <thead class="text-xs uppercase tracking-wider text-slate-400 bg-slate-950/40">
+                <tr>
+                    <th class="py-3.5 px-4">Pipeline</th>
+                    <th class="py-3.5 px-4">Current step</th>
+                    <th class="py-3.5 px-4">Task ID</th>
+                    <th class="py-3.5 px-4">Started</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/60">
+                {% for pipeline in page_obj %}
+                <tr>
+                    <td class="py-3.5 px-4 text-white">{{ pipeline.name }}</td>
+                    <td class="py-3.5 px-4 text-slate-300">{{ pipeline.current_table }}</td>
+                    <td class="py-3.5 px-4 text-slate-400 font-mono text-xs">{{ pipeline.task_id }}</td>
+                    <td class="py-3.5 px-4 text-slate-400 text-xs">{{ pipeline.started_at|date:"M j, Y, g:i A"|default:"Unknown" }}</td>
+                </tr>
+                {% empty %}
+                <tr><td colspan="4" class="py-12 text-center text-slate-500">No active pipeline executions match your search.</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% include 'control_plane/components/pagination.html' %}
+</div>

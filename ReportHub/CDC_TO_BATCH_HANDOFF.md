@@ -1,238 +1,191 @@
 # CDC-to-batch continuation handoff
 
-Last updated: 2026-11-10
+Last updated: 2026-11-14
 
 ## Goal and current status
 
-Let an administrator safely switch an existing CDC source to batch from the
-control-plane source page. Staging and progress are available there, but the
-actual switch is deliberately **not available**. Safety work is incomplete:
-the queued experimental executor has an unconditional fail-closed deployment
-fence check, even if its feature flags are enabled. That check does not fence
-old workers, direct clients or private primitives.
+This is the working checklist and cross-session source of truth for CDC-to-batch
+progress and the next task. Update its checkboxes, evidence, and next-task
+section as work is completed; reflect overall milestones in
+[ROADMAP.md](./ROADMAP.md). Operational details are in [README.md](./README.md).
 
-The user wants operational actions in the control plane, not Django admin.
-Keep old CDC, staging and generation resources until a separately approved
-cleanup workflow exists.
+The goal is a safe, confirmed control-plane operation to transition a
+CDC-managed source to batch ingestion. Source writes should remain possible
+during staging and cutover; temporary inconsistency until a later batch refresh
+is acceptable. Staging and progress reporting exist, but no user-facing
+source-wide switch or resume operation is available. The experimental executor
+remains fail-closed.
 
-## Work completed
+The blocking issue is not staging alone: old workers, direct clients, delayed
+external requests, and in-flight writes must be fenced and safely recovered
+before publication. Cancellation and an absent ClickHouse query do not prove a
+delayed request cannot still execute.
 
-- [x] Added per-table batch staging, validation, retries, status and restricted
-  abandonment in the source page. Staging does not switch the source.
-- [x] Built internal cutover prototypes, including durable external-operation
-  records and generation-based publication. These are experimental and are
-  not a complete fence or safe recovery mechanism.
-- [x] Added synchronous ClickHouse inserts for staging; old checkpoints without
-  the synchronous-insert marker must be restaged.
-- [x] Added an opt-in PostgreSQL Debezium stream test and synthetic ClickHouse
-  tests. These do not replace end-to-end testing with real workers.
-- [x] Added optional `APP_POSTGRES_USER` / `APP_POSTGRES_PASSWORD` and
-  `APP_CLICKHOUSE_USER` / `APP_CLICKHOUSE_PASSWORD` pairs. If a pair is
-  absent, existing credentials remain in use; incomplete or empty pairs fail
-  Django startup. See `config/service_credentials.py`, `config/settings.py`
-  and the local configuration section of `README.md`.
-- [x] Added `docker-compose.application-credentials.yml` to optionally pass these
-  values into all web, worker and beat containers. The existing Compose file
-  is root-owned and was not modified. The mounted project `.env` is another
-  way for Django to read these values.
-- [x] Stop container startup if Django migrations fail, log an explicit error
-  and preserve the migration command's exit status. Successful startup and
-  main-command arguments remain unchanged.
-- [x] Added opt-in `docker-compose.migrations.yml`: a one-shot migration service
-  uses explicitly required migration credentials, and all application services
-  skip startup migrations and wait for its successful completion. Legacy
-  startup remains the default. Migration failures stop startup. See README.md
-  for the coordinated two-step deployment procedure, including forcing a fresh
-  migration run each deployment. This configuration has not been deployed.
-- [x] Verify startup and migration separation with 12 standalone entrypoint
-  and Compose configuration tests, shell syntax and whitespace checks. These
-  checks do not validate live database permissions or deployment orchestration.
-- [x] Define and test candidate PostgreSQL migration/runtime and ClickHouse
-  runtime permissions in fresh, isolated databases. All Django migrations run
-  as the non-superuser migration role. Nine runtime probes cover ORM/history,
-  locks, sessions, schedules, future-object grants, CDC table evolution/report
-  reads, application staging, batch table publication primitives, own-query
-  cancellation and denied administrative/cross-database operations.
-  `tests/infrastructure/test_service_identities.py` creates and removes a unique internal
-  Compose project; credentials are generated, data is disposable, and the
-  project `.env` is masked. No live identities or services were changed.
-- [x] Fix ClickHouse query-ID propagation in report and bounded ETL queries,
-  commands and inserts: use `settings={"query_id": ...}`, not
-  `transport_settings` (HTTP headers). Use shared parameterized cancellation;
-  ETL cancellation failures are logged and its client is closed. Isolated
-  driver tests observe exact active IDs, cancel an active runtime request and
-  verify another user's request completes unaffected. Actual report execution,
-  initial batch publication and refresh/exchange paths pass. Timeout and
-  simulated worker-interruption tests retain uncertain external-operation
-  records even after a successful cancellation with no matching active query.
-  This does not implement immediate UI cancellation or an external-write fence.
+The staff-only CDC resource cleanup workflow is implemented. Migration `0048`
+reconciles historical cleanup-field defaults; migration consistency and all 12
+focused view/service tests pass with an isolated SQLite test database. An
+isolated `0047` to `0048` upgrade preserved existing audit records. The migration
+pair `0047` and `0048` was applied to the running ReportHub database on
+2026-11-14; migration and model consistency checks pass there. External-service
+behavior remains unverified. Do not use cleanup against production or shared
+resources.
 
-Separate credential *configuration* does not create restricted roles or
-remove access to privileged credentials: application containers still receive
-the legacy PostgreSQL credentials and mount the project `.env`. No credentials
-or running services were changed for this step.
+## Next task
 
-## Next logical work
+**Begin disposable cleanup validation.** Inspect the existing cleanup probes
+and design a bounded isolated test for read-only inventory and resource
+eligibility using disposable services and uniquely owned rebuild-generation
+resources. Record what is actually verified and the remaining deletion,
+permission-failure and interruption cases here and in the roadmap. Do not
+inventory or delete shared resources. CDC work is parked for a later session;
+check the worktree and service state before starting.
 
-When resuming, inspect the current worktree and service state first, then start
-with the first unchecked task below. Use isolated infrastructure and preserve
-all existing changes; do not enable cutover or alter the shared stack.
+## Completed groundwork
 
-- [ ] Validate cancellation end-to-end with real Celery workers, process
-   termination, delayed requests and dropped network responses. Query-ID
-   propagation is fixed, but current UI cancellation remains cooperative:
-   reports check the flag after the blocking query returns, and pipeline
-   deactivation is checked at task boundaries. An immediate cancellation flow
-   needs an explicitly designed control-plane action and race handling; do not
-   imply that the current UI terminates an active query. A successful KILL
-   command or absent query is not proof that a delayed request cannot execute.
-   - [x] Add an opt-in, disposable Compose probe with a real prefork Celery
-     worker and ClickHouse fault proxy. Terminating a task using
-     `CancellableETLTask` stops its active query.
-   - [x] Verify a delayed KILL leaves the query active until the command reaches
-     ClickHouse; drop the KILL response and verify the query stops while the
-     worker logs cancellation uncertainty.
-   - [x] Demonstrate that a query request delayed before reaching ClickHouse can
-     execute after task termination and a successful KILL found no active
-     query. This confirms that cancellation is not an external-write fence.
-   - [x] Exercise the production report and ingestion workflows and their
-     control-plane cancellation flags; UI cancellation is still not immediate.
-     - [x] Run `execute_report_task` in a real worker, invoke the control-plane
-       report-cancel view while its ClickHouse query request is delayed, and
-       verify that the flag is applied and the execution becomes cancelled
-       after the request returns. This confirms report cancellation is
-       cooperative, not immediate.
-     - [x] Deactivate a source through the control-plane pipeline action before
-       enqueueing ingestion; verify the real worker skips the task and retains
-       the existing ClickHouse table.
-     - [x] Deactivate a source while a real worker is blocked reading its
-       PostgreSQL source table; verify cancellation after the read, staging
-       cleanup, and preservation of the existing ClickHouse table. Ingestion
-       now rechecks source activity after reads and writes and before
-       publication. This remains cooperative; it does not fence an external
-       write already in progress. Added `CANCELLED` to current and historical
-       source status choices in migration `0041`.
-- [ ] Design and test restricted PostgreSQL and ClickHouse service identities,
-   including all required application operations and ownership/permissions for
-   the optional dedicated migration identity. The separate migration process
-   is implemented but not deployed; production role provisioning, existing-object
-   ownership changes and live migration/rollout validation remain unimplemented.
-   Candidate grants and representative isolated workflows are now verified.
-   Remaining work includes existing-object ownership/grants and complete
-   worker/source-database coverage. Query-ID propagation, worker termination,
-   and cooperative report/source cancellation are verified in isolation;
-   in-flight source cancellation and immediate UI cancellation are not.
-   - [ ] Define a reviewed, repeatable ownership/grant transition for an
-     existing PostgreSQL database, including existing tables/sequences and
-     future objects created by the migration identity. Test it on disposable
-     populated data; default privileges alone do not repair existing ownership.
-   - [ ] Expand runtime-role tests to real workers, report execution and
-     cancellation, batch refreshes, CDC ingestion/rebuilds and supported source
-     databases. Verify required operations succeed and prohibited operations
-     remain denied. Candidate database-wide grants are not source-scoped fencing.
-- [ ] Plan a coordinated rollout that removes administrator credentials from
-   application containers, upgrades and retires old workers and clients, and
-   prevents old identities or sessions from writing to newly published tables
-   and metadata. Use isolated test infrastructure; do not rotate shared
-   credentials or restart the running stack without coordination.
-   - [ ] Validate the dedicated migration service against real database roles
-     and exercise failed migration startup orchestration in isolation, not
-     just Compose configuration. Verify every deployment runs a fresh migration
-     job before starting upgraded application processes.
-   - [ ] Remove privileged credentials from runtime environment variables and
-     mounted configuration through an approved deployment design; merely
-     selecting `APP_*` credentials does not remove legacy credential access.
-- [ ] Establish how to prove outstanding external requests have terminated and
-   implement safe recovery for interrupted operations. An old operation record
-   or expired lease alone is not proof that its external request has stopped.
-- [ ] Only after fencing and recovery are enforceable, expose a confirmed switch
-   and resume flow in the control plane. Validate real worker interruptions
-   and concurrent CDC changes across supported source databases.
+- [x] Add source-page preparation, per-table staging, status, explicit retry
+  and cancellation, and restricted pending-cutover abandonment. Staging leaves
+  the source in CDC mode; interrupted tables are retained for manual cleanup.
+- [x] Add staging schema, engine, row-count, username and physical UUID checks,
+  plus whole-transition verification status. These checks do not prove source
+  scan completeness, equal-count data changes, or safety after validation.
+- [x] Add private checkpointed exchange/finalization and generation-publication
+  prototypes, including uncertain-command markers and atomic publication.
+  Neither path establishes a fence or safe recovery.
+- [x] Add source-row and report locks, task mode provenance, and experimental
+  external-operation records. They do not cover old workers, direct clients,
+  connection loss, or prove external requests have stopped.
+- [x] Add optional application credentials and an opt-in migration service.
+  Test candidate PostgreSQL and ClickHouse roles, a single-legacy-owner
+  transfer, and migration gating in disposable environments; production
+  provisioning and deployment remain unfinished.
+- [x] Fix query-ID propagation and exercise cancellation with real workers.
+  The tests show a delayed request can execute after worker termination even
+  after cancellation finds no active query. UI cancellation remains cooperative.
+- [x] Exercise PostgreSQL CDC changes during staging and private generation
+  publication in an opt-in live test. Tasks ran in the test process, not through
+  a production switch; this is not an end-to-end rollout or fencing proof.
+- [x] Move single-table rebuild initiation and monitoring into the control
+  plane. This is separate from source-wide switching.
+- [x] Implement staff-only rebuild-resource cleanup with read-only inventory,
+  explicit confirmation, a dedicated maintenance queue, eligibility rechecks,
+  recorded outcomes, and interruption controls. Twelve focused tests passed in
+  an isolated Django test database; external services were not exercised.
+- [x] Reconcile cleanup history defaults with migration `0048`; migration
+  consistency and the focused tests pass, and an isolated SQLite upgrade from
+  `0047` preserves existing historical values. The running database now has
+  `0047` and `0048` applied.
 
-See the CDC-to-batch section of `ROADMAP.md` for detailed progress. Source
-writes should remain possible during staging and cutover; temporary
-inconsistency until a later batch refresh is acceptable.
+## Remaining work checklist
 
-## Important safeguards
+### Rebuild-resource cleanup
 
-- Do not remove the fail-closed executor gate or enable the switch merely
-  because credentials can be configured separately.
-- Generation publication isolates old physical table names, but does not stop
-  an old worker from loading new routing or a privileged client from writing.
-- Respect existing lock ordering when working on cutover. Uncertain external
-  operations and exchanges must not be cleared just because they are old.
-- The repository has substantial **uncommitted** work from this and earlier
-  sessions, including unrelated changes. Inspect `git status` and preserve it;
-  do not reset, commit, rotate credentials or remove volumes without approval.
-- Migrations `0039` and `0040` represent an added then removed email widget
-  and have been applied locally; preserve both.
+- [x] Reconcile the historical-field migration drift and pass the migration
+  consistency check and focused tests in isolation.
+- [ ] Validate inventory, confirmed deletion, permission failures, interrupted
+  operations and recovery against disposable connector, PostgreSQL,
+  Kafka/Connect and ClickHouse resources. Verify active, unfinished and
+  unverified resources remain protected and per-resource outcomes are visible.
+- [ ] Document verified operating and recovery procedures before using cleanup
+  on shared or production resources; never automatically delete retained
+  resources.
 
-## Most recent verification
+### Fencing and recovery
 
-Test organization: standalone tests now live in `tests/infrastructure/`;
-opt-in live Django tests and the container identity probe live in
-`tests/integration/`. Conventional app-level `tests.py` modules remain in
-their Django apps. Run host-only discovery with
-`python3 -m unittest discover -s tests/infrastructure -t . -v`.
-After relocation, all 15 host tests and 14 isolated runtime probes passed;
-all 12 relocated Django integration tests imported and were discovered in an
-isolated container, without running those live tests. Imports, patch targets,
-Compose probe paths and documented commands were updated.
+- [ ] Design and validate an automated source-scoped fence covering CDC
+  ingestion and rebuilds, keyless refreshes, report reads, queued work, old
+  workers, direct clients and delayed external requests. A database lock or
+  separate credentials alone cannot establish this fence.
+- [ ] Prove outstanding requests have terminated and implement safe recovery
+  for uncertain external-operation records and interrupted work. An expired
+  lease, old record, successful cancellation or missing active query is not
+  proof of termination.
+- [ ] Implement and test recovery for uncertain ClickHouse exchange/rename
+  commands, including lost responses and delayed execution, before retry or
+  finalization. UUID checks alone are insufficient; the exchange primitive
+  cannot run inside an enclosing database transaction.
+- [ ] Coordinate report reads and metadata during publication. Sequential
+  exchanges must not expose batch tables to reports still using CDC metadata;
+  cover lost PostgreSQL connections and direct ClickHouse readers.
+- [ ] Revalidate staging, source/table membership and physical identities
+  under the complete fence. Account for untracked metadata writers and future
+  mode-switch cycles; mode provenance is not a generation fence.
 
-After the identity-configuration changes, 11 credential/executor Django tests
-passed, along with two Compose credential-propagation tests. Compose config
-validation, migration consistency and `git diff --check` also passed. An
-isolated Django settings check confirmed both separate credential pairs load.
-No new role provisioning or live-worker fencing was tested.
-Subsequent startup/migration separation checks passed 12 standalone entrypoint
-and Compose tests, plus shell syntax validation. These verify failure exit
-codes, skipped runtime migrations, required dedicated credentials and dependency
-gates with and without the CDC overlay. No containers were started or restarted;
-live database permissions and Docker failure orchestration remain untested.
-The subsequent isolated identity suite passed against PostgreSQL 15.19 and
-ClickHouse 26.10.3.7: 9 in-container permission/workflow tests and 13 host
-tests (including the integration runner and existing startup/Compose tests).
-The migration identity applied every Django migration. Own-query cancellation
-was verified against an active request; another user's request was not killed.
-All isolated containers and their network were removed. The production
-permission/ownership transition and real-worker fencing remain untested.
-After the query-ID fix, 14 in-container permission/workflow probes and 15 host
-tests passed, including driver queries/commands/inserts, actual report and ETL
-refresh execution, parameterized cancellation and retained uncertainty after
-timeouts/simulated interruptions. Isolated resources were removed. No shared
-services were restarted or credentials changed.
+### Identities and deployment
 
-The real-worker cancellation probes run in a separate, uniquely named Compose
-project with isolated PostgreSQL, Redis, ClickHouse and MinIO services. Six
-scenarios passed: active-query cancellation after worker termination, delayed
-KILL, dropped KILL response with explicit uncertainty logging, execution of a
-delayed query after termination despite a prior KILL finding no active query,
-production report cancellation through the control-plane view, and skipping a
-queued ingestion after control-plane source deactivation while retaining the
-existing ClickHouse table. The report test confirms that cancellation takes
-effect only after the delayed query returns. In-flight ingestion cancellation
-and immediate UI cancellation remain unverified. The task-revocation signal
-invokes the existing ETL query-cancellation helper for terminated
-`CancellableETLTask` jobs. All temporary services were removed; the shared
-stack was not changed.
+- [ ] Review an existing PostgreSQL ownership/grant transition: inventory
+  multiple owners, schemas, extensions, grants, sessions, shared objects,
+  tables, sequences and future-object privileges. The tested single-owner
+  candidate is not a production procedure; default privileges are not
+  retroactive.
+- [ ] Validate the migration gate with actual application web/worker commands
+  and deployment paths, including failure, existing processes, and a fresh
+  migration job on every deployment.
+- [ ] Design and validate coordinated rollout that removes privileged
+  credentials from runtime environments and mounted configuration, upgrades
+  producers/workers, and retires old clients, identities and sessions. Merely
+  selecting `APP_*` credentials does not remove access to legacy credentials.
+- [ ] Extend restricted-identity real-worker tests to CDC ingestion/rebuilds
+  and all supported source databases. Restricted report/batch worker and
+  read-only PostgreSQL source probes already pass; cancellation scenarios still
+  use privileged source connections.
 
-Useful focused commands from `ReportHub/`:
+### Staging, switch and end-to-end validation
 
-```bash
-python3 -m unittest discover -s tests/infrastructure -t . -p test_entrypoint.py -v
-python3 -m unittest discover -s tests/infrastructure -t . -p test_compose_credentials.py -v
-python3 -m unittest discover -s tests/infrastructure -t . -p test_compose_migrations.py -v
-REPORTHUB_CELERY_CANCELLATION_TEST=1 python3 -m unittest discover \
-  -s tests/infrastructure -t . -p test_celery_cancellation.py -v
-REPORTHUB_IDENTITY_TEST=1 python3 -m unittest discover \
-  -s tests/infrastructure -t . -p test_service_identities.py -v
-docker compose -f docker-compose.yml -f docker-compose.cdc.yml exec -T app \
-  python manage.py test config.tests etl.tests.CdcToBatchExecutorTests --noinput
-docker compose --env-file .env.example -f docker-compose.yml \
-  -f docker-compose.cdc.yml -f docker-compose.application-credentials.yml \
-  config --quiet
-```
+- [ ] Validate staging and interruption recovery for PostgreSQL, MySQL,
+  SQL Server and Oracle, including concurrent writes/deletes, other crash
+  boundaries, batch-worker overlap and source-specific permissions. Local
+  staging matched rows for all four; the verified live CDC overlap and worker
+  retry scenarios are PostgreSQL-specific and do not prove full cutover safety.
+- [ ] Validate source-driver streaming and large-table performance. Staging
+  currently holds a checkpoint transaction for a whole table and restarts that
+  table after interruption.
+- [ ] Once fencing, recovery and rollout guarantees are enforceable, expose
+  confirmed switch and resume actions in the control plane, with visible
+  progress, errors and safe recovery. Keep the executor fail-closed until then.
+- [ ] Validate the complete workflow with real workers and live CDC streams
+  across supported relational databases, including concurrent source writes,
+  inserts and deletes, worker interruption, retries and report continuity.
+- [ ] Provide operational guidance for lag, restart/replay, failed cutovers and
+  retained resources based on the verified workflow.
 
-The Django test command requires the existing app and test database services
-to be available. Check current service state before running it; do not assume
-the stack is still running.
+### Separate optional improvement
+
+- [ ] Design immediate control-plane query cancellation and race handling if
+  needed. Existing report/source cancellation is cooperative; immediate
+  cancellation would not replace the required external-write fence.
+- [ ] Plan MongoDB CDC separately as described in [ROADMAP.md](./ROADMAP.md):
+  MongoDB currently remains batch-only. A disposable single-node replica set
+  enables change-stream testing but does not implement CDC or prove failover.
+  Define and validate MongoDB-specific transitions, rebuilds and cleanup before
+  including MongoDB in source-wide switching; retain the existing mode gate.
+
+## Safety and continuation notes
+
+- Do not enable the experimental transition setting, remove the executor gate,
+  or expose a switch based only on candidate role or cancellation tests.
+- Do not run inventory/deletion against shared resources or use production
+  credentials for probes. Cleanup requires a fresh reviewed inventory and
+  explicit confirmation.
+- The running stack had no maintenance worker when migrations were applied;
+  no services were restarted. Do not start it to use cleanup on shared resources
+  before disposable validation.
+- Preserve the existing uncommitted work across sessions. Inspect `git status`;
+  do not reset, commit, rotate credentials, or remove volumes without approval.
+
+## Useful references
+
+- [CDC transition implementation](./control_plane/views/cdc_transition.py)
+- [Staging and cutover primitives](./etl/cdc_to_batch.py)
+- [CDC task and writer guards](./etl/tasks.py)
+- [External-operation tracking](./etl/cdc_external_operations.py)
+- [Report/cutover coordination](./control_plane/metadata_guard.py)
+- [Cleanup view](./control_plane/views/cdc_cleanup.py),
+  [cleanup service](./etl/cdc_cleanup.py), and
+  [cleanup migration 0047](./control_plane/migrations/0047_cdc_resource_cleanup.py)
+- [Cleanup view tests](./control_plane/test_cdc_cleanup.py) and
+  [cleanup service tests](./etl/test_cdc_cleanup.py)
+- [Restricted-identity probes](./tests/infrastructure/test_service_identities.py)
+  and [real-worker cancellation tests](./tests/infrastructure/test_celery_cancellation.py)
+- [Migration-gate tests](./tests/infrastructure/test_migration_gate.py),
+  [ClickHouse cutover tests](./tests/integration/test_cdc_to_batch_live.py), and
+  [live PostgreSQL CDC stream test](./tests/integration/test_cdc_to_batch_stream_live.py)

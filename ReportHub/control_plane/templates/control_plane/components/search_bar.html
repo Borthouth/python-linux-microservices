@@ -5,6 +5,7 @@
                name="q" 
                value="{{ search_query }}"
                placeholder="{{ placeholder|default:'Search...' }}" 
+               {% if search_label %}aria-label="{{ search_label }}"{% endif %}
                class="w-full bg-slate-900 border border-slate-800 text-white px-4 py-2 rounded-xl focus:outline-none focus:border-indigo-500 text-sm">
     </div>
     

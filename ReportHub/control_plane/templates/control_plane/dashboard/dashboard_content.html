@@ -28,6 +28,9 @@
     <div class="{% if not widget_prefs.show_email_audit %}hidden{% endif %} mb-6" id="widget-email_audit-wrapper">
         {% include 'control_plane/dashboard/components/email_audit.html' %}
     </div>
+    <div class="{% if not widget_prefs.show_file_deliveries %}hidden{% endif %} mb-6" id="widget-file_deliveries-wrapper">
+        {% include 'control_plane/dashboard/components/file_deliveries.html' %}
+    </div>
     {% endif %}
 
     <div class="{% if not widget_prefs.show_dlq %}hidden{% endif %} mb-6" id="widget-dlq-wrapper">

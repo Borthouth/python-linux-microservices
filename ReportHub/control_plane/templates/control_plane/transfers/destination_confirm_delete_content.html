@@ -1,0 +1,11 @@
+<div class="max-w-7xl mx-auto px-6 py-8">
+<div class="max-w-lg mx-auto bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+    <h1 class="text-xl font-bold text-white">Delete SFTP Destination</h1>
+    <p class="text-slate-300 text-sm mt-4">Delete <strong class="select-text">{{ destination.name }}</strong> and its saved credentials? Non-secret configuration history is retained.</p>
+    <form method="post" class="flex flex-wrap justify-end gap-3 mt-6">
+        {% csrf_token %}
+        <a href="{% url 'control_plane:transfer_destination_list' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all">Cancel</a>
+        <button type="submit" class="px-4 py-2.5 bg-red-600 hover:bg-red-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-red-600/20 transition-all">Delete Destination</button>
+    </form>
+</div>
+</div>

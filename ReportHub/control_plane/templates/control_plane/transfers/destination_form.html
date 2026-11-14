@@ -1,0 +1,12 @@
+{% extends 'control_plane/base.html' %}
+{% load static %}
+
+{% block title %}{% if destination.pk %}Edit{% else %}Add{% endif %} SFTP Destination - ReportHub{% endblock %}
+
+{% block content %}
+    {% include 'control_plane/transfers/destination_form_content.html' %}
+{% endblock %}
+
+{% block javascript %}
+    <script src="{% static 'control_plane/js/transfer_destinations.js' %}" defer></script>
+{% endblock %}

@@ -1,0 +1,101 @@
+<div class="max-w-7xl mx-auto px-6 py-8">
+    <div class="mb-6">
+        <h1 class="text-2xl font-extrabold text-white">CDC Table Rebuilds</h1>
+        <p class="text-slate-400 text-xs mt-1">Monitor rebuild status and review failures for sources you are authorized to access.</p>
+    </div>
+
+    {% url 'control_plane:cdc_rebuild_list' as search_action_url %}
+    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search by source, table, status or error..." search_query=search_query %}
+
+    {% if startable_page_obj.paginator.count %}
+    <section class="mb-6 bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl">
+        <div class="mb-4">
+            <h2 class="text-lg font-bold text-white">Start a CDC Table Rebuild</h2>
+            <p class="text-slate-400 text-xs mt-1">Eligible tables from sources you administer. Starting a rebuild requires confirmation.</p>
+        </div>
+        <div class="divide-y divide-slate-800">
+            {% for source_table in startable_page_obj %}
+            <div class="flex flex-wrap items-center justify-between gap-3 py-3">
+                <div>
+                    <p class="text-sm font-medium text-white">{{ source_table.source.name }}</p>
+                    <p class="text-xs font-mono text-slate-400">{{ source_table.schema_name }}.{{ source_table.table_name }}</p>
+                </div>
+                <a href="{% url 'control_plane:cdc_rebuild_start' source_table.pk %}" class="px-3 py-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 text-xs font-medium">
+                    Start rebuild
+                </a>
+            </div>
+            {% endfor %}
+        </div>
+        {% if startable_page_obj.has_other_pages %}
+        <div class="flex items-center justify-between border-t border-slate-800 pt-3 mt-2 text-xs">
+            {% if startable_page_obj.has_previous %}
+            <a href="?q={{ search_query|urlencode }}&amp;table_page={{ startable_page_obj.previous_page_number }}" class="text-indigo-300 hover:text-white">Previous eligible tables</a>
+            {% else %}
+            <span></span>
+            {% endif %}
+            <span class="text-slate-500">Page {{ startable_page_obj.number }} of {{ startable_page_obj.paginator.num_pages }}</span>
+            {% if startable_page_obj.has_next %}
+            <a href="?q={{ search_query|urlencode }}&amp;table_page={{ startable_page_obj.next_page_number }}" class="text-indigo-300 hover:text-white">Next eligible tables</a>
+            {% else %}
+            <span></span>
+            {% endif %}
+        </div>
+        {% endif %}
+    </section>
+    {% endif %}
+
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-x-auto">
+        <table class="w-full text-left border-collapse">
+            <thead>
+                <tr class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400 bg-slate-950/40">
+                    <th class="py-3.5 px-4">Source</th>
+                    <th class="py-3.5 px-4">Table</th>
+                    <th class="py-3.5 px-4">Status</th>
+                    <th class="py-3.5 px-4">Last Updated</th>
+                    <th class="py-3.5 px-4">Required Attention</th>
+                    <th class="py-3.5 px-4">Action</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/60 text-sm">
+                {% for rebuild in page_obj %}
+                <tr class="hover:bg-slate-800/40 transition">
+                    <td class="py-3.5 px-4 font-medium text-white">{{ rebuild.source_table.source.name }}</td>
+                    <td class="py-3.5 px-4 text-slate-300 font-mono text-xs">{{ rebuild.source_table.schema_name }}.{{ rebuild.source_table.table_name }}</td>
+                    <td class="py-3.5 px-4 text-slate-300">{{ rebuild.get_status_display }}</td>
+                    <td class="py-3.5 px-4 text-slate-400 text-xs whitespace-nowrap">{{ rebuild.updated_at|date:"M j, Y H:i:s" }}</td>
+                    <td class="py-3.5 px-4 text-xs">
+                        {% if rebuild.last_error %}
+                            <span class="text-amber-300 whitespace-pre-wrap">{{ rebuild.last_error }}</span>
+                        {% elif rebuild.status == "CUTOVER_PENDING" or rebuild.status == "FAILED" %}
+                            <span class="text-amber-300">Review rebuild state.</span>
+                        {% else %}
+                            <span class="text-slate-500">None</span>
+                        {% endif %}
+                    </td>
+                    <td class="py-3.5 px-4">
+                        {% if rebuild.status == "CUTOVER_PENDING" and global_admin or rebuild.status == "CUTOVER_PENDING" and rebuild.source_table.source_id in resumable_source_ids %}
+                            <form method="post" action="{% url 'control_plane:cdc_rebuild_resume' rebuild.pk %}">
+                                {% csrf_token %}
+                                <button type="submit" class="px-3 py-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 text-xs font-medium">
+                                    Resume cutover
+                                </button>
+                            </form>
+                        {% elif rebuild.status == "CUTOVER_PENDING" %}
+                            <span class="text-slate-500 text-xs">Ask a source administrator to resume.</span>
+                        {% else %}
+                            <span class="text-slate-500">—</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="6" class="py-12 text-center text-slate-500 text-sm">
+                        {% if search_query %}No CDC rebuilds match your search.{% else %}No CDC rebuilds are available for your authorized sources.{% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% include 'control_plane/components/pagination.html' %}
+</div>

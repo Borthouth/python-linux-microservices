@@ -1,0 +1,71 @@
+<div class="max-w-7xl mx-auto px-6 py-8">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
+        <div>
+            <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">Transfer Destinations</h1>
+            <p class="text-slate-400 text-sm">Configure SFTP destinations for automated report file delivery. Enable transfers on each report.</p>
+        </div>
+        <a href="{% url 'control_plane:transfer_destination_create' %}" class="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all flex items-center justify-center space-x-2 shrink-0">
+            <span aria-hidden="true">&#10133;</span>
+            <span>Add SFTP Destination</span>
+        </a>
+    </div>
+
+    {% url 'control_plane:transfer_destination_list' as search_action_url %}
+    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search by name or host..." search_label="Search by name or host" search_query=search_query filter_name="status" filter_value=status_filter filter_label="All Statuses" filter_options=filter_options %}
+
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400">
+                        <th scope="col" class="py-3 px-4">Name</th>
+                        <th scope="col" class="py-3 px-4">SFTP Server</th>
+                        <th scope="col" class="py-3 px-4">Remote Directory</th>
+                        <th scope="col" class="py-3 px-4">Status</th>
+                        <th scope="col" class="py-3 px-4">Last Tested</th>
+                        <th scope="col" class="py-3 px-4 text-right">Actions</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/60 text-sm">
+                    {% for destination in page_obj %}
+                    <tr class="hover:bg-slate-800/40 transition-all">
+                        <td class="py-3.5 px-4 font-medium text-white select-text">{{ destination.name }}</td>
+                        <td class="py-3.5 px-4 text-slate-300 select-text">
+                            <span class="block font-mono text-xs">{{ destination.host }}:{{ destination.port }}</span>
+                            <span class="text-xs text-slate-400">{{ destination.get_authentication_display }}</span>
+                        </td>
+                        <td class="py-3.5 px-4 text-slate-300 font-mono text-xs select-text">{{ destination.remote_directory }}</td>
+                        <td class="py-3.5 px-4">
+                            {% if destination.is_active %}
+                                <span class="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full text-xs font-semibold">Active</span>
+                            {% else %}
+                                <span class="px-2.5 py-1 bg-red-500/10 border border-red-500/20 text-red-400 rounded-full text-xs font-semibold">Inactive</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3.5 px-4">
+                            {% include 'control_plane/transfers/destination_test_status.html' %}
+                        </td>
+                        <td class="py-3.5 px-4 text-right">
+                            <div class="inline-flex items-center space-x-1.5 justify-end">
+                                <form action="{% url 'control_plane:transfer_destination_test' destination.pk %}" method="post" class="inline-flex">
+                                    {% csrf_token %}
+                                    <button type="submit" class="px-3 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 text-xs font-medium rounded-lg transition-all" title="Test host key, authentication and remote directory without writing files">Test</button>
+                                </form>
+                                <form action="{% url 'control_plane:transfer_destination_toggle' destination.pk %}" method="post" class="inline-flex">
+                                    {% csrf_token %}
+                                    <button type="submit" class="px-3 py-1.5 {% if destination.is_active %}bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border-amber-500/20{% else %}bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/20{% endif %} text-xs font-medium rounded-lg border transition-all">{% if destination.is_active %}Deactivate{% else %}Activate{% endif %}</button>
+                                </form>
+                                <a href="{% url 'control_plane:transfer_destination_edit' destination.pk %}" aria-label="Edit {{ destination.name }}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-all">Edit</a>
+                                <a href="{% url 'control_plane:transfer_destination_delete' destination.pk %}" aria-label="Delete {{ destination.name }}" class="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-medium rounded-lg border border-red-500/20 transition-all">Delete</a>
+                            </div>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="6" class="py-12 text-center text-slate-500 text-sm">No transfer destinations found.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% include 'control_plane/components/pagination.html' %}
+    </div>
+</div>

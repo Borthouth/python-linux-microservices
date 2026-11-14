@@ -3,37 +3,5 @@
 {% block title %}Active Report Generations - ReportHub{% endblock %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto px-6 py-8">
-    <h1 class="text-2xl font-extrabold text-white">Active Report Generations</h1>
-    <p class="text-slate-400 text-xs mt-1 mb-6">Report executions currently recorded as running. Steps reflect their last saved progress.</p>
-    {% url 'control_plane:active_report_generations' as search_action_url %}
-    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search by report name..." filter_name="step" filter_label="All Current Steps" filter_value=step_filter %}
-    <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-x-auto">
-        <table class="w-full text-left text-sm">
-            <thead class="text-xs uppercase tracking-wider text-slate-400 bg-slate-950/40">
-                <tr>
-                    <th class="py-3.5 px-4">Report</th>
-                    <th class="py-3.5 px-4">Current step</th>
-                    <th class="py-3.5 px-4">Progress</th>
-                    <th class="py-3.5 px-4">Execution ID</th>
-                    <th class="py-3.5 px-4">Created</th>
-                </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-800/60">
-                {% for execution in page_obj %}
-                <tr>
-                    <td class="py-3.5 px-4 text-white">{{ execution.report.name }}</td>
-                    <td class="py-3.5 px-4 text-slate-300">{{ execution.step_label }}</td>
-                    <td class="py-3.5 px-4 text-slate-300">{{ execution.progress_percentage }}%</td>
-                    <td class="py-3.5 px-4 text-slate-400 font-mono text-xs">{{ execution.pk }}</td>
-                    <td class="py-3.5 px-4 text-slate-400 text-xs">{{ execution.created_at|date:"M j, Y, g:i A"|default:"Unknown" }}</td>
-                </tr>
-                {% empty %}
-                <tr><td colspan="5" class="py-12 text-center text-slate-500">No active report generations match your search.</td></tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-    {% include 'control_plane/components/pagination.html' %}
-</div>
+    {% include 'control_plane/active/active_report_generations_content.html' %}
 {% endblock %}

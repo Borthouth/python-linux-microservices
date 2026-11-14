@@ -5,9 +5,106 @@ from django.db.models import Q
 from django.urls import reverse
 from django.conf import settings
 from django.contrib.auth.models import User
-from encrypted_model_fields.fields import EncryptedCharField
+from django.core.exceptions import ValidationError
+from django.core.validators import MaxLengthValidator, MaxValueValidator, MinValueValidator
+from encrypted_model_fields.fields import EncryptedCharField, EncryptedTextField
 from simple_history.models import HistoricalRecords
 from django_celery_beat.models import PeriodicTask
+
+from control_plane.transfer_validation import (
+    validate_host_key_sha256,
+    validate_remote_directory,
+    validate_ssh_private_key,
+    validate_transfer_host,
+)
+
+
+class TransferDestination(models.Model):
+    class TestStatus(models.TextChoices):
+        NOT_TESTED = "", "Not tested"
+        QUEUED = "QUEUED", "Queued"
+        RUNNING = "RUNNING", "Testing"
+        SUCCESS = "SUCCESS", "Passed"
+        FAILED = "FAILED", "Failed"
+
+    class Authentication(models.TextChoices):
+        PASSWORD = "password", "Password"
+        PRIVATE_KEY = "private_key", "SSH private key"
+
+    name = models.CharField(max_length=100, unique=True)
+    protocol = models.CharField(max_length=10, choices=[("sftp", "SFTP")], default="sftp")
+    host = models.CharField(max_length=253, validators=[validate_transfer_host])
+    port = models.PositiveIntegerField(
+        default=22, validators=[MinValueValidator(1), MaxValueValidator(65535)]
+    )
+    username = models.CharField(max_length=100)
+    authentication = models.CharField(
+        max_length=20, choices=Authentication.choices, default=Authentication.PASSWORD
+    )
+    password = EncryptedCharField(max_length=1024, blank=True, default="")
+    private_key = EncryptedTextField(
+        blank=True, default="", validators=[MaxLengthValidator(32768)]
+    )
+    private_key_passphrase = EncryptedCharField(max_length=1024, blank=True, default="")
+    host_key_sha256 = models.CharField(
+        "Server host-key fingerprint",
+        max_length=50,
+        validators=[validate_host_key_sha256],
+        help_text="Obtain the SHA256 fingerprint from the server administrator over a trusted channel.",
+    )
+    remote_directory = models.CharField(
+        max_length=1024, default="/", validators=[validate_remote_directory]
+    )
+    is_active = models.BooleanField(
+        "Active for report transfers",
+        default=False,
+        help_text="Allow reports with file delivery enabled to transfer files to this destination.",
+    )
+    last_tested_at = models.DateTimeField(null=True, blank=True, editable=False)
+    last_test_status = models.CharField(
+        max_length=10, choices=TestStatus.choices, default="", blank=True, editable=False,
+    )
+    last_test_error = models.TextField(blank=True, default="", editable=False)
+    last_test_task_id = models.CharField(max_length=36, blank=True, default="", editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+        related_name="transfer_destinations_created", editable=False,
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+        related_name="transfer_destinations_updated", editable=False,
+    )
+    history = HistoricalRecords(
+        excluded_fields=[
+            "password", "private_key", "private_key_passphrase",
+            "last_tested_at", "last_test_status", "last_test_error", "last_test_task_id",
+        ]
+    )
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+    def clean(self):
+        super().clean()
+        if self.authentication == self.Authentication.PASSWORD:
+            if not self.password:
+                raise ValidationError({"password": "A password is required for password authentication."})
+            if self.private_key or self.private_key_passphrase:
+                raise ValidationError({"authentication": "Password authentication cannot include an SSH key or passphrase."})
+        elif self.authentication == self.Authentication.PRIVATE_KEY:
+            if self.password:
+                raise ValidationError({"password": "Use only an SSH key and optional passphrase for key authentication."})
+            if not self.private_key:
+                raise ValidationError({"private_key": "An SSH private key is required."})
+            try:
+                validate_ssh_private_key(self.private_key, self.private_key_passphrase)
+            except ValidationError as error:
+                raise ValidationError({"private_key": error.messages}) from error
 
 
 class TimeStampedAuditedModel(models.Model):
@@ -268,6 +365,85 @@ class CdcTableRebuild(models.Model):
         ]
 
 
+class CdcResourceCleanup(TimeStampedAuditedModel):
+    class Status(models.TextChoices):
+        SCANNING = "SCANNING", "Scanning"
+        AWAITING_CONFIRMATION = "AWAITING_CONFIRMATION", "Awaiting confirmation"
+        QUEUED = "QUEUED", "Queued"
+        RUNNING = "RUNNING", "Running"
+        COMPLETED = "COMPLETED", "Completed"
+        FAILED = "FAILED", "Failed"
+
+    rebuild = models.ForeignKey(
+        CdcTableRebuild,
+        on_delete=models.CASCADE,
+        related_name="resource_cleanups",
+    )
+    status = models.CharField(max_length=32, choices=Status.choices)
+    task_id = models.CharField(max_length=255, blank=True, default="")
+    last_error = models.TextField(blank=True, default="")
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["rebuild"],
+                condition=Q(
+                    status__in=[
+                        "SCANNING",
+                        "AWAITING_CONFIRMATION",
+                        "QUEUED",
+                        "RUNNING",
+                    ]
+                ),
+                name="uniq_active_cdc_resource_cleanup",
+            ),
+        ]
+
+
+class CdcResourceCleanupItem(TimeStampedAuditedModel):
+    class ResourceType(models.TextChoices):
+        CONNECTOR = "CONNECTOR", "Debezium connector"
+        POSTGRES_SLOT = "POSTGRES_SLOT", "PostgreSQL replication slot"
+        POSTGRES_PUBLICATION = "POSTGRES_PUBLICATION", "PostgreSQL publication"
+        KAFKA_TOPIC = "KAFKA_TOPIC", "Kafka topic"
+        KAFKA_GROUP = "KAFKA_GROUP", "Kafka consumer group"
+        CLICKHOUSE_TABLE = "CLICKHOUSE_TABLE", "ClickHouse table"
+
+    class Status(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        RUNNING = "RUNNING", "Running"
+        COMPLETED = "COMPLETED", "Completed"
+        FAILED = "FAILED", "Failed"
+
+    cleanup = models.ForeignKey(
+        CdcResourceCleanup,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    resource_type = models.CharField(max_length=32, choices=ResourceType.choices)
+    resource_name = models.CharField(max_length=512)
+    exists_at_scan = models.BooleanField(null=True, blank=True)
+    scan_error = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+    outcome = models.CharField(max_length=255, blank=True, default="")
+    last_error = models.TextField(blank=True, default="")
+    attempts = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["cleanup", "resource_type", "resource_name"],
+                name="uniq_cdc_cleanup_resource",
+            ),
+        ]
+
+
 class CdcSourceExternalOperation(models.Model):
     class Kind(models.TextChoices):
         INGESTION = "INGESTION", "CDC ingestion"
@@ -439,6 +615,7 @@ class UserWidgetPreference(models.Model):
     show_dlq = models.BooleanField(default=True)
     show_cdc_failures = models.BooleanField(default=True)
     show_email_audit = models.BooleanField(default=True)
+    show_file_deliveries = models.BooleanField(default=True)
 
     def __str__(self):
         return f"Widget Preferences for {self.user.username}"

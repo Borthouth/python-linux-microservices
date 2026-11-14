@@ -1,11 +1,14 @@
 import json
 import logging
+from django.contrib import messages
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.shortcuts import render, get_object_or_404, redirect
 from django.utils.dateparse import parse_datetime
 from django.core.paginator import Paginator
 from django.db.models import Case, CharField, F, Q, Value, When
-from django.http import Http404, HttpResponseBadRequest, FileResponse, JsonResponse
+from django.http import Http404, HttpResponseBadRequest, JsonResponse
+from django.views.decorators.http import require_POST
+from kombu.exceptions import OperationalError
 from control_plane.models import (
     CdcExecutionFailure,
     SourceProfile, 
@@ -15,8 +18,14 @@ from control_plane.models import (
 )
 from control_plane.utils import get_redis_client, get_task_progress
 from etl.progress import PIPELINE_STEPS
-from reports.models import EmailAuditLog, ReportExecution
+from reports.models import (
+    EmailAuditLog,
+    ReportArtifactAttempt,
+    ReportExecution,
+    ReportFileDelivery,
+)
 from reports.progress import REPORT_RUNNING_STEPS
+from reports.tasks import reconcile_report_artifact_task
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +128,12 @@ def dashboard_view(request):
         ),
         'recent_email_audits': (
             EmailAuditLog.objects.select_related("report").order_by("-created_at", "-pk")[:5]
+            if request.user.is_active and request.user.is_staff else []
+        ),
+        'recent_file_deliveries': (
+            ReportFileDelivery.objects.select_related(
+                "report", "execution__report", "destination"
+            ).order_by("-created_at", "-pk")[:5]
             if request.user.is_active and request.user.is_staff else []
         ),
     }
@@ -299,6 +314,23 @@ def report_history_view(request):
     paginator = Paginator(executions, 10)
     page_number = request.GET.get('page')
     page_obj = paginator.get_page(page_number)
+    page_executions = list(page_obj.object_list)
+    attempts_by_id = {
+        attempt.pk: attempt
+        for attempt in ReportArtifactAttempt.objects.filter(
+            pk__in=[
+                execution.current_artifact_attempt_id
+                for execution in page_executions
+                if execution.current_artifact_attempt_id
+            ],
+            execution_id__in=[execution.pk for execution in page_executions],
+        )
+    }
+    for execution in page_executions:
+        execution._current_artifact_attempt_cache = attempts_by_id.get(
+            execution.current_artifact_attempt_id
+        )
+    page_obj.object_list = page_executions
     
     context = {
         'page_obj': page_obj,
@@ -317,20 +349,39 @@ def report_history_view(request):
 
 @login_required
 @user_passes_test(is_admin)
+@require_POST
+def reconcile_report_artifact_view(request, report_pk, attempt_pk):
+    execution = get_object_or_404(ReportExecution, pk=report_pk)
+    attempt = execution.current_artifact_attempt
+    if (
+        attempt is None
+        or attempt.pk != attempt_pk
+        or not execution.artifact_reconciliation_available
+    ):
+        messages.error(request, 'This report artifact is not eligible for reconciliation.')
+        return redirect('control_plane:report_history')
+
+    try:
+        reconcile_report_artifact_task.delay(str(execution.pk), str(attempt.pk))
+    except OperationalError:
+        logger.exception('Could not queue artifact reconciliation for %s', attempt.pk)
+        messages.error(request, 'Could not queue artifact reconciliation. Check the task broker.')
+    else:
+        messages.success(
+            request,
+            'Artifact reconciliation was queued. The stored object will only be '
+            'accepted if its size and checksum match.',
+        )
+    return redirect('control_plane:report_history')
+
+
+@login_required
+@user_passes_test(is_admin)
 def download_report_view(request, report_pk):
     execution = get_object_or_404(ReportExecution, pk=report_pk, status='completed')
-    
     if not execution.file_path:
         raise Http404("Report file not found.")
-        
-    if execution.file_path.startswith('http'):
-        return redirect(execution.file_path)
-        
-    try:
-        file_handle = open(execution.file_path, 'rb')
-        return FileResponse(file_handle, as_attachment=True)
-    except FileNotFoundError:
-        raise Http404("Report file missing from storage.")
+    return redirect('reports:report_download', execution_pk=execution.pk)
 
 
 @login_required
@@ -339,11 +390,22 @@ def update_widget_preferences(request):
     if request.method == 'POST':
         try:
             data = json.loads(request.body)
-            prefs, _ = UserWidgetPreference.objects.get_or_create(user=request.user)
-            
+            if not isinstance(data, dict):
+                return JsonResponse({'status': 'error', 'message': 'Invalid widget preferences.'}, status=400)
             widget_key = data.get('widget')
             is_visible = data.get('visible')
-            
+            allowed_widgets = (
+                'stats', 'pipelines', 'reports', 'history', 'dlq',
+                'cdc_failures', 'email_audit', 'file_deliveries',
+            )
+            if widget_key not in allowed_widgets or not isinstance(is_visible, bool):
+                return JsonResponse({'status': 'error', 'message': 'Invalid widget or visibility.'}, status=400)
+            if widget_key == 'file_deliveries' and not (
+                request.user.is_active and request.user.is_staff
+            ):
+                return JsonResponse({'status': 'error', 'message': 'Staff access required.'}, status=403)
+            prefs, _ = UserWidgetPreference.objects.get_or_create(user=request.user)
+
             if widget_key == 'stats':
                 prefs.show_stats = is_visible
             elif widget_key == 'pipelines':
@@ -358,6 +420,8 @@ def update_widget_preferences(request):
                 prefs.show_cdc_failures = is_visible
             elif widget_key == 'email_audit':
                 prefs.show_email_audit = is_visible
+            elif widget_key == 'file_deliveries':
+                prefs.show_file_deliveries = is_visible
                 
             prefs.save()
             return JsonResponse({'status': 'success'})

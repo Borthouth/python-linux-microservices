@@ -90,7 +90,7 @@ def report_list(request):
 @guard_report_creation
 def report_create(request):
     if request.method == 'POST':
-        form = ReportDefinitionForm(request.POST)
+        form = ReportDefinitionForm(request.POST, user=request.user)
         if form.is_valid():
             report = form.save(commit=False)
             report.created_by = request.user
@@ -121,9 +121,10 @@ def report_create(request):
             report.config = config
                     
             report.save()
+            form.save_m2m()
             return redirect('reports:report_list')
     else:
-        form = ReportDefinitionForm()
+        form = ReportDefinitionForm(user=request.user)
     return render(request, 'reports/report_form.html', {'form': form, 'title': 'Create New Report', 'button_text': 'Create Report'})
 
 
@@ -135,7 +136,7 @@ def report_edit(request, pk):
     previous_active_state = report.is_active
 
     if request.method == 'POST':
-        form = ReportDefinitionForm(request.POST, instance=report)
+        form = ReportDefinitionForm(request.POST, instance=report, user=request.user)
         if form.is_valid():
             report = form.save(commit=False)
             report.is_active = previous_active_state
@@ -163,9 +164,10 @@ def report_edit(request, pk):
             report.config = config
                     
             report.save()
+            form.save_m2m()
             return redirect('reports:report_list')
     else:
-        form = ReportDefinitionForm(instance=report)
+        form = ReportDefinitionForm(instance=report, user=request.user)
         
     return render(request, 'reports/report_form.html', {
         'form': form, 
@@ -400,7 +402,7 @@ def report_history(request, pk):
     report = get_object_or_404(ReportDefinition, pk=pk)
     search_query = request.GET.get('q', '').strip()
     status_filter = request.GET.get('status', '')
-    executions = report.executions.all().order_by('-created_at')
+    executions = report.executions.prefetch_related("file_deliveries").order_by('-created_at')
     if search_query:
         executions = executions.filter(
             Q(status__icontains=search_query) |
@@ -538,7 +540,8 @@ def report_status(request, pk):
         'component_id': f'report-status-{report.pk}',
         'status': status,
         'timestamp': timestamp,
-        'poll_url': f"/reports/{report.pk}/status/"
+        'poll_url': f"/reports/{report.pk}/status/",
+        'poll_pending': latest_exec is not None,
     })
 
 

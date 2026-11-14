@@ -89,6 +89,32 @@ services:
       - shared_network
     restart: unless-stopped
 
+  sftp-test:
+    image: atmoz/sftp:debian
+    container_name: reporthub-sftp-test
+    command: ["reporthub::1001:1001:upload"]
+    ports:
+      - "127.0.0.1:${SFTP_TEST_PORT:-2222}:22"
+    networks:
+      - shared_network
+    volumes:
+      - sftp_test_data:/home/reporthub/upload
+      - sftp_test_host_keys:/etc/ssh
+      - type: bind
+        source: ${SFTP_TEST_KEY_DIR:-${HOME}/.local/share/reporthub/sftp-test}/client_ed25519.pub
+        target: /home/reporthub/.ssh/keys/client_ed25519.pub
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./sftp/prepare-upload.sh:/etc/sftp.d/prepare-upload.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "ssh-keyscan -T 2 -t ed25519 127.0.0.1 2>/dev/null | grep -q '^127.0.0.1 '"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
 networks:
   shared_network:
     name: reporthub_shared_network
@@ -100,3 +126,5 @@ volumes:
   mssql_test_data:
   mongo_test_data:
   oracle_test_data:
+  sftp_test_data:
+  sftp_test_host_keys:

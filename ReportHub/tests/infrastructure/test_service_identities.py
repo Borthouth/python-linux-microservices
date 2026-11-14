@@ -39,6 +39,7 @@ class ServiceIdentityTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("IDENTITY_PERMISSION_TESTS_PASSED", result.stdout)
+            self.assertIn("EXISTING_DATABASE_TRANSITION_TEST_PASSED", result.stdout)
             print(result.stdout, end="")
         finally:
             subprocess.run(

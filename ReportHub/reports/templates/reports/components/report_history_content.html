@@ -42,6 +42,13 @@
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap text-xs font-mono text-gray-400 truncate max-w-xs">
                         {{ execution.file_path|default:"--" }}
+                        {% for delivery in execution.file_deliveries.all %}
+                        <div class="mt-2 whitespace-normal text-xs font-sans">
+                            <a class="text-sky-400 hover:text-sky-300" href="{% url 'control_plane:file_delivery_audit' %}?q={{ execution.pk }}">
+                                {{ delivery.destination_name }}: {{ delivery.get_status_display }} ({{ delivery.retry_count }} retries)
+                            </a>
+                        </div>
+                        {% endfor %}
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-1">
                         {% if execution.status == 'completed' and execution.file_path %}

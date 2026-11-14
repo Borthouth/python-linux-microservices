@@ -4,7 +4,14 @@ from django.contrib import messages
 from django.core.paginator import Paginator
 from django.db.models import Q
 from control_plane.metadata_guard import SourceMetadataCutoverPending, source_metadata_write_guard
-from control_plane.models import SourceProfile, WarehouseDatasetMapping
+from control_plane.models import (
+    CdcTableRebuild,
+    CdcToBatchTransition,
+    DbChoice,
+    IngestionMode,
+    SourceProfile,
+    WarehouseDatasetMapping,
+)
 
 def is_admin(user):
     return user.is_staff or user.is_superuser
@@ -62,7 +69,38 @@ def warehouse_field_selection_view(request, source_pk):
         messages.success(request, f"Warehouse schema configuration updated successfully for '{source.name}'.")
         return redirect('control_plane:warehouse_list')
 
-    tables_qs = source.tables.prefetch_related('fields').all().order_by('table_name')
+    tables_qs = list(
+        source.tables.prefetch_related('fields').all().order_by('table_name')
+    )
+    active_rebuild_table_ids = set(
+        CdcTableRebuild.objects.filter(
+            source_table__source=source,
+            status__in=[
+                CdcTableRebuild.Status.SNAPSHOTTING,
+                CdcTableRebuild.Status.CUTOVER_PENDING,
+            ],
+        ).values_list('source_table_id', flat=True)
+    )
+    transition_active = CdcToBatchTransition.objects.filter(
+        source=source,
+        status__in=[
+            CdcToBatchTransition.Status.PREPARING,
+            CdcToBatchTransition.Status.CUTOVER_PENDING,
+        ],
+    ).exists()
+    source_can_rebuild = (
+        source.is_active
+        and source.ingestion_mode == IngestionMode.CDC
+        and source.db_type != DbChoice.MONGODB
+        and not transition_active
+    )
+    for table in tables_qs:
+        table.can_start_cdc_rebuild = (
+            source_can_rebuild
+            and table.cdc_managed
+            and bool(table.primary_key_fields)
+            and table.pk not in active_rebuild_table_ids
+        )
     # Query currently enabled fields for pre-checking UI inputs
     mappings = source.warehouse_mappings.all()
     enabled_field_keys = set(

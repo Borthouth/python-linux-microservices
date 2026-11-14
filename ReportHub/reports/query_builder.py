@@ -156,7 +156,11 @@ def build_clickhouse_report_query(report, selected_columns):
             f"{expression} "
             f"AS {quote_clickhouse_identifier(f'column_{index}')}"
         )
-        headers.append(str(label))
+        headers.append(
+            f"{aggregate}({label})"
+            if grouped_summary and aggregate
+            else str(label)
+        )
         aggregates.append(aggregate)
 
     if not select_parts:

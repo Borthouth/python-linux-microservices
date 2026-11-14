@@ -1,0 +1,27 @@
+<div class="max-w-3xl mx-auto px-6 py-8">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-5">
+        <div>
+            <h1 class="text-2xl font-extrabold tracking-tight text-white">Confirm CDC table rebuild</h1>
+            <p class="text-slate-400 text-sm mt-2">
+                Source <strong class="text-white">{{ source_table.source.name }}</strong> —
+                <span class="font-mono text-slate-300">{{ source_table.schema_name }}.{{ source_table.table_name }}</span>
+            </p>
+        </div>
+
+        <div class="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+            Starting this rebuild creates a new CDC generation and queues a source snapshot. Confirm that this is the intended table.
+            The rebuild can require cutover follow-up; this action does not clean up old CDC resources.
+        </div>
+
+        <form method="post" action="{% url 'control_plane:cdc_rebuild_start' source_table.pk %}" class="flex flex-wrap items-center gap-3">
+            {% csrf_token %}
+            <input type="hidden" name="confirm" value="yes">
+            <button type="submit" class="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-sm font-medium">
+                Start CDC rebuild
+            </button>
+            <a href="{% url 'control_plane:cdc_rebuild_list' %}" class="px-4 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 text-sm">
+                Cancel
+            </a>
+        </form>
+    </div>
+</div>

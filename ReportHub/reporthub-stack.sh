@@ -19,7 +19,7 @@ case "$1" in
         "${compose[@]}" stop --timeout 600 celery_beat app
         "${compose[@]}" stop --timeout 600 \
             celery_ux_worker celery_warm_worker celery_cdc_worker \
-            celery_batch_worker celery_cold_worker celery_periodic_worker
+            celery_batch_worker celery_cold_worker celery_periodic_worker celery_transfer_worker
         "${compose[@]}" stop --timeout 600
         ;;
     *)

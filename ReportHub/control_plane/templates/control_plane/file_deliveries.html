@@ -1,0 +1,12 @@
+{% extends 'control_plane/base.html' %}
+{% load static %}
+
+{% block title %}File Delivery Audit - ReportHub{% endblock %}
+
+{% block content %}
+    {% include 'control_plane/file_delivery/file_deliveries_content.html' %}
+{% endblock %}
+
+{% block javascript %}
+    <script src="{% static 'control_plane/js/file_deliveries.js' %}"></script>
+{% endblock %}

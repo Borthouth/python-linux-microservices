@@ -1,0 +1,165 @@
+<div class="max-w-7xl mx-auto px-6 py-8">
+    <div class="mb-6">
+        <h1 class="text-2xl font-extrabold text-white">CDC Resource Cleanup</h1>
+        <p class="text-slate-400 text-sm mt-2 max-w-4xl">
+            Review retained resources from failed or superseded CDC rebuild generations. Inventory is read-only;
+            deletion requires a separate administrator confirmation. Active generations, unfinished rebuilds,
+            transitions and unresolved external operations are excluded.
+        </p>
+        <p class="text-amber-300 text-xs mt-2 max-w-4xl">
+            Interrupted operations can have uncertain outcomes. A fresh inventory is required before retrying;
+            this page never assumes an old external request has stopped.
+        </p>
+    </div>
+
+    <section class="mb-10">
+        <h2 class="text-lg font-bold text-white mb-3">Eligible rebuild generations</h2>
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400 bg-slate-950/40">
+                        <th class="py-3.5 px-4">Source</th>
+                        <th class="py-3.5 px-4">Table</th>
+                        <th class="py-3.5 px-4">Generation</th>
+                        <th class="py-3.5 px-4">Expected resources</th>
+                        <th class="py-3.5 px-4">Action</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/60 text-sm">
+                    {% for candidate in candidates %}
+                    <tr class="align-top hover:bg-slate-800/30">
+                        <td class="py-4 px-4 font-medium text-white">{{ candidate.rebuild.source_table.source.name }}</td>
+                        <td class="py-4 px-4 text-slate-300 font-mono text-xs">
+                            {{ candidate.rebuild.source_table.schema_name }}.{{ candidate.rebuild.source_table.table_name }}
+                        </td>
+                        <td class="py-4 px-4 text-slate-300">
+                            <span class="font-mono text-xs">{{ candidate.rebuild.connector_name }}</span>
+                            <span class="block text-xs text-slate-500 mt-1">{{ candidate.rebuild.get_status_display }}</span>
+                        </td>
+                        <td class="py-4 px-4 text-xs text-slate-400">
+                            <ul class="space-y-1">
+                                {% for resource_type, resource_name in candidate.resources %}
+                                <li><span class="text-slate-500">{{ resource_type.label }}:</span> <span class="font-mono break-all">{{ resource_name }}</span></li>
+                                {% endfor %}
+                            </ul>
+                        </td>
+                        <td class="py-4 px-4 whitespace-nowrap">
+                            <form method="post" action="{% url 'control_plane:cdc_cleanup_scan' candidate.rebuild.pk %}">
+                                {% csrf_token %}
+                                <button type="submit" class="px-3 py-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 text-xs font-medium">
+                                    Scan resources
+                                </button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr>
+                        <td colspan="5" class="py-10 px-4 text-center text-slate-500">
+                            No eligible retained rebuild generations are available.
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section>
+        <h2 class="text-lg font-bold text-white mb-3">Recent inventory and cleanup activity</h2>
+        <div class="space-y-4">
+            {% for cleanup in cleanup_jobs %}
+            <article class="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl p-5">
+                <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                    <div>
+                        <h3 class="font-semibold text-white">
+                            {{ cleanup.rebuild.source_table.source.name }} —
+                            <span class="font-mono text-sm">{{ cleanup.rebuild.source_table.schema_name }}.{{ cleanup.rebuild.source_table.table_name }}</span>
+                        </h3>
+                        <p class="text-xs text-slate-400 mt-1">
+                            {{ cleanup.get_status_display }} · requested by
+                            {{ cleanup.created_by|default:"unknown user" }} ·
+                            {{ cleanup.created_at|date:"M j, Y H:i:s" }}
+                        </p>
+                        {% if cleanup.last_error %}
+                        <p class="text-sm text-amber-300 mt-2">{{ cleanup.last_error }}</p>
+                        {% endif %}
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        {% if cleanup.status == "AWAITING_CONFIRMATION" %}
+                        <form method="post" action="{% url 'control_plane:cdc_cleanup_confirm' cleanup.pk %}" class="flex items-center gap-2">
+                            {% csrf_token %}
+                            <label class="inline-flex items-center gap-2 text-xs text-amber-200">
+                                <input type="checkbox" name="confirm_cleanup" value="yes" required class="rounded border-slate-600 bg-slate-800">
+                                I reviewed these resources
+                            </label>
+                            <button type="submit" class="px-3 py-1.5 rounded-lg border border-rose-500/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 text-xs font-medium">
+                                Confirm cleanup
+                            </button>
+                        </form>
+                        {% endif %}
+                        {% if cleanup.status == "RUNNING" or cleanup.status == "SCANNING" %}
+                        <form method="post" action="{% url 'control_plane:cdc_cleanup_recover' cleanup.pk %}" class="flex items-center gap-2">
+                            {% csrf_token %}
+                            <label class="inline-flex items-center gap-2 text-xs text-amber-200">
+                                <input type="checkbox" name="acknowledge_uncertain" value="yes" required class="rounded border-slate-600 bg-slate-800">
+                                Mark interrupted; outcome may be uncertain
+                            </label>
+                            <button type="submit" class="px-3 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 text-xs font-medium">
+                                Require fresh inventory
+                            </button>
+                        </form>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="mt-4 overflow-x-auto">
+                    <table class="w-full text-left text-xs">
+                        <thead class="text-slate-500 uppercase tracking-wider">
+                            <tr>
+                                <th class="py-2 pr-4">Resource</th>
+                                <th class="py-2 pr-4">Inventory</th>
+                                <th class="py-2 pr-4">Cleanup status</th>
+                                <th class="py-2 pr-4">Outcome / error</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-800/60">
+                            {% for item in cleanup.items.all %}
+                            <tr class="text-slate-300">
+                                <td class="py-2 pr-4">
+                                    <span class="text-slate-400">{{ item.get_resource_type_display }}</span>
+                                    <span class="block font-mono break-all">{{ item.resource_name }}</span>
+                                </td>
+                                <td class="py-2 pr-4">
+                                    {% if item.scan_error %}
+                                        <span class="text-rose-300">Unverified</span>
+                                        <span class="block text-slate-500">{{ item.scan_error }}</span>
+                                    {% elif item.exists_at_scan is None %}
+                                        <span class="text-slate-500">Not scanned</span>
+                                    {% elif item.exists_at_scan %}
+                                        <span class="text-amber-300">Present at scan</span>
+                                    {% else %}
+                                        <span class="text-slate-500">Absent at scan</span>
+                                    {% endif %}
+                                </td>
+                                <td class="py-2 pr-4">{{ item.get_status_display }}</td>
+                                <td class="py-2 pr-4">
+                                    {% if item.last_error %}
+                                        <span class="text-rose-300">{{ item.last_error }}</span>
+                                    {% else %}
+                                        <span class="text-slate-400">{{ item.outcome|default:"—" }}</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </article>
+            {% empty %}
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center text-slate-500">
+                No resource inventories or cleanup attempts have been recorded.
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+</div>

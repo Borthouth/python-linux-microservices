@@ -1,9 +1,21 @@
 import json
 from django import forms
+from django.db.models import Q
 from .models import ReportDefinition
-from control_plane.models import SourceProfile, SourceTable
+from control_plane.models import SourceProfile, SourceTable, TransferDestination
+
+
+class DestinationChoiceField(forms.ModelMultipleChoiceField):
+    def label_from_instance(self, obj):
+        return f"{obj.name} (SFTP{'' if obj.is_active else ', inactive'})"
 
 class ReportDefinitionForm(forms.ModelForm):
+    transfer_destinations = DestinationChoiceField(
+        queryset=TransferDestination.objects.none(), required=False,
+        widget=forms.CheckboxSelectMultiple(attrs={
+            "class": "w-4 h-4 rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-indigo-500"
+        }),
+    )
     # Declare hidden field so it is properly captured in cleaned_data
     selected_fields_json = forms.CharField(
         required=False,
@@ -23,7 +35,7 @@ class ReportDefinitionForm(forms.ModelForm):
             'name', 'description', 'source', 'base_table', 
             'selected_fields_json',
             'export_format', 'include_ai_summary', 'email_recipients',
-            'is_email_active', 'is_active'
+            'is_email_active', 'is_file_delivery_active', 'transfer_destinations', 'is_active'
         ]
         widgets = {
             'name': forms.TextInput(attrs={
@@ -53,13 +65,25 @@ class ReportDefinitionForm(forms.ModelForm):
             'is_email_active': forms.CheckboxInput(attrs={
                 'class': 'w-4 h-4 text-indigo-600 bg-slate-950 border-slate-700 rounded focus:ring-indigo-500'
             }),
+            'is_file_delivery_active': forms.CheckboxInput(attrs={
+                'class': 'w-4 h-4 text-indigo-600 bg-slate-950 border-slate-700 rounded focus:ring-indigo-500'
+            }),
             'is_active': forms.CheckboxInput(attrs={
                 'class': 'h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-700 rounded bg-gray-900'
             }),
         }
 
     def __init__(self, *args, **kwargs):
+        self.user = kwargs.pop("user", None)
         super().__init__(*args, **kwargs)
+        destinations = Q(is_active=True)
+        if not self.instance._state.adding:
+            destinations |= Q(reports=self.instance)
+        self.fields["transfer_destinations"].queryset = TransferDestination.objects.filter(
+            destinations
+        ).distinct().defer("password", "private_key", "private_key_passphrase")
+        if self.user is not None and not (self.user.is_active and self.user.is_staff):
+            self.fields["transfer_destinations"].queryset = TransferDestination.objects.none()
         
         # Pre-populate JSON inputs if instance exists
         if self.instance and self.instance.pk:
@@ -89,6 +113,14 @@ class ReportDefinitionForm(forms.ModelForm):
 
     def clean(self):
         cleaned_data = super().clean()
+        if cleaned_data.get("is_file_delivery_active"):
+            if self.user is not None and not (self.user.is_active and self.user.is_staff):
+                self.add_error("is_file_delivery_active", "Only staff can configure file delivery.")
+            destinations = cleaned_data.get("transfer_destinations")
+            if not destinations:
+                self.add_error("transfer_destinations", "Select at least one active transfer destination.")
+            elif any(not destination.is_active for destination in destinations):
+                self.add_error("transfer_destinations", "Remove inactive destinations or activate them before enabling delivery.")
         
         # 1. Validate selected_fields from hidden JSON input
         fields_input = cleaned_data.get('selected_fields_json')
@@ -110,4 +142,5 @@ class ReportDefinitionForm(forms.ModelForm):
         instance.selected_fields = self.cleaned_data.get('selected_fields', [])
         if commit:
             instance.save()
+            self.save_m2m()
         return instance

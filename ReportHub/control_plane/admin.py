@@ -1,10 +1,7 @@
 from django.contrib import admin
-from etl.tasks import rebuild_cdc_table_task
 from .admin_metadata import SourceMetadataAdminMixin
 from .models import (
     CdcTableRebuild,
-    DbChoice,
-    IngestionMode,
     SourceProfile,
     SourceTable,
     UserSourceAccess,
@@ -32,27 +29,6 @@ class SourceTableAdmin(SourceMetadataAdminMixin, admin.ModelAdmin):
     )
     list_filter = ("source__ingestion_mode", "cdc_managed")
     search_fields = ("source__name", "schema_name", "table_name")
-    actions = ("rebuild_selected_cdc_tables",)
-
-    @admin.action(description="Safely rebuild selected CDC warehouse tables")
-    def rebuild_selected_cdc_tables(self, request, queryset):
-        queued = 0
-        skipped = 0
-        for table in queryset.select_related("source"):
-            if (
-                table.source.ingestion_mode != IngestionMode.CDC
-                or not table.cdc_managed
-                or not table.primary_key_fields
-                or table.source.db_type == DbChoice.MONGODB
-            ):
-                skipped += 1
-                continue
-            rebuild_cdc_table_task.delay(table.pk)
-            queued += 1
-        message = f"Queued {queued} CDC table rebuild(s)."
-        if skipped:
-            message += f" Skipped {skipped} ineligible table(s)."
-        self.message_user(request, message)
 
 
 @admin.register(CdcTableRebuild)

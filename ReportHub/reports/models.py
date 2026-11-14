@@ -65,6 +65,10 @@ class ReportDefinition(TimeStampedAuditedModel):
         help_text="Comma-separated list of email addresses for automated report distribution (e.g., user1@example.com, user2@example.com)."
     )
     is_email_active = models.BooleanField(default=False)
+    is_file_delivery_active = models.BooleanField(default=False)
+    transfer_destinations = models.ManyToManyField(
+        "control_plane.TransferDestination", blank=True, related_name="reports"
+    )
     
     # Celery Beat Periodic Task integration
     periodic_task = models.OneToOneField(
@@ -115,10 +119,108 @@ class ReportExecution(TimeStampedAuditedModel):
     completed_at = models.DateTimeField(blank=True, null=True)
     progress_percentage = models.PositiveIntegerField(default=0)
     is_cancelled = models.BooleanField(default=False)
+    current_artifact_attempt_id = models.UUIDField(
+        blank=True, null=True, editable=False
+    )
 
     def __str__(self):
         date_str = self.created_at.strftime('%Y-%m-%d %H:%M') if self.created_at else 'Unknown date'
         return f"{self.report.name} - {self.status} ({date_str})"
+
+    @property
+    def current_artifact_attempt(self):
+        if not hasattr(self, "_current_artifact_attempt_cache"):
+            self._current_artifact_attempt_cache = (
+                ReportArtifactAttempt.objects.filter(
+                    pk=self.current_artifact_attempt_id,
+                    execution_id=self.pk,
+                ).first()
+                if self.current_artifact_attempt_id
+                else None
+            )
+        return self._current_artifact_attempt_cache
+
+    @property
+    def artifact_reconciliation_available(self):
+        return (
+            self.status in {"running", "failed"}
+            and not self.is_cancelled
+            and self.current_artifact_attempt is not None
+            and self.current_artifact_attempt.status in {
+                ReportArtifactAttempt.Status.UPLOADING,
+                ReportArtifactAttempt.Status.VERIFIED,
+            }
+        )
+
+
+class ReportArtifactAttempt(models.Model):
+    class Status(models.TextChoices):
+        PREPARING = "preparing", "Preparing"
+        UPLOADING = "uploading", "Upload outcome uncertain"
+        VERIFIED = "verified", "Stored object verified"
+        COMPLETED = "completed", "Execution completed"
+        FAILED = "failed", "Failed before upload"
+        SUPERSEDED = "superseded", "Superseded"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    execution = models.ForeignKey(
+        ReportExecution, on_delete=models.CASCADE, related_name="artifact_attempts"
+    )
+    file_path = models.CharField(max_length=512, blank=True, null=True, unique=True)
+    sha256 = models.CharField(max_length=64, blank=True)
+    size = models.PositiveBigIntegerField(blank=True, null=True)
+    content_type = models.CharField(max_length=150, blank=True)
+    row_count = models.PositiveIntegerField(default=0)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PREPARING
+    )
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class ReportFileDelivery(models.Model):
+    class Status(models.TextChoices):
+        QUEUED = "queued", "Queued"
+        RUNNING = "running", "Running"
+        SUCCEEDED = "succeeded", "Delivered"
+        FAILED = "failed", "Failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    report = models.ForeignKey(
+        ReportDefinition, on_delete=models.SET_NULL, null=True, related_name="file_deliveries"
+    )
+    execution = models.ForeignKey(
+        ReportExecution, on_delete=models.SET_NULL, null=True, related_name="file_deliveries"
+    )
+    destination = models.ForeignKey(
+        "control_plane.TransferDestination", on_delete=models.SET_NULL,
+        null=True, related_name="file_deliveries",
+    )
+    destination_name = models.CharField(max_length=100)
+    destination_signature = models.CharField(max_length=64)
+    file_path = models.CharField(max_length=512)
+    remote_path = models.CharField(max_length=2048)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.QUEUED)
+    task_id = models.CharField(max_length=255, blank=True)
+    retry_count = models.PositiveIntegerField(default=0)
+    attempt_count = models.PositiveIntegerField(default=0)
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["execution", "destination"], name="unique_execution_file_destination"
+            ),
+        ]
+
 
 class EmailAuditLog(models.Model):
     STATUS_CHOICES = [
