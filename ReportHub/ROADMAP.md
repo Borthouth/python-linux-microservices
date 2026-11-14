@@ -5,7 +5,7 @@ Track the development phases, architectural milestones, and codebase optimizatio
 ## Suggested next priorities
 
 1. Complete safe CDC-to-batch switching in the control plane: resolve uncertain external requests, migrate existing-object ownership and privileges, coordinate restricted-identity rollout and worker/client fencing, then expose confirmed switch and resume actions. Real-worker cancellation behavior is tested, but delayed requests are not fenced or safely recovered. Candidate roles and query-ID propagation are verified in isolation; staging and status are available, but switching remains disabled. Use [the continuation handoff](./CDC_TO_BATCH_HANDOFF.md) as the detailed CDC work tracker and next-task source.
-2. Validate the CDC cleanup workflow against disposable connector/PostgreSQL/Kafka/ClickHouse services. Continue validating CDC permissions, concurrent snapshot writes, and interruption recovery.
+2. Continue validating the CDC cleanup workflow against disposable connector/PostgreSQL/Kafka/ClickHouse services. Uncertain attempts block cleanup by default; administrators may explicitly accept the risk. Automatic proof of termination and protection against deleting the marker are unfinished; do not use on shared resources.
 3. Enforce source and tenant access before introducing cross-source linking references and linked reports.
 4. Evaluate explicit incremental strategies and S3/Parquet sources where their source guarantees and operational costs justify them.
 5. Extend AI layouts or diagnostics and dashboard navigation where they improve the existing workflows.
@@ -20,10 +20,19 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   remain future work.
 - The staff-only CDC rebuild-resource cleanup workflow is implemented in the
   current worktree. Migration `0048` reconciles historical cleanup defaults;
-  migration consistency, 12 focused tests and an upgrade preserving historical
+  migration consistency, focused tests and an upgrade preserving historical
   records pass in isolated SQLite. Migrations `0047` and `0048` are applied to
-  the running database; validate against disposable external services before
-  use. Do not run cleanup against production or shared resources.
+  the running database. Disposable inventory, confirmed-deletion and active
+  Kafka group failure probes pass, as do a PostgreSQL permission denial and a
+  worker interruptions at read-only and connector DELETE boundaries, and a
+  ClickHouse DROP permission denial. A delayed DELETE executed after worker
+  termination and a fresh inventory, demonstrating the override risk.
+  Uncertain deletion recovery still requires validation. Migration `0049` adds a conservative uncertainty
+  marker; old cleanup workers must be stopped and drained before deployment.
+  An audited risk-acceptance override is available; it does not prove an old
+  request stopped. Control-plane source deletion and admin source/table deletion
+  are guarded until risk is accepted, but other paths can remove or bypass the
+  marker. Do not use cleanup on shared resources.
 - Page-level control-plane templates now use thin wrappers and separate content
   templates; the standalone login shell and shared component partials remain
   intentionally purpose-specific.
@@ -117,8 +126,13 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [x] Add a scheduled/manual Pipeline Automation backfill dispatcher (`trigger_all_active_clickhouse_backfill_task`) on the dedicated `queue_backfill` queue.
   - [x] Implement active-source guard checks (`is_active=True`), set the default batch limit to 10,000 rows via `DEFAULT_ETL_BATCH_SIZE`, and set Celery worker prefetch to 1.
   - [x] Configure periodic dispatch tasks (`trigger_all_active_clickhouse_ingestion_task`) and dedicated worker queue routing (`queue_hot`, `queue_backfill`, `queue_periodic`, and other application queues).
-- [ ] **Restore MongoDB CDC support:** MongoDB currently uses batch refresh; CDC remains disabled until implemented and validated. Debezium requires MongoDB change streams from a replica set or sharded cluster, not a standalone server.
-  - [ ] Add a separate, persistent single-node replica-set fixture to the test database setup without replacing or resetting the existing standalone MongoDB data. Configure authentication, initialization, readiness and addresses reachable by ReportHub and Kafka Connect; a second member is unnecessary for basic CDC tests.
+- [ ] **CDC readiness checks for supported databases:** Add a control-plane check for each supported CDC source type before allowing a new CDC configuration. Use source-specific, non-mutating checks for supported versions, topology, CDC/change-capture settings, required source permissions and connector-network reachability where verifiable. Report failed prerequisites and actionable setup guidance to the user; distinguish failed, unknown and stale checks from verified readiness. Users configure their own databases and explicitly choose CDC; do not enable CDC, modify source configuration, or silently fall back to batch automatically. Preserve existing source-mode safety gates and do not disrupt running CDC sources based on a failed check.
+  - [ ] Test ready, misconfigured, insufficient-permission and unreachable cases for PostgreSQL, MySQL, SQL Server and Oracle using disposable sources; include MongoDB when its CDC support is implemented. A passing preflight is not proof of ongoing CDC health or safe mode transition.
+- [ ] **Restore MongoDB CDC support (current CDC priority):** MongoDB currently uses batch refresh; CDC remains disabled until implemented and validated. Debezium requires MongoDB change streams from a replica set or sharded cluster, not a standalone server. The detailed parity checklist and next task are in [CDC_TO_BATCH_HANDOFF.md](./CDC_TO_BATCH_HANDOFF.md).
+  - [x] Add a separate, persistent single-node replica-set fixture to the test database setup without replacing or resetting the existing standalone MongoDB data. Configure authentication, initialization, readiness and addresses reachable by ReportHub and Kafka Connect; a second member is unnecessary for basic CDC tests.
+  - [x] Capture snapshot, insert, full update and delete event shapes with an isolated Debezium 3.5.2/MongoDB/Kafka probe. The generated connector URI currently omits the required replica-set name; the probe supplies it explicitly, and MongoDB CDC remains disabled.
+  - [ ] Add an explicit, read-only MongoDB CDC readiness check in the control plane. Check supported server/version and replica-set or sharded topology, change-stream access and required permissions, and connectivity from the connector's network where verifiable. Explain each failed or unverified prerequisite and tell the user CDC cannot work until they configure MongoDB and rerun the check. Do not change MongoDB configuration or enable CDC automatically; unknown, stale, inaccessible or insufficiently privileged checks are not a ready verdict.
+  - [ ] Test the readiness check against disposable standalone and replica-set fixtures, including insufficient permissions, unsupported or unreachable servers and stale results. Keep batch refresh available; readiness alone must not bypass the existing mode-change safety gate or enable MongoDB CDC before the implementation and end-to-end tests are complete.
   - [ ] Review the existing MongoDB connector configuration and implement validated snapshot and change-event handling, including document identity, BSON/nested values, updates, deletes, ordering, replay, offsets and oplog-retention recovery.
   - [ ] Exercise snapshot plus insert/update/delete propagation end-to-end through Debezium, Kafka, real workers and ClickHouse using disposable resources. Test restart, retries, concurrent changes and failure recovery before enabling the control-plane CDC option.
   - [ ] Preserve existing MongoDB batch sources and the mode-change safety gate. Separately design and test any future MongoDB batch/CDC transitions, rebuilds and cleanup; a single-node fixture does not test replication or failover.
@@ -139,9 +153,12 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [x] Implement staff-only read-only inventory and explicit confirmation, with cleanup dispatched to a dedicated maintenance queue.
   - [x] Recheck resource ownership and eligibility before each deletion; block active references, unfinished rebuilds/transitions, and unverified resources.
   - [x] Persist per-resource progress, outcomes, and errors, and expose job states and recovery controls in the control plane.
-  - [x] Run focused cleanup view and service tests; all 12 tests pass in the isolated Django test database.
+  - [x] Run focused cleanup view and service tests; all 15 tests pass with isolated SQLite and a local memory cache.
   - [x] Reconcile historical cleanup-field defaults with migration `0048`; verify migration consistency, focused tests and an upgrade preserving historical records in isolated SQLite.
-  - [ ] Validate permissions and interruption behavior against disposable external services before using the workflow on shared resources.
+  - [x] Validate read-only inventory and selected active, unfinished and mismatched-UUID safeguards against isolated PostgreSQL, Kafka/Connect and ClickHouse resources. Fix Kafka inventory compatibility with kafka-python 3 while retaining the 2.x group API.
+  - [x] Fix Kafka deletion API compatibility; exercise confirmed deletion and an active-group failure against disposable services using kafka-python 3.0.13. The 2.x response shapes are mocked; Celery dispatch is mocked and the service runs in the probe.
+  - [x] Exercise a PostgreSQL slot permission denial and an interrupted real solo worker at a controlled read-only request boundary; confirm recorded failure, acknowledgement and a fresh inventory after the request finishes.
+  - [ ] Test remaining service permission failures and real-worker interruptions during deletion. Prove uncertain requests have terminated before another attempt; a fresh inventory alone is not proof. Do not use on shared resources before validation.
 - [ ] Validate source-specific snapshot behavior and permissions, including schema changes, concurrent source writes, retention, retries, and recovery after interruption.
 - [ ] Add end-to-end multi-database tests and operational guidance for lag, restart/replay, and failed cutovers.
 - [ ] Implement a manually initiated source-wide CDC-to-batch transition with coordinated refresh and cutover, safe handling of active rebuilds and queued work, failure recovery, and tests for ongoing writes and deletes.
@@ -252,6 +269,10 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [x] Verify actual CSV generation, multi-destination delivery, authentication-failure isolation, host-key rejection and lost-acknowledgement retry through a real prefork Celery worker against disposable PostgreSQL, Redis, ClickHouse, MinIO and SFTP.
   - [x] Add a standalone background SFTP connection-test action without generating a report. Verify the pinned host key, authentication and remote directory without writing files, show polled results and safe errors, and support staff-only Activate/Deactivate actions with audited configuration changes.
   - [x] Verify the final forms and actions with 36 focused destination/delivery tests, live local SFTP checks, and desktop/mobile browser checks. Connection tests do not verify write permission; delivery remains at-least-once, and interrupted running transfers need operator reconciliation.
+- [ ] **Scheduled Calculated-Data SFTP Push (proposal):** Let a user choose a data source and one or more saved report definitions, then push their results to one or more SFTP destinations on a schedule or manually. Add a control-plane screen to manage these links per data source and dataset, with each run tracked through the existing SFTP audit and retry flow. Schedule the runs through the existing Celery Beat/pipeline-automation pattern on the delivery queue. Reuse `TransferDestination`, the delivery worker and the audit history rather than creating a separate workflow.
+  - [ ] Define how a dataset is chosen and validated, including source authorization, row/size limits, column naming and stable output file names for each schedule.
+  - [ ] Test one-source-to-many-destinations and many-datasets-per-source delivery, schedule changes, disabled links, and failed or interrupted runs with real workers and SFTP.
+- [ ] **SFTP Pull (proposal):** Pulling files from a partner's SFTP server is covered by the inbound file-ingestion proposal in Phase 4. Keep it separate from the outbound push workflow. Do not add database write-back: writing calculated values into customer databases is out of scope because it conflicts with the read-only source model.
 - [ ] **Enterprise Cloud Destinations (evaluation):**
   - [ ] Evaluate S3-compatible delivery first, reusing existing SDK experience and MinIO for isolated tests. Keep customer export destinations and their credentials separate from ReportHub's internal report storage.
   - [ ] Evaluate Azure Blob Storage and Google Cloud Storage according to customer requirements, preferring workload/managed identities and short-lived credentials over stored long-lived keys.
@@ -271,9 +292,16 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [ ] Integrate with dashboard widget preferences and accessible responsive styling. Choose a refresh mechanism consistent with the dashboard and bound its frequency and queries; avoid expensive external checks on each request, surface refresh failures, and evaluate background aggregation only if measurement justifies it.
   - [ ] Add inbound file/schema-review notices only after the Phase 4 inbound pipeline exists; the current SFTP feature is outbound report delivery. Add lag or volume-anomaly notices only after reliable metrics, thresholds, freshness and recovery semantics are implemented and validated. Optional AI wording can be evaluated later alongside the operations assistant, with restricted data, privacy review and deterministic facts; it must not determine severity or invent health claims.
   - [ ] Test ranking and tie-breaking, stale and resolved/historical notices, empty and unavailable states, query bounds, role/source isolation and linked-page authorization. Verify polling, failure feedback, keyboard access and mobile layout in a browser.
+- [ ] **AI "At a Glance" summary card (proposal):** Add an optional dashboard card, modelled on the glanceable cards on phone home screens, that shows a short, AI-written summary of the most relevant recorded operational facts for the day. Build the facts deterministically first, using the same rules as the contextual operations widget. Use AI only to phrase those facts in plain language and link each statement to its source record.
+  - [ ] Keep the facts and severity deterministic. The AI must not rank, add, or infer facts, or claim that systems are healthy. Include the generated time and the time window, and show a clear fallback to the plain deterministic list when AI is unavailable or disabled.
+  - [ ] Scope the facts to the user's permissions before they are sent to the model, and restrict what data is sent. Do not send credentials, connection details or record contents beyond the summarized fields. Complete the privacy review before enabling it.
+  - [ ] Bound the cost: generate the summary on a schedule or on demand with caching, not on every page load, and surface generation failures.
+  - [ ] Test that every statement maps to a source fact, that the fallback is shown when the model fails, that inaccessible records never reach the prompt, and that the card's layout and refresh work on desktop and mobile.
 - [ ] **AI operations assistant:** Add a floating **Ask ReportHub** button across the control plane, opening an accessible, dismissible chat-style panel rather than a permanent breadcrumb-area panel. Support mobile and keyboard use. Offer suggested questions and read-only answers grounded in current operational records, such as emails sent today, recorded report delivery statuses and recent failures; link answers to the relevant histories.
   - [ ] Use a bounded set of validated query types, with no arbitrary model-generated SQL or operational actions. Enforce existing permissions and source/tenant visibility, restrict the data sent to the model, and surface unavailable, incomplete or stale information rather than inventing answers.
   - [ ] Define time zones and counting semantics, distinguish sent from delivered, and handle missing audit records and stalled tasks. Existing records alone do not prove every scheduled report ran or was delivered.
+  - [ ] Answer product "how does this work" and "what does this screen do" questions from curated help sources: the README and in-app help text, not the internal roadmap or handoff notes, which describe unfinished work. Include the current page as context, cite the help section or screen behind each answer, and say when the documentation does not cover a question rather than guessing. Keep these answers read-only and explanatory.
+  - [ ] Keep help content current with the UI, using a review step when screens change. Test that answers cite only the curated sources and that unsupported questions get an "I don't know" response.
   - [ ] Start without persistent question history or personalized prediction. Review application and AI-service logs, retention and privacy boundaries before deployment; provide suggested questions without recording individual usage.
 
 ---

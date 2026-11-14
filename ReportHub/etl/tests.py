@@ -6,8 +6,10 @@ from types import SimpleNamespace
 from urllib.error import HTTPError
 from uuid import uuid4
 from unittest.mock import MagicMock, patch
+from pymongo.errors import ServerSelectionTimeoutError
 
 from bson import ObjectId
+from bson.decimal128 import Decimal128
 from django.db import close_old_connections, connection, transaction
 from django.db.models.deletion import ProtectedError
 from django.test import (
@@ -61,14 +63,17 @@ from etl.cdc import (
     _coerce_cdc_row,
     _connector_configs_match,
     _create_cdc_table,
+    _decode_mongo_cdc_event,
     _event_version,
     _required_field_names,
     _record_from_message,
     _topic_name,
     build_debezium_connector_config,
+    check_mongodb_replica_set,
     consume_cdc_table_rebuild_batch,
     consume_source_cdc_batch,
     ensure_debezium_connector,
+    mongodb_connection_string,
 )
 from etl.cdc_to_batch import (
     CdcToBatchCutoverAction,
@@ -146,6 +151,29 @@ class SourceProfileFormTests(SimpleTestCase):
             self.assertFalse(form.is_valid())
         self.assertIn("oracle_pdb_name", form.errors)
         self.assertIn("oracle_logminer_password", form.errors)
+
+    def test_mongodb_connection_string_requires_mongodb_scheme(self):
+        def build_form(connection_string):
+            return SourceProfileForm(data={
+                "name": "Mongo CDC",
+                "db_type": DbChoice.MONGODB,
+                "host": "mongo.example",
+                "port": "27017",
+                "database_name": "app",
+                "username": "app_user",
+                "password": "app_password",
+                "ingestion_mode": IngestionMode.BATCH,
+                "mongodb_connection_string": connection_string,
+            })
+
+        with patch.object(SourceProfile, "validate_unique"):
+            rejected = build_form("https://mongo.example/?replicaSet=rs0")
+            accepted = build_form("mongodb+srv://app_user:app_password@cluster.example/?replicaSet=rs0")
+            rejected.is_valid()
+            accepted.is_valid()
+
+        self.assertIn("mongodb_connection_string", rejected.errors)
+        self.assertNotIn("mongodb_connection_string", accepted.errors)
 
 
 class SourceEngineTests(SimpleTestCase):
@@ -797,6 +825,94 @@ class DebeziumConnectorConfigTests(SimpleTestCase):
 
         self.assertIn("user%40domain:pass%2Fword@", config["mongodb.connection.string"])
         self.assertEqual(config["collection.include.list"], "analytics\\.orders")
+
+    def test_mongodb_stored_connection_string_is_used_for_cdc(self):
+        profile = self.profile(DbChoice.MONGODB)
+        profile.mongodb_connection_string = (
+            "mongodb://user:pass@db1:27017,db2:27017/?replicaSet=rs0&authSource=admin"
+        )
+
+        config = build_debezium_connector_config(profile, [self.table])
+
+        self.assertEqual(
+            config["mongodb.connection.string"],
+            profile.mongodb_connection_string,
+        )
+        self.assertEqual(
+            mongodb_connection_string(profile), profile.mongodb_connection_string
+        )
+
+    def test_mongodb_replica_set_check_reports_each_outcome(self):
+        cases = [
+            ("mongodb://h1:27017/?replicaSet=rs0", {"setName": "rs0"}, None, "ok"),
+            ("mongodb://h1:27017/", {"setName": "rs0"}, None, "missing_replica_set_name"),
+            ("mongodb://h1:27017/?replicaSet=rs1", {"setName": "rs0"}, None, "replica_set_name_mismatch"),
+            ("mongodb://h1:27017/?replicaSet=rs0", {"ok": 1}, None, "not_replica_set"),
+            ("mongodb://h1:27017/?replicaSet=rs0", None, ServerSelectionTimeoutError("timed out"), "unreachable"),
+            ("mongodb://[bad", None, None, "invalid_connection_string"),
+        ]
+        for uri, hello, error, expected_status in cases:
+            with self.subTest(status=expected_status):
+                profile = self.profile(DbChoice.MONGODB)
+                profile.mongodb_connection_string = (
+                    uri.replace("mongodb://", "mongodb://user:secret@", 1)
+                    if "[" not in uri else uri
+                )
+                with patch("etl.cdc.MongoClient") as client_cls:
+                    command = client_cls.return_value.admin.command
+                    if error:
+                        command.side_effect = error
+                    else:
+                        command.return_value = hello
+                    result = check_mongodb_replica_set(profile)
+
+                self.assertEqual(result.status, expected_status)
+                if expected_status != "invalid_connection_string":
+                    self.assertIsNone(client_cls.call_args.kwargs.get("replicaSet"))
+                self.assertNotIn("secret", result.message)
+                self.assertEqual(result.ok, expected_status == "ok")
+                self.assertTrue(result.message)
+
+    def test_mongodb_event_decoding_preserves_typed_ids_and_values(self):
+        object_id = ObjectId()
+        oid_json = json.dumps({"$oid": str(object_id)})
+        snapshot = SimpleNamespace(
+            key={"id": oid_json},
+            value={
+                "op": "r",
+                "after": json.dumps({
+                    "_id": {"$oid": str(object_id)},
+                    "nested": {"value": 2},
+                    "amount": {"$numberDecimal": "12.34"},
+                }),
+            },
+        )
+        operation, typed_id, document = _decode_mongo_cdc_event(snapshot)
+        self.assertEqual(operation, "r")
+        self.assertEqual(document["_id"], object_id)
+        self.assertEqual(document["nested"], {"value": 2})
+        self.assertEqual(document["amount"], Decimal128("12.34"))
+
+        string_delete = SimpleNamespace(
+            key={"id": json.dumps(str(object_id))},
+            value={"op": "d", "before": None, "after": None},
+        )
+        _, string_id, deleted_document = _decode_mongo_cdc_event(string_delete)
+        self.assertNotEqual(typed_id, string_id)
+        self.assertIsNone(deleted_document)
+        self.assertIsNone(_decode_mongo_cdc_event(SimpleNamespace(value=None)))
+
+    def test_mongodb_event_decoding_rejects_malformed_or_mismatched_keys(self):
+        for key, value in (
+            (None, {"op": "d"}),
+            ({"id": "{bad"}, {"op": "d"}),
+            ({"id": '"first"'}, {"op": "u", "after": '{"_id":"second"}'}),
+            ({"id": '"first"'}, {"op": "u", "after": None}),
+            ({"id": '"first"'}, {"op": "t"}),
+        ):
+            with self.subTest(key=key, value=value):
+                with self.assertRaisesRegex(RuntimeError, "offset was not committed"):
+                    _decode_mongo_cdc_event(SimpleNamespace(key=key, value=value))
 
     def test_delete_events_use_the_before_image_and_primary_key(self):
         message = SimpleNamespace(

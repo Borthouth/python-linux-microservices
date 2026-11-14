@@ -1,4 +1,5 @@
 import logging
+import time
 import uuid
 from urllib.parse import quote
 
@@ -48,7 +49,7 @@ class CdcCleanupIneligible(RuntimeError):
     pass
 
 
-def cleanup_candidates(limit=50):
+def cleanup_candidates(limit=50, source_id=None):
     candidates = []
     rebuilds = CdcTableRebuild.objects.select_related(
         "source_table__source"
@@ -58,6 +59,8 @@ def cleanup_candidates(limit=50):
             CdcTableRebuild.Status.SUCCEEDED,
         ]
     ).order_by("-updated_at", "-pk")
+    if source_id is not None:
+        rebuilds = rebuilds.filter(source_table__source_id=source_id)
     for rebuild in rebuilds.iterator():
         try:
             rebuild = _ensure_rebuild_eligible(rebuild)
@@ -191,6 +194,32 @@ def _ensure_rebuild_eligible(rebuild, cleanup_id=None):
         )
     if CdcResourceCleanup.objects.filter(
         rebuild__source_table__source_id=source_id,
+        external_operation_uncertain=True,
+        uncertainty_override_at__isnull=True,
+    ).exclude(pk=cleanup_id).exists():
+        raise CdcCleanupIneligible(
+            "A previous cleanup may still have an external operation in flight. "
+            "Further cleanup is blocked unless an administrator explicitly accepts the risk."
+        )
+    if cleanup_id is not None:
+        current_cleanup = CdcResourceCleanup.objects.get(pk=cleanup_id)
+        overrides = CdcResourceCleanup.objects.filter(
+            rebuild__source_table__source_id=source_id,
+            uncertainty_override_at__isnull=False,
+        )
+        if (
+            current_cleanup.created_at is None and overrides.exists()
+        ) or (
+            current_cleanup.created_at is not None
+            and overrides.filter(
+                uncertainty_override_at__gte=current_cleanup.created_at,
+            ).exists()
+        ):
+            raise CdcCleanupIneligible(
+                "This inventory predates a risk override. Start a fresh inventory."
+            )
+    if CdcResourceCleanup.objects.filter(
+        rebuild__source_table__source_id=source_id,
         status__in=[
             CdcResourceCleanup.Status.SCANNING,
             CdcResourceCleanup.Status.AWAITING_CONFIRMATION,
@@ -305,6 +334,7 @@ def _safe_error(error, profile):
     for secret in (
         getattr(profile, "password", ""),
         getattr(profile, "oracle_logminer_password", ""),
+        getattr(settings, "CLICKHOUSE_PASSWORD", ""),
     ):
         if secret:
             message = message.replace(secret, "[redacted]")
@@ -427,7 +457,6 @@ def _kafka_topic_state(topic_name, excluded_connector=None):
         group_id=None,
         enable_auto_commit=False,
         request_timeout_ms=15000,
-        api_version_auto_timeout_ms=10000,
         client_id="reporthub-cdc-cleanup-inventory",
     )
     try:
@@ -450,10 +479,9 @@ def _kafka_group_state(group_name):
         request_timeout_ms=15000,
     )
     try:
-        return any(
-            item[0] == group_name
-            for item in admin.list_consumer_groups()
-        )
+        if hasattr(admin, "list_groups"):
+            return any(item["group_id"] == group_name for item in admin.list_groups())
+        return any(item[0] == group_name for item in admin.list_consumer_groups())
     finally:
         admin.close()
 
@@ -626,6 +654,7 @@ def _delete_postgres_resource(rebuild, resource_type, resource_name):
 
 def _delete_kafka_group(group_name):
     from kafka.admin import KafkaAdminClient
+    from kafka.errors import NoError
 
     admin = KafkaAdminClient(
         bootstrap_servers=_kafka_bootstrap_servers(),
@@ -635,8 +664,14 @@ def _delete_kafka_group(group_name):
     try:
         if not _kafka_group_state(group_name):
             return "Already absent"
-        result = admin.delete_consumer_groups([group_name])[group_name]
-        result.get(timeout=30)
+        if hasattr(admin, "delete_groups"):
+            result = admin.delete_groups([group_name])
+            if result != {group_name: "OK"}:
+                raise RuntimeError(f"Kafka did not confirm consumer group deletion: {result}")
+        else:
+            result = admin.delete_consumer_groups([group_name])
+            if result != [(group_name, NoError)]:
+                raise RuntimeError(f"Kafka did not confirm consumer group deletion: {result}")
         if _kafka_group_state(group_name):
             raise RuntimeError("Kafka still reports the consumer group as present.")
         return "Deleted"
@@ -645,38 +680,35 @@ def _delete_kafka_group(group_name):
 
 
 def _delete_kafka_topic(rebuild, topic_name):
-    from kafka import KafkaConsumer
     from kafka.admin import KafkaAdminClient
+    from kafka.errors import NoError, for_code
 
     _assert_connector_removed(rebuild)
     if not _kafka_topic_state(topic_name, excluded_connector=rebuild.connector_name):
         return "Already absent"
-    consumer = KafkaConsumer(
-        bootstrap_servers=_kafka_bootstrap_servers(),
-        group_id=None,
-        enable_auto_commit=False,
-        request_timeout_ms=15000,
-        api_version_auto_timeout_ms=10000,
-        client_id="reporthub-cdc-cleanup-delete",
-    )
-    try:
-        if topic_name not in consumer.topics():
-            return "Already absent"
-    finally:
-        consumer.close()
-
     admin = KafkaAdminClient(
         bootstrap_servers=_kafka_bootstrap_servers(),
         client_id=f"reporthub-cdc-cleanup-{uuid.uuid4().hex[:12]}",
         request_timeout_ms=30000,
     )
     try:
-        future = admin.delete_topics([topic_name], timeout_ms=30000)[topic_name]
-        future.get(timeout=30)
+        result = admin.delete_topics([topic_name], timeout_ms=30000)
+        if isinstance(result, dict):
+            entries = [(item["name"], item["error_code"]) for item in result["topics"]]
+        else:
+            entries = result.topic_error_codes
+        if len(entries) != 1 or entries[0][0] != topic_name:
+            raise RuntimeError("Kafka returned an unexpected topic deletion response.")
+        error = for_code(entries[0][1])
+        if error is not NoError:
+            raise error(f"Kafka did not confirm deletion of topic {topic_name}.")
     finally:
         admin.close()
-    if _kafka_topic_state(topic_name, excluded_connector=rebuild.connector_name):
-        raise RuntimeError("Kafka still reports the topic as present.")
+    deadline = time.monotonic() + 10
+    while _kafka_topic_state(topic_name, excluded_connector=rebuild.connector_name):
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Kafka still reports the topic as present.")
+        time.sleep(0.5)
     return "Deleted"
 
 
@@ -749,6 +781,10 @@ def execute_cleanup(cleanup_id):
         ).get(pk=cleanup_id)
         if cleanup.status != CdcResourceCleanup.Status.QUEUED:
             return
+        if cleanup.external_operation_uncertain:
+            raise CdcCleanupIneligible(
+                "This cleanup has an unresolved external operation."
+            )
         _ensure_rebuild_eligible(cleanup.rebuild, cleanup_id=cleanup.pk)
         if cleanup.items.filter(scan_error__gt="").exists():
             raise CdcCleanupIneligible(
@@ -782,14 +818,24 @@ def execute_cleanup(cleanup_id):
                     "status", "outcome", "updated_by", "updated_at",
                 ])
             continue
-        item.status = CdcResourceCleanupItem.Status.RUNNING
-        item.attempts += 1
-        item.last_error = ""
-        item.updated_by = cleanup.created_by
-        item._history_user = cleanup.created_by
-        item.save(update_fields=[
-            "status", "attempts", "last_error", "updated_by", "updated_at",
-        ])
+        with transaction.atomic():
+            cleanup = CdcResourceCleanup.objects.select_for_update().get(pk=cleanup_id)
+            if cleanup.status != CdcResourceCleanup.Status.RUNNING:
+                return
+            cleanup.external_operation_uncertain = True
+            cleanup.updated_by = cleanup.created_by
+            cleanup._history_user = cleanup.created_by
+            cleanup.save(update_fields=[
+                "external_operation_uncertain", "updated_by", "updated_at",
+            ])
+            item.status = CdcResourceCleanupItem.Status.RUNNING
+            item.attempts += 1
+            item.last_error = ""
+            item.updated_by = cleanup.created_by
+            item._history_user = cleanup.created_by
+            item.save(update_fields=[
+                "status", "attempts", "last_error", "updated_by", "updated_at",
+            ])
         try:
             outcome = _cleanup_resource(cleanup, item)
         except Exception as error:
@@ -803,36 +849,48 @@ def execute_cleanup(cleanup_id):
                 item.resource_name,
                 safe_message,
             )
-            item.status = CdcResourceCleanupItem.Status.FAILED
-            item.last_error = safe_message
+            with transaction.atomic():
+                cleanup = CdcResourceCleanup.objects.select_for_update().get(pk=cleanup_id)
+                if cleanup.status != CdcResourceCleanup.Status.RUNNING:
+                    return
+                item.status = CdcResourceCleanupItem.Status.FAILED
+                item.last_error = safe_message
+                item.updated_by = cleanup.created_by
+                item._history_user = cleanup.created_by
+                item.save(update_fields=[
+                    "status", "last_error", "updated_by", "updated_at",
+                ])
+                cleanup.status = CdcResourceCleanup.Status.FAILED
+                cleanup.last_error = (
+                    f"Cleanup stopped at {item.resource_type} {item.resource_name}. "
+                    f"{safe_message} The operation may be uncertain; further cleanup is blocked "
+                    "unless an administrator explicitly accepts the risk."
+                )
+                cleanup.completed_at = timezone.now()
+                cleanup.updated_by = cleanup.created_by
+                cleanup._history_user = cleanup.created_by
+                cleanup.save(update_fields=[
+                    "status", "last_error", "completed_at", "updated_by", "updated_at",
+                ])
+            return
+        with transaction.atomic():
+            cleanup = CdcResourceCleanup.objects.select_for_update().get(pk=cleanup_id)
+            if cleanup.status != CdcResourceCleanup.Status.RUNNING:
+                return
+            item.status = CdcResourceCleanupItem.Status.COMPLETED
+            item.outcome = outcome
+            item.last_error = ""
             item.updated_by = cleanup.created_by
             item._history_user = cleanup.created_by
             item.save(update_fields=[
-                "status", "last_error", "updated_by", "updated_at",
+                "status", "outcome", "last_error", "updated_by", "updated_at",
             ])
-            cleanup.status = CdcResourceCleanup.Status.FAILED
-            cleanup.last_error = (
-                f"Cleanup stopped at {item.resource_type} "
-                f"{item.resource_name}. {safe_message}"
-            )
-            cleanup.completed_at = timezone.now()
+            cleanup.external_operation_uncertain = False
             cleanup.updated_by = cleanup.created_by
             cleanup._history_user = cleanup.created_by
             cleanup.save(update_fields=[
-                "status", "last_error", "completed_at", "updated_by", "updated_at",
+                "external_operation_uncertain", "updated_by", "updated_at",
             ])
-            return
-        current_cleanup = CdcResourceCleanup.objects.get(pk=cleanup.pk)
-        item.status = CdcResourceCleanupItem.Status.COMPLETED
-        item.outcome = outcome
-        item.last_error = ""
-        item.updated_by = cleanup.created_by
-        item._history_user = cleanup.created_by
-        item.save(update_fields=[
-            "status", "outcome", "last_error", "updated_by", "updated_at",
-        ])
-        if current_cleanup.status != CdcResourceCleanup.Status.RUNNING:
-            return
 
     with transaction.atomic():
         cleanup = CdcResourceCleanup.objects.select_for_update().get(pk=cleanup.pk)

@@ -1,0 +1,79 @@
+services:
+  mongo:
+    image: mongo:latest
+    entrypoint: ["/bin/sh", "/opt/reporthub/mongo-entrypoint.sh"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo_test
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_CDC_TEST_PASSWORD:?Required isolated test password}
+    tmpfs:
+      - /data/db
+      - /data/configdb
+    volumes:
+      - ./mongo-entrypoint.sh:/opt/reporthub/mongo-entrypoint.sh:ro
+
+  kafka:
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+    tmpfs:
+      - /var/lib/kafka/data:uid=1000,gid=1000
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 3s
+      timeout: 10s
+      retries: 60
+
+  connect:
+    image: quay.io/debezium/connect:3.5.2.Final
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: mongo-cdc-test-connect
+      CONFIG_STORAGE_TOPIC: mongo-cdc-test-configs
+      OFFSET_STORAGE_TOPIC: mongo-cdc-test-offsets
+      STATUS_STORAGE_TOPIC: mongo-cdc-test-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      JAVA_OPTS: "-Xms256m -Xmx512m"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  probe:
+    image: reporthub-app
+    entrypoint: ["python", "tests/integration/mongo_cdc_probe.py"]
+    working_dir: /app
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: /app
+      DJANGO_SETTINGS_MODULE: config.settings
+      SECRET_KEY: isolated-mongo-cdc-tests-only
+      FIELD_ENCRYPTION_KEY: ${MONGO_CDC_TEST_FIELD_KEY:?Required isolated test encryption key}
+      MONGO_CDC_TEST_PASSWORD: ${MONGO_CDC_TEST_PASSWORD:?Required isolated test password}
+    volumes:
+      - ..:/app:ro
+      - /dev/null:/app/.env:ro
+    tmpfs:
+      - /app/logs
+    depends_on:
+      mongo:
+        condition: service_started
+      connect:
+        condition: service_started
+
+networks:
+  default:
+    internal: true

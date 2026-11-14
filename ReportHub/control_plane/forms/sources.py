@@ -38,6 +38,13 @@ class SourceProfileForm(forms.ModelForm):
             'Oracle CDC only. Optional LogMiner password; when blank, the source '
             'password is used. Leave blank when editing to keep the saved value.'
         )
+        self.fields['mongodb_connection_string'].help_text = (
+            'MongoDB CDC only. Full connection string as used by your application, '
+            'including replicaSet for replica sets, for example '
+            'mongodb://user:password@host1:27017,host2:27017/?replicaSet=rs0&authSource=admin. '
+            'Leave blank when editing to keep the saved value. Batch refresh continues '
+            'to use the host and port fields.'
+        )
         if not self.is_bound and not self.instance.pk:
             db_type = self.initial.get('db_type', self.instance.db_type)
             self.initial['port'] = self.DEFAULT_PORTS.get(db_type, 3306)
@@ -62,6 +69,15 @@ class SourceProfileForm(forms.ModelForm):
                 self.add_error("oracle_logminer_username", message)
                 self.add_error("oracle_logminer_password", message)
 
+        mongo_connection_string = cleaned_data.get("mongodb_connection_string")
+        if mongo_connection_string and not mongo_connection_string.startswith(
+            ("mongodb://", "mongodb+srv://")
+        ):
+            self.add_error(
+                "mongodb_connection_string",
+                "The MongoDB connection string must start with mongodb:// or mongodb+srv://.",
+            )
+
         mode = cleaned_data.get("ingestion_mode")
         if mode == IngestionMode.CDC and cleaned_data.get("db_type") == DbChoice.MONGODB:
             self.add_error(
@@ -82,7 +98,8 @@ class SourceProfileForm(forms.ModelForm):
             'name', 'db_type', 'host', 'port', 'database_name',
             'oracle_cdb_name', 'oracle_pdb_name',
             'oracle_logminer_username', 'oracle_logminer_password',
-            'username', 'password', 'ingestion_mode', 'is_active',
+            'username', 'password', 'mongodb_connection_string',
+            'ingestion_mode', 'is_active',
         ]
         widgets = {
             'name': forms.TextInput(attrs={'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm'}),
@@ -96,9 +113,16 @@ class SourceProfileForm(forms.ModelForm):
             'oracle_logminer_password': forms.PasswordInput(attrs={'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm', 'data-oracle-config': 'true'}, render_value=False),
             'username': forms.TextInput(attrs={'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm'}),
             'password': forms.PasswordInput(attrs={'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm'}, render_value=True),
+            'mongodb_connection_string': forms.PasswordInput(attrs={'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm', 'data-mongodb-config': 'true'}, render_value=False),
             'ingestion_mode': forms.Select(attrs={'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm'}),
             'is_active': forms.CheckboxInput(attrs={'class': 'w-4 h-4 text-indigo-600 bg-slate-900 border-slate-700 rounded focus:ring-indigo-500'}),
         }
+
+    def clean_mongodb_connection_string(self):
+        connection_string = (self.cleaned_data.get("mongodb_connection_string") or "").strip()
+        if not connection_string and self.instance.pk:
+            return self.instance.mongodb_connection_string
+        return connection_string
 
     def clean_oracle_logminer_password(self):
         password = self.cleaned_data.get("oracle_logminer_password")

@@ -13,7 +13,9 @@ from django.views.decorators.http import require_GET, require_POST
 from control_plane.cdc_transition_status import cdc_to_batch_status_context
 from control_plane.metadata_guard import (
     SourceMetadataCutoverPending,
+    SourceMetadataCleanupPending,
     acquire_source_metadata_lock,
+    guard_source_cleanup_deletion,
     source_metadata_write_guard,
 )
 from control_plane.models import CdcToBatchTableCheckpoint, CdcToBatchTransition, SourceProfile
@@ -61,8 +63,9 @@ def source_delete_with_metadata_guard(request, pk):
         return sources.source_delete_view(request, pk)
     try:
         with source_metadata_write_guard(pk):
+            guard_source_cleanup_deletion(pk)
             return sources.source_delete_view(request, pk)
-    except SourceMetadataCutoverPending as exc:
+    except (SourceMetadataCutoverPending, SourceMetadataCleanupPending) as exc:
         messages.error(request, str(exc))
         return redirect("control_plane:source_edit", pk=pk)
 

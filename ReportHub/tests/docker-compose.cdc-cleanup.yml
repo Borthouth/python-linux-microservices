@@ -1,0 +1,128 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment:
+      POSTGRES_DB: cleanup_test
+      POSTGRES_USER: cleanup_test
+      POSTGRES_PASSWORD: ${CLEANUP_TEST_PASSWORD:?Required isolated test password}
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "cleanup_test", "-d", "cleanup_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  redis:
+    image: redis:7-alpine
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_USER: cleanup_test
+      CLICKHOUSE_PASSWORD: ${CLEANUP_TEST_CLICKHOUSE_PASSWORD:?Required isolated ClickHouse password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    command:
+      - --
+      - --max_server_memory_usage=536870912
+      - --background_schedule_pool_size=16
+    tmpfs:
+      - /var/lib/clickhouse
+      - /var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://clickhouse:8123/ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  kafka:
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+    tmpfs:
+      - /var/lib/kafka/data:uid=1000,gid=1000
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 3s
+      timeout: 10s
+      retries: 60
+
+  connect:
+    image: quay.io/debezium/connect:3.5.2.Final
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: cleanup-test-connect
+      CONFIG_STORAGE_TOPIC: cleanup-test-connect-configs
+      OFFSET_STORAGE_TOPIC: cleanup-test-connect-offsets
+      STATUS_STORAGE_TOPIC: cleanup-test-connect-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+      JAVA_OPTS: "-Xms256m -Xmx512m"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  probe:
+    image: reporthub-app
+    entrypoint: ["python", "tests/integration/cdc_cleanup_inventory_probe.py"]
+    working_dir: /app
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: /app
+      DJANGO_SETTINGS_MODULE: config.settings
+      SECRET_KEY: isolated-cleanup-inventory-tests-only
+      FIELD_ENCRYPTION_KEY: ${CLEANUP_TEST_FIELD_KEY:?Required isolated test encryption key}
+      POSTGRES_DB: cleanup_test
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: cleanup_test
+      POSTGRES_PASSWORD: ${CLEANUP_TEST_PASSWORD:?Required isolated test password}
+      REDIS_URL: redis://redis:6379/0
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: cleanup_test
+      CLICKHOUSE_PASSWORD: ${CLEANUP_TEST_CLICKHOUSE_PASSWORD:?Required isolated ClickHouse password}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_CONNECT_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_CONNECT_URL: http://connect:8083
+      CLEANUP_TEST_DELETE: ${CLEANUP_TEST_DELETE:-inventory}
+    volumes:
+      - ..:/app:ro
+      - /dev/null:/app/.env:ro
+    tmpfs:
+      - /app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      connect:
+        condition: service_started
+
+networks:
+  default:
+    internal: true

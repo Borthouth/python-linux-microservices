@@ -4,7 +4,12 @@ from django.contrib import messages
 from django.db import transaction
 from django.shortcuts import redirect
 
-from control_plane.metadata_guard import SourceMetadataCutoverPending, source_metadata_write_guard
+from control_plane.metadata_guard import (
+    SourceMetadataCleanupPending,
+    SourceMetadataCutoverPending,
+    guard_source_cleanup_deletion,
+    source_metadata_write_guard,
+)
 from control_plane.models import SourceProfile
 
 
@@ -14,7 +19,10 @@ class SourceMetadataAdminMixin:
             return {obj.pk for obj in objects}
         return {obj.source_id for obj in objects}
 
-    def _guarded_admin_action(self, request, objects, action, *, include_posted_source=False):
+    def _guarded_admin_action(
+        self, request, objects, action, *, include_posted_source=False,
+        check_cleanup_deletion=False,
+    ):
         source_ids = self._source_ids(objects)
         if include_posted_source:
             value = request.POST.get("source", "")
@@ -29,6 +37,8 @@ class SourceMetadataAdminMixin:
                 stack.enter_context(transaction.atomic())
                 for source_id in sorted(source_ids):
                     stack.enter_context(source_metadata_write_guard(source_id))
+                    if check_cleanup_deletion:
+                        guard_source_cleanup_deletion(source_id)
                 locked = list(
                     self.get_queryset(request).select_for_update().filter(
                         pk__in=[obj.pk for obj in objects]
@@ -38,7 +48,7 @@ class SourceMetadataAdminMixin:
                     messages.error(request, "The source changed; reload and try again.")
                     return redirect(request.path)
                 return action()
-        except SourceMetadataCutoverPending as exc:
+        except (SourceMetadataCutoverPending, SourceMetadataCleanupPending) as exc:
             messages.error(request, str(exc))
             return redirect(request.path)
 
@@ -65,7 +75,9 @@ class SourceMetadataAdminMixin:
         obj = self.get_object(request, object_id)
         if obj is None:
             return action()
-        return self._guarded_admin_action(request, [obj], action)
+        return self._guarded_admin_action(
+            request, [obj], action, check_cleanup_deletion=True,
+        )
 
     def changelist_view(self, request, extra_context=None):
         action = lambda: super(SourceMetadataAdminMixin, self).changelist_view(
@@ -80,4 +92,7 @@ class SourceMetadataAdminMixin:
         if not selected or any(not item.isdecimal() for item in selected):
             return action()
         objects = list(self.get_queryset(request).filter(pk__in=selected))
-        return self._guarded_admin_action(request, objects, action)
+        return self._guarded_admin_action(
+            request, objects, action,
+            check_cleanup_deletion=request.POST.get("action") == "delete_selected",
+        )

@@ -1,23 +1,30 @@
 <header class="bg-slate-900 border-b border-slate-800 sticky top-0 z-50">
-    <div class="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-        <div class="flex items-center space-x-3">
+    <div class="max-w-7xl mx-auto px-6 flex flex-wrap xl:flex-nowrap items-center justify-between gap-x-6 xl:gap-x-0">
+        <div class="h-16 flex shrink-0 items-center space-x-3">
             <a href="{% url 'control_plane:dashboard' %}" class="p-2 bg-indigo-500/10 border border-indigo-500/20 rounded-lg text-indigo-400 font-bold hover:bg-indigo-500/20 transition-all">📊</a>
             <span class="font-bold text-lg tracking-tight text-white">ReportHub <span class="text-xs px-2 py-0.5 bg-indigo-500/20 text-indigo-400 rounded-full font-medium ms-1">Control Plane</span></span>
         </div>
         
-        <div class="flex items-center space-x-5">
-            <!-- Upgraded nav container from text-xs to text-sm -->
-            <nav class="hidden md:flex space-x-4 text-sm font-medium items-center h-full">
+            <nav class="hidden md:flex order-3 xl:order-2 w-full xl:w-auto xl:ml-auto h-12 xl:h-16 space-x-2.5 lg:space-x-3 text-xs font-medium items-center whitespace-nowrap">
                 <!-- Dashboard -->
                 <a href="{% url 'control_plane:dashboard' %}" 
                    class="h-full flex items-center border-b-2 transition-all {% if request.resolver_match.url_name == 'dashboard' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
                     Dashboard
                 </a>
-                {% if not request.user.is_staff and not request.user.is_superuser and request.user.source_access.exists %}
-                    <a href="{% url 'control_plane:cdc_rebuild_list' %}"
-                       class="h-full flex items-center border-b-2 transition-all {% if request.resolver_match.url_name in 'cdc_rebuild_list,cdc_rebuild_resume' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
-                        CDC Rebuilds
-                    </a>
+                {% if request.user.is_staff or request.user.is_superuser or request.user.source_access.exists %}
+                    <div class="relative h-full flex items-center" x-data="{ open: false }">
+                        <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'cdc_failure_history,cdc_rebuild_list,cdc_rebuild_source_tables,cdc_rebuild_table_history,cdc_rebuild_start,cdc_rebuild_resume,cdc_cleanup_list,cdc_cleanup_source,cdc_cleanup_attempt,cdc_cleanup_scan,cdc_cleanup_confirm,cdc_cleanup_recover,cdc_cleanup_override' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                            <span>CDC</span>
+                            <svg class="h-4 w-4 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+                        </button>
+                        <div x-show="open" x-transition class="absolute left-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 z-50 py-1" style="display: none;">
+                            <a href="{% url 'control_plane:cdc_rebuild_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">CDC Table Rebuilds</a>
+                            {% if request.user.is_staff or request.user.is_superuser %}
+                            <a href="{% url 'control_plane:cdc_failure_history' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">CDC Execution Failures</a>
+                            <a href="{% url 'control_plane:cdc_cleanup_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">CDC Resource Cleanup</a>
+                            {% endif %}
+                        </div>
+                    </div>
                 {% endif %}
                 
                 <!-- Restricted to System Admin / Superuser only -->
@@ -28,7 +35,7 @@
                     </a>                
                     
                     <div class="relative h-full flex items-center" x-data="{ open: false }">
-                        <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'source_list,source_add,source_create,source_edit,source_delete,source_sync,source_status,source_toggle_active,source_cdc_to_batch_status,source_cdc_to_batch_staging,warehouse_list,warehouse_field_selection,pipeline_automation_list,pipeline_automation_create,pipeline_automation_edit,pipeline_automation_toggle,pipeline_automation_run,pipeline_automation_delete,cdc_rebuild_start' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                        <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'source_list,source_add,source_create,source_edit,source_delete,source_sync,source_status,source_toggle_active,source_cdc_to_batch_status,source_cdc_to_batch_staging,warehouse_list,warehouse_field_selection,pipeline_automation_list,pipeline_automation_create,pipeline_automation_edit,pipeline_automation_toggle,pipeline_automation_run,pipeline_automation_delete' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
                             <span>Data &amp; Pipelines</span>
                             <svg class="h-4 w-4 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
                         </button>
@@ -52,15 +59,12 @@
                     </div>
 
                     <div class="relative h-full flex items-center" x-data="{ open: false }">
-                        <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'pipeline_history,cdc_failure_history,cdc_rebuild_list,cdc_rebuild_resume,cdc_cleanup_list,cdc_cleanup_scan,cdc_cleanup_confirm,cdc_cleanup_recover,report_history' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                        <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'pipeline_history,report_history' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
                             <span>History</span>
                             <svg class="h-4 w-4 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
                         </button>
                         <div x-show="open" x-transition class="absolute left-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 z-50 py-1" style="display: none;">
                             <a href="{% url 'control_plane:pipeline_history' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Pipeline History</a>
-                            <a href="{% url 'control_plane:cdc_failure_history' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">CDC Execution Failures</a>
-                            <a href="{% url 'control_plane:cdc_rebuild_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">CDC Table Rebuilds</a>
-                            <a href="{% url 'control_plane:cdc_cleanup_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">CDC Resource Cleanup</a>
                             <a href="{% url 'control_plane:report_history' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">All Report Runs</a>
                         </div>
                     </div>
@@ -70,7 +74,7 @@
                             <span>Governance</span>
                             <svg class="h-4 w-4 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
                         </button>
-                        <div x-show="open" x-transition class="absolute left-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 z-50 py-1" style="display: none;">
+                        <div x-show="open" x-transition class="absolute right-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 z-50 py-1" style="display: none;">
                             <a href="{% url 'control_plane:user_management' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Users &amp; Access</a>
                             <a href="{% url 'control_plane:audit_log' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Audit Logs</a>
                             <a href="{% url 'control_plane:email_audit_logs' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Email Audit Logs</a>
@@ -86,17 +90,17 @@
                             <span>Integrations</span>
                             <svg class="h-4 w-4 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
                         </button>
-                        <div x-show="open" x-transition class="absolute left-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 z-50 py-1" style="display: none;">
+                        <div x-show="open" x-transition class="absolute right-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 z-50 py-1" style="display: none;">
                             <a href="{% url 'control_plane:transfer_destination_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Transfer Destinations</a>
                         </div>
                     </div>
                     {% endif %}
                 {% endif %}
             </nav>
-            <div class="flex items-center space-x-4 border-l border-slate-800 pl-5">
+            <div class="order-2 xl:order-3 xl:ml-3 flex shrink-0 items-center space-x-3 border-l border-slate-800 pl-4">
                 <div class="text-right hidden sm:block">
                     <a href="{% url 'control_plane:user_profile' %}" class="group inline-flex items-center space-x-1.5 text-xs font-semibold text-white hover:text-indigo-400 transition-colors" title="Edit Profile">
-                        <span>{{ request.user.username }}</span>
+                        <span class="max-w-32 truncate">{{ request.user.username }}</span>
                         <svg class="w-3.5 h-3.5 text-slate-500 group-hover:text-indigo-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path>
                         </svg>
@@ -116,6 +120,5 @@
                     </button>
                 </form>
             </div>
-        </div>
     </div>
 </header>

@@ -2,6 +2,7 @@ import json
 import hashlib
 import re
 import time
+from dataclasses import dataclass
 from datetime import (
     date,
     datetime,
@@ -13,7 +14,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from bson import json_util
+from bson.errors import InvalidId
 from django.conf import settings
+from pymongo import MongoClient
+from pymongo.errors import PyMongoError
+from pymongo.uri_parser import parse_uri
 from django.utils import timezone
 from kafka import KafkaConsumer, TopicPartition
 
@@ -114,6 +120,88 @@ def _connector_table_list(profile, tables):
         re.escape(_qualified_table_name(profile, table))
         for table in tables
     )
+
+
+def mongodb_connection_string(profile):
+    """Return the MongoDB URI used for CDC, preferring the customer-entered string.
+
+    Without a stored string the URI is built from host and port, which cannot
+    name a replica set. Callers must never log the returned value.
+    """
+    configured = (getattr(profile, "mongodb_connection_string", "") or "").strip()
+    if configured:
+        return configured
+    auth = ""
+    if profile.username:
+        auth = (
+            f"{quote(profile.username, safe='')}:"
+            f"{quote(profile.password or '', safe='')}@"
+        )
+    return (
+        f"mongodb://{auth}{profile.host}:{profile.port}/?"
+        f"{urlencode({'authSource': 'admin'})}"
+    )
+
+
+@dataclass(frozen=True)
+class MongoReplicaSetCheck:
+    status: str
+    message: str
+
+    @property
+    def ok(self):
+        return self.status == "ok"
+
+
+def check_mongodb_replica_set(profile, *, timeout_ms=5000):
+    """Read-only check that the connection string names the server's replica set.
+
+    Uses the `hello` command only. Messages never include the connection string.
+    """
+    uri = mongodb_connection_string(profile)
+    try:
+        expected = parse_uri(uri, validate=True)["options"].get("replicaSet")
+    except (PyMongoError, ValueError):
+        return MongoReplicaSetCheck(
+            "invalid_connection_string",
+            "The MongoDB connection string could not be parsed.",
+        )
+
+    # Ignore the stored replicaSet name here so a wrong name is reported as a
+    # mismatch instead of surfacing as an unreachable server.
+    client = MongoClient(uri, replicaSet=None, serverSelectionTimeoutMS=timeout_ms)
+    try:
+        hello = client.admin.command("hello")
+    except PyMongoError as exc:
+        return MongoReplicaSetCheck(
+            "unreachable",
+            f"The MongoDB server could not be reached ({type(exc).__name__}).",
+        )
+    finally:
+        client.close()
+
+    if hello.get("msg") == "isdbgrid":
+        return MongoReplicaSetCheck(
+            "ok", "The connection reaches a sharded cluster through a mongos router."
+        )
+    actual = hello.get("setName")
+    if actual is None:
+        return MongoReplicaSetCheck(
+            "not_replica_set",
+            "The server is not a replica set member. CDC requires a replica set.",
+        )
+    if not expected:
+        return MongoReplicaSetCheck(
+            "missing_replica_set_name",
+            f"Add replicaSet={actual} to the connection string.",
+        )
+    if expected != actual:
+        return MongoReplicaSetCheck(
+            "replica_set_name_mismatch",
+            f"The connection string names replica set {expected}, "
+            f"but the server reports {actual}.",
+        )
+    return MongoReplicaSetCheck("ok", f"Replica set {actual} confirmed.")
 
 
 def build_debezium_connector_config(
@@ -258,17 +346,10 @@ def build_debezium_connector_config(
         if pdb_name:
             config["database.pdb.name"] = pdb_name
     elif profile.db_type == DbChoice.MONGODB:
-        auth = ""
-        if username:
-            auth = f"{quote(username, safe='')}:{quote(password, safe='')}@"
-        connection_string = (
-            f"mongodb://{auth}{host}:{port}/?"
-            f"{urlencode({'authSource': 'admin'})}"
-        )
         config = {
             **common,
             "connector.class": "io.debezium.connector.mongodb.MongoDbConnector",
-            "mongodb.connection.string": connection_string,
+            "mongodb.connection.string": mongodb_connection_string(profile),
             "database.include.list": profile.database_name,
             "collection.include.list": table_list,
             "capture.mode": "change_streams_update_full",
@@ -876,6 +957,49 @@ def consume_cdc_table_rebuild_batch(
             return True
         finally:
             consumer.close()
+
+
+def _decode_mongo_cdc_event(message):
+    payload = message.value
+    if payload is None:
+        return None
+    if not isinstance(payload, dict) or payload.get("op") not in {"c", "u", "d", "r"}:
+        raise RuntimeError("Unsupported MongoDB CDC event; the Kafka offset was not committed.")
+    key = message.key
+    if not isinstance(key, dict) or not isinstance(key.get("id"), str):
+        raise RuntimeError("MongoDB CDC event has no encoded document key; the Kafka offset was not committed.")
+
+    def decode(value):
+        if not isinstance(value, str):
+            raise RuntimeError("MongoDB CDC event contains invalid Extended JSON; the Kafka offset was not committed.")
+        try:
+            return json_util.loads(value)
+        except (ValueError, TypeError, OverflowError, InvalidId) as error:
+            raise RuntimeError(
+                "MongoDB CDC event contains invalid Extended JSON; the Kafka offset was not committed."
+            ) from error
+
+    def canonical_id(value):
+        try:
+            return json_util.dumps(
+                value, json_options=json_util.CANONICAL_JSON_OPTIONS,
+                separators=(",", ":"), ensure_ascii=False,
+            )
+        except (ValueError, TypeError, OverflowError) as error:
+            raise RuntimeError(
+                "MongoDB CDC document key cannot be represented; the Kafka offset was not committed."
+            ) from error
+
+    document_id = canonical_id(decode(key["id"]))
+    operation = payload["op"]
+    if operation == "d":
+        return operation, document_id, None
+    document = decode(payload.get("after"))
+    if not isinstance(document, dict) or "_id" not in document:
+        raise RuntimeError("MongoDB CDC document has no _id; the Kafka offset was not committed.")
+    if canonical_id(document["_id"]) != document_id:
+        raise RuntimeError("MongoDB CDC document key does not match _id; the Kafka offset was not committed.")
+    return operation, document_id, document
 
 
 def _record_from_message(message, table, field_names, normalize_identifiers=False):

@@ -1,0 +1,105 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}CDC Cleanup Attempt - ReportHub{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-6 py-8">
+    <h1 class="text-2xl font-extrabold text-white">CDC Cleanup Attempt {{ cleanup.pk }}</h1>
+    <p class="text-slate-300 text-sm mt-2">
+        {{ cleanup.rebuild.source_table.source.name }} —
+        <span class="font-mono">{{ cleanup.rebuild.source_table.schema_name }}.{{ cleanup.rebuild.source_table.table_name }}</span>
+    </p>
+    <p class="text-xs text-slate-400 mt-1">
+        {{ cleanup.get_status_display }} · requested by {{ cleanup.created_by|default:"unknown user" }} ·
+        {{ cleanup.created_at|date:"M j, Y H:i:s" }}
+    </p>
+    <p class="text-xs text-slate-400 mt-1">Generation: <span class="font-mono break-all">{{ cleanup.rebuild.connector_name }}</span></p>
+    {% if cleanup.last_error %}
+    <p class="text-sm text-amber-300 mt-3">{{ cleanup.last_error }}</p>
+    {% endif %}
+    {% if cleanup.external_operation_uncertain and cleanup.uncertainty_override_at %}
+    <p class="text-sm text-amber-300 mt-3">Risk accepted {{ cleanup.uncertainty_override_at }} by {{ cleanup.updated_by|default:"unknown user" }}. The old request may still execute.</p>
+    <p class="text-xs text-slate-400 mt-1">Reason: {{ cleanup.uncertainty_override_reason }}</p>
+    {% elif cleanup.external_operation_uncertain %}
+    <div class="mt-4 border border-rose-500/30 rounded-lg p-4 text-sm">
+        <p class="text-rose-300">Further cleanup for this source is blocked: an external operation may still be in flight. An earlier request may still execute and delete a resource later, including after it has been recreated. This override does not stop or prove termination of that request.</p>
+        <p class="text-xs text-slate-400 mt-2">Investigate and isolate the old worker and request path before deciding. A fresh inventory is still required, but is not proof of safety.</p>
+        {% if cleanup.status == "FAILED" %}
+        <form method="post" action="{% url 'control_plane:cdc_cleanup_override' cleanup.pk %}" class="mt-3 space-y-3">
+            {% csrf_token %}
+            <input type="hidden" name="return_to" value="attempt">
+            <label class="block text-xs text-slate-300">Type the source name exactly:
+                <input type="text" name="source_name" required autocomplete="off" class="block mt-1 rounded bg-slate-950 border-slate-700 text-white">
+            </label>
+            <label class="block text-xs text-slate-300">Reason for accepting the risk (do not include secrets):
+                <textarea name="reason" required maxlength="1000" rows="2" class="block mt-1 w-full rounded bg-slate-950 border-slate-700 text-white"></textarea>
+            </label>
+            <label class="flex items-start gap-2 text-xs text-amber-200">
+                <input type="checkbox" name="accept_risk" value="yes" required class="rounded border-slate-600 bg-slate-800">
+                I accept that the earlier request may still execute and cause data loss.
+            </label>
+            <button type="submit" class="px-3 py-1.5 rounded-lg border border-rose-500/30 bg-rose-500/10 text-rose-300 text-xs font-medium">Accept risk and unblock this attempt</button>
+        </form>
+        {% else %}
+        <p class="text-xs text-amber-300 mt-2">A running attempt must first be marked interrupted.</p>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <section class="mt-8 bg-slate-900 border border-slate-800 rounded-2xl shadow-xl p-5">
+        <h2 class="text-lg font-bold text-white">Resource inventory</h2>
+        <p class="text-xs text-slate-400 mt-1">Inventory is read-only. Cleanup requires a separate confirmation.</p>
+        <div class="mt-4 overflow-x-auto">
+            <table class="w-full text-left text-xs">
+                <thead class="text-slate-500 uppercase tracking-wider">
+                    <tr><th class="py-2 pr-4">Resource</th><th class="py-2 pr-4">Inventory</th><th class="py-2 pr-4">Cleanup status</th><th class="py-2 pr-4">Outcome / error</th></tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/60">
+                    {% for item in cleanup.items.all %}
+                    <tr class="text-slate-300">
+                        <td class="py-2 pr-4"><span class="text-slate-400">{{ item.get_resource_type_display }}</span><span class="block font-mono break-all">{{ item.resource_name }}</span></td>
+                        <td class="py-2 pr-4">
+                            {% if item.scan_error %}
+                            <span class="text-rose-300">Unverified</span><span class="block text-slate-500">{{ item.scan_error }}</span>
+                            {% elif item.exists_at_scan is None %}
+                            <span class="text-slate-500">Not scanned</span>
+                            {% elif item.exists_at_scan %}
+                            <span class="text-amber-300">Present at scan</span>
+                            {% else %}
+                            <span class="text-slate-500">Absent at scan</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-2 pr-4">{{ item.get_status_display }}</td>
+                        <td class="py-2 pr-4">{% if item.last_error %}<span class="text-rose-300">{{ item.last_error }}</span>{% else %}<span class="text-slate-400">{{ item.outcome|default:"—" }}</span>{% endif %}</td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="4" class="py-4 text-slate-500">No resources recorded for this attempt.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if cleanup.status == "AWAITING_CONFIRMATION" %}
+        <form method="post" action="{% url 'control_plane:cdc_cleanup_confirm' cleanup.pk %}" class="mt-4 flex flex-wrap items-center gap-3">
+            {% csrf_token %}
+            <input type="hidden" name="return_to" value="attempt">
+            <label class="inline-flex items-center gap-2 text-xs text-amber-200">
+                <input type="checkbox" name="confirm_cleanup" value="yes" required class="rounded border-slate-600 bg-slate-800">
+                I reviewed these resources
+            </label>
+            <button type="submit" class="px-3 py-1.5 rounded-lg border border-rose-500/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 text-xs font-medium">Confirm cleanup</button>
+        </form>
+        {% endif %}
+        {% if cleanup.status == "RUNNING" or cleanup.status == "SCANNING" %}
+        <form method="post" action="{% url 'control_plane:cdc_cleanup_recover' cleanup.pk %}" class="mt-4 flex flex-wrap items-center gap-3">
+            {% csrf_token %}
+            <input type="hidden" name="return_to" value="attempt">
+            <label class="inline-flex items-center gap-2 text-xs text-amber-200">
+                <input type="checkbox" name="acknowledge_uncertain" value="yes" required class="rounded border-slate-600 bg-slate-800">
+                Mark interrupted; outcome may be uncertain
+            </label>
+            <button type="submit" class="px-3 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 text-xs font-medium">Mark interrupted</button>
+        </form>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

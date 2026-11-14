@@ -180,6 +180,9 @@ class SourceProfile(TimeStampedAuditedModel):
     )
     username = models.CharField(max_length=100)
     password = EncryptedCharField(max_length=255, blank=True, null=True)
+    mongodb_connection_string = EncryptedCharField(
+        max_length=2048, blank=True, null=True
+    )
     is_active = models.BooleanField(default=True)
     ingestion_mode = models.CharField(
         max_length=10,
@@ -384,6 +387,9 @@ class CdcResourceCleanup(TimeStampedAuditedModel):
     last_error = models.TextField(blank=True, default="")
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    external_operation_uncertain = models.BooleanField(default=False)
+    uncertainty_override_at = models.DateTimeField(null=True, blank=True)
+    uncertainty_override_reason = models.TextField(blank=True, default="")
 
     class Meta:
         constraints = [

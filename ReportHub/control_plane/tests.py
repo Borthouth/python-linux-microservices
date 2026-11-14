@@ -83,6 +83,7 @@ class NavbarNavigationTests(TestCase):
         )
 
         for label in (
+            "CDC",
             "Data &amp; Pipelines",
             "Operations",
             "History",
@@ -97,20 +98,41 @@ class NavbarNavigationTests(TestCase):
         self.assertContains(
             response,
             f'href="{reverse("control_plane:cdc_rebuild_list")}"',
+            count=1,
         )
+        for route in ("cdc_failure_history", "cdc_cleanup_list"):
+            self.assertContains(
+                response, f'href="{reverse(f"control_plane:{route}")}"', count=1,
+            )
         self.assertNotContains(response, "Administration")
 
-    def test_history_route_uses_its_active_menu_and_working_breadcrumb(self):
+    def test_rebuild_route_uses_cdc_menu_and_working_breadcrumb(self):
         response = self.client.get(reverse("control_plane:cdc_rebuild_list"))
 
         self.assertContains(
             response,
-            'border-indigo-500 text-white">\n                            <span>History</span>',
+            'border-indigo-500 text-white">\n                            <span>CDC</span>',
         )
         self.assertEqual(response.context["breadcrumbs"], [
             {"name": "Dashboard", "url": reverse("control_plane:dashboard")},
             {"name": "CDC Table Rebuilds", "url": ""},
         ])
+
+    def test_user_without_source_access_has_no_cdc_menu(self):
+        user = get_user_model().objects.create_user(username="navigation-no-access")
+        self.client.force_login(user)
+
+        response = self.client.get(reverse("control_plane:cdc_rebuild_list"))
+        self.assertNotContains(response, "<span>CDC</span>")
+
+    def test_staff_cdc_pages_activate_cdc_menu(self):
+        for route in ("cdc_failure_history", "cdc_cleanup_list"):
+            with self.subTest(route=route):
+                response = self.client.get(reverse(f"control_plane:{route}"))
+                self.assertContains(
+                    response,
+                    'border-indigo-500 text-white">\n                            <span>CDC</span>',
+                )
 
 
 @override_settings(CACHES={
@@ -1504,7 +1526,9 @@ class CdcRebuildStartViewTests(TestCase):
             role=Role.ADMIN,
         )
         self.client.force_login(source_admin)
-        response = self.client.get(reverse("control_plane:cdc_rebuild_list"))
+        response = self.client.get(
+            reverse("control_plane:cdc_rebuild_source_tables", args=[self.source.pk])
+        )
         self.assertContains(response, self.url)
         response = self.client.get(self.url)
         self.assertContains(
@@ -1562,7 +1586,9 @@ class CdcRebuildMonitorTests(TestCase):
             status=CdcTableRebuild.Status.CUTOVER_PENDING,
             last_error="Cutover needs attention",
         )
-        self.url = reverse("control_plane:cdc_rebuild_list")
+        self.sources_url = reverse("control_plane:cdc_rebuild_list")
+        self.tables_url = reverse("control_plane:cdc_rebuild_source_tables", args=[self.source.pk])
+        self.url = reverse("control_plane:cdc_rebuild_table_history", args=[self.table.pk])
 
     def test_staff_monitor_shows_rebuild_attention_and_resume_action(self):
         admin = get_user_model().objects.create_user(
@@ -1575,8 +1601,209 @@ class CdcRebuildMonitorTests(TestCase):
         self.assertContains(response, "public.events")
         self.assertContains(response, "Cutover needs attention")
         self.assertContains(response, "Resume cutover")
+        self.assertContains(response, "Details")
+        self.assertContains(response, str(self.rebuild.generation))
         self.assertContains(response, "CDC Table Rebuilds")
         self.assertContains(response, self.url)
+
+    def test_status_filter_combines_with_search_and_can_be_cleared(self):
+        admin = get_user_model().objects.create_user(
+            username="rebuild-filter-staff", is_staff=True
+        )
+        self.client.force_login(admin)
+        failed = CdcTableRebuild.objects.create(
+            source_table=self.table,
+            connector_name="failed-monitor-generation",
+            topic_prefix="failed-monitor-generation",
+            notification_topic="failed-monitor-generation.notifications",
+            consumer_group="failed-monitor-generation-group",
+            staging_table="source_events_failed_monitor_generation",
+            status=CdcTableRebuild.Status.FAILED,
+            last_error="Retry needs attention",
+        )
+        CdcTableRebuild.objects.filter(pk=self.rebuild.pk).update(
+            updated_at=timezone.now() + timedelta(days=1),
+        )
+        tables = self.client.get(self.tables_url)
+        self.assertEqual(list(tables.context["page_obj"])[0].latest_rebuild.pk, failed.pk)
+
+        response = self.client.get(self.url, {"q": "attention", "status": "FAILED"})
+
+        self.assertEqual(list(response.context["page_obj"]), [failed])
+        self.assertContains(response, '<option value="FAILED" selected>Failed</option>', html=True)
+        self.assertContains(response, "Clear")
+        self.assertContains(response, f'href="{self.url}"')
+        self.assertNotContains(response, "Cutover needs attention")
+        response = self.client.get(self.url, {"q": "missing", "status": "FAILED"})
+        self.assertContains(response, "No CDC rebuilds match your search or status filter.")
+
+    def test_status_and_search_are_preserved_on_both_pagination_controls(self):
+        admin = get_user_model().objects.create_user(
+            username="rebuild-pagination-staff", is_staff=True
+        )
+        self.client.force_login(admin)
+        for index in range(21):
+            name = f"filtered-rebuild-{index}"
+            CdcTableRebuild.objects.create(
+                source_table=self.table,
+                connector_name=name,
+                topic_prefix=name,
+                notification_topic=f"{name}.notifications",
+                consumer_group=f"{name}-group",
+                staging_table=f"filtered_stage_{index}",
+                status=CdcTableRebuild.Status.FAILED,
+            )
+        for index in range(21):
+            SourceTable.objects.create(
+                source=self.source, schema_name="public", table_name=f"events_{index}",
+                primary_key_fields=["id"], cdc_managed=True,
+            )
+
+        response = self.client.get(self.url, {"q": "events", "status": "FAILED"})
+
+        self.assertEqual(response.context["page_obj"].paginator.count, 21)
+        self.assertContains(response, "?page=2&q=events&status=FAILED")
+        response = self.client.get(self.tables_url, {"q": "events"})
+        self.assertEqual(response.context["page_obj"].paginator.count, 22)
+        self.assertContains(response, "?page=2&q=events")
+
+    def test_connections_and_tables_are_searchable_and_history_is_per_table(self):
+        admin = get_user_model().objects.create_user(
+            username="rebuild-navigation-staff", is_staff=True
+        )
+        self.client.force_login(admin)
+        historic = SourceTable.objects.create(
+            source=self.source, schema_name="archive", table_name="historic",
+            cdc_managed=False,
+        )
+        CdcTableRebuild.objects.create(
+            source_table=historic, connector_name="historic-generation",
+            topic_prefix="historic-generation", notification_topic="historic.notifications",
+            consumer_group="historic-group", staging_table="historic-stage",
+            status=CdcTableRebuild.Status.FAILED,
+        )
+        plain = SourceTable.objects.create(
+            source=self.source, schema_name="public", table_name="plain",
+            cdc_managed=False,
+        )
+        response = self.client.get(self.sources_url, {"q": "Monitored"})
+        self.assertContains(response, self.source.name)
+        self.assertContains(response, self.tables_url)
+        response = self.client.get(self.tables_url)
+        self.assertContains(response, "archive.historic")
+        self.assertContains(response, self.url)
+        self.assertNotContains(response, "public.plain")
+        response = self.client.get(self.tables_url, {"q": "historic"})
+        self.assertContains(response, "archive.historic")
+        self.assertNotContains(response, "public.events")
+        response = self.client.get(self.url)
+        self.assertContains(response, "Cutover needs attention")
+        self.assertNotContains(response, "historic-generation")
+        self.assertEqual(
+            self.client.get(reverse("control_plane:cdc_rebuild_table_history", args=[plain.pk])).status_code,
+            404,
+        )
+
+    def test_connection_status_filter_combines_with_search_and_source_access(self):
+        inactive = SourceProfile.objects.create(
+            name="Monitored inactive", db_type=DbChoice.POSTGRESQL,
+            host="localhost", port=5432, database_name="test_db", username="test_user",
+            is_active=False,
+        )
+        SourceTable.objects.create(source=inactive, table_name="events", cdc_managed=True)
+        viewer = get_user_model().objects.create_user(username="connection-filter-viewer")
+        for source in (self.source, inactive):
+            UserSourceAccess.objects.create(user=viewer, source=source, role=Role.VIEWER)
+        self.client.force_login(viewer)
+
+        response = self.client.get(self.sources_url)
+        self.assertContains(response, ">Active</span>")
+        self.assertContains(response, ">Inactive</span>")
+        response = self.client.get(self.sources_url, {"q": "Monitored", "status": "inactive"})
+        self.assertEqual(list(response.context["page_obj"]), [inactive])
+        self.assertContains(response, '<option value="inactive" selected>Inactive</option>', html=True)
+        self.assertContains(response, f'href="{self.sources_url}"')
+        response = self.client.get(self.sources_url, {"q": "Monitored", "status": "active"})
+        self.assertEqual(list(response.context["page_obj"]), [self.source])
+        response = self.client.get(self.sources_url, {"q": "missing", "status": "inactive"})
+        self.assertEqual(response.context["page_obj"].paginator.count, 0)
+
+    def test_connections_pagination_preserves_search_and_status(self):
+        admin = get_user_model().objects.create_user(
+            username="rebuild-connection-pagination", is_staff=True
+        )
+        self.client.force_login(admin)
+        for index in range(20):
+            source = SourceProfile.objects.create(
+                name=f"Monitored {index}", db_type=DbChoice.POSTGRESQL,
+                host="localhost", port=5432, database_name="test_db", username="test_user",
+            )
+            SourceTable.objects.create(
+                source=source, table_name="events", cdc_managed=True,
+            )
+        response = self.client.get(self.sources_url, {"q": "Monitored", "status": "active"})
+        self.assertEqual(response.context["page_obj"].paginator.count, 21)
+        self.assertContains(response, "?page=2&q=Monitored&status=active")
+        response = self.client.get(self.sources_url, {"q": "Monitored", "status": "active", "page": 2})
+        self.assertContains(response, "?page=1&q=Monitored&status=active")
+
+    def test_breadcrumbs_link_back_through_connection_and_tables(self):
+        admin = get_user_model().objects.create_user(
+            username="rebuild-breadcrumb-admin", is_staff=True,
+        )
+        self.client.force_login(admin)
+
+        response = self.client.get(self.tables_url)
+        self.assertIn(
+            {"name": "CDC Table Rebuilds", "url": self.sources_url},
+            response.context["breadcrumbs"],
+        )
+        self.assertNotContains(response, "Back to connections")
+        response = self.client.get(self.url)
+        self.assertEqual(response.context["breadcrumbs"][-3:], [
+            {"name": "CDC Table Rebuilds", "url": self.sources_url},
+            {"name": "Tables", "url": self.tables_url},
+            {"name": "Rebuild History", "url": ""},
+        ])
+        self.assertContains(response, f'href="{self.tables_url}"')
+        self.assertNotContains(response, "Back to tables")
+
+    def test_navigation_preserves_return_to_table_and_history(self):
+        admin = get_user_model().objects.create_user(
+            username="rebuild-navigation-admin", is_staff=True
+        )
+        self.client.force_login(admin)
+        table = SourceTable.objects.create(
+            source=self.source, schema_name="public", table_name="new_events",
+            primary_key_fields=["id"], cdc_managed=True,
+        )
+        start = reverse("control_plane:cdc_rebuild_start", args=[table.pk])
+        response = self.client.get(start, {"return_to": "tables"})
+        self.assertContains(response, f'href="{self.tables_url}"')
+        with patch("control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async"):
+            response = self.client.post(start, {"confirm": "yes", "return_to": "tables"})
+        self.assertRedirects(response, self.tables_url)
+        with patch("control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async"):
+            response = self.client.post(
+                reverse("control_plane:cdc_rebuild_resume", args=[self.rebuild.pk]),
+                {"return_to": "history"},
+            )
+        self.assertRedirects(response, self.url)
+
+    def test_table_actions_show_start_before_history(self):
+        admin = get_user_model().objects.create_user(
+            username="rebuild-action-order", is_staff=True
+        )
+        self.client.force_login(admin)
+        table = SourceTable.objects.create(
+            source=self.source, schema_name="public", table_name="ready",
+            primary_key_fields=["id"], cdc_managed=True,
+        )
+        response = self.client.get(self.tables_url)
+        html = response.content.decode()
+        start = reverse("control_plane:cdc_rebuild_start", args=[table.pk])
+        history = reverse("control_plane:cdc_rebuild_table_history", args=[table.pk])
+        self.assertLess(html.index(start), html.index(history))
 
     def test_source_access_limits_visibility_and_admin_role_controls_resume(self):
         other_source = SourceProfile.objects.create(
@@ -1610,15 +1837,28 @@ class CdcRebuildMonitorTests(TestCase):
         )
         self.client.force_login(admin)
 
+        response = self.client.get(self.sources_url)
+        self.assertContains(response, self.source.name)
+        self.assertNotContains(response, other_source.name)
+        self.assertEqual(
+            self.client.get(
+                reverse("control_plane:cdc_rebuild_source_tables", args=[other_source.pk])
+            ).status_code,
+            404,
+        )
         response = self.client.get(self.url)
         self.assertContains(response, self.source.name)
         self.assertNotContains(response, other_source.name)
         self.assertContains(response, "Resume cutover")
-        self.assertContains(response, reverse("control_plane:cdc_rebuild_list"))
+        self.assertContains(response, self.tables_url)
+        response = self.client.get(self.url, {"status": "CUTOVER_PENDING"})
+        self.assertEqual(list(response.context["page_obj"]), [self.rebuild])
+        self.assertNotContains(response, other_source.name)
 
         with patch("control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async") as apply_async:
             response = self.client.post(
-                reverse("control_plane:cdc_rebuild_resume", args=[self.rebuild.pk])
+                reverse("control_plane:cdc_rebuild_resume", args=[self.rebuild.pk]),
+                {"return_to": "history"},
             )
 
         self.assertRedirects(response, self.url)
@@ -1636,7 +1876,13 @@ class CdcRebuildMonitorTests(TestCase):
 
         response = self.client.get(self.url)
         self.assertContains(response, self.source.name)
-        self.assertContains(response, "CDC Rebuilds")
+        self.assertContains(
+            response,
+            'border-indigo-500 text-white">\n                            <span>CDC</span>',
+        )
+        self.assertContains(response, f'href="{self.sources_url}"')
+        self.assertNotContains(response, reverse("control_plane:cdc_failure_history"))
+        self.assertNotContains(response, reverse("control_plane:cdc_cleanup_list"))
         self.assertNotContains(response, "Resume cutover")
 
         with patch("control_plane.views.cdc_rebuilds.rebuild_cdc_table_task.apply_async") as apply_async:
@@ -1652,8 +1898,10 @@ class CdcRebuildMonitorTests(TestCase):
         user = get_user_model().objects.create_user(username="unassigned-rebuild-user")
         self.client.force_login(user)
 
-        response = self.client.get(self.url)
+        response = self.client.get(self.sources_url)
         self.assertNotContains(response, self.source.name)
+        self.assertEqual(self.client.get(self.tables_url).status_code, 404)
+        self.assertEqual(self.client.get(self.url).status_code, 404)
         self.assertEqual(
             self.client.post(
                 reverse("control_plane:cdc_rebuild_resume", args=[self.rebuild.pk])
@@ -1872,7 +2120,7 @@ class CdcFailureDashboardTests(TestCase):
         response = self.client.get(reverse("control_plane:cdc_failure_history"))
         self.assertContains(
             response,
-            'border-indigo-500 text-white">\n                            <span>History</span>',
+            'border-indigo-500 text-white">\n                            <span>CDC</span>',
         )
 
     @patch("control_plane.views.dashboard.get_redis_client")

@@ -12,10 +12,11 @@ MONGO_INIT_DIR="$SCRIPT_DIR/init-db/mongo"
 ORACLE_INIT_DIR="$SCRIPT_DIR/init-db/oracle"
 
 usage() {
-    echo "Usage: ./start_test_dbs.sh [--start|--stop] [--reset]"
+    echo "Usage: ./start_test_dbs.sh [--start|--stop] [--reset] [--mongo-cdc-only]"
     echo "  --start     Start and initialize the test databases (default)."
     echo "  --stop      Stop the test database containers without removing them or their volumes."
     echo "  --reset     Remove old containers and volumes, then start clean."
+    echo "  --mongo-cdc-only  Start and initialize only the MongoDB CDC test fixture."
     exit 0
 }
 
@@ -38,9 +39,43 @@ wait_for_service() {
     return 1
 }
 
+initialize_mongo_cdc() {
+    wait_for_service "MongoDB CDC connection" 90 2 \
+        docker exec reporthub-mongo-cdc-test mongosh --quiet \
+            -u test_user -p test_password --authenticationDatabase admin \
+            --eval "db.adminCommand({ping: 1})"
+
+    docker exec reporthub-mongo-cdc-test mongosh --quiet \
+        -u test_user -p test_password --authenticationDatabase admin --eval '
+            try {
+                const config = rs.conf();
+                if (config._id !== "rs0" || config.members.length !== 1 ||
+                    config.members[0].host !== "mongo-cdc-test:27017") {
+                    throw new Error("Existing MongoDB CDC replica-set configuration does not match the test fixture");
+                }
+            } catch (error) {
+                if (error.code !== 94) throw error;
+                const result = rs.initiate({
+                    _id: "rs0",
+                    members: [{_id: 0, host: "mongo-cdc-test:27017"}]
+                });
+                if (result.ok !== 1) throw new Error("Replica-set initialization failed: " + JSON.stringify(result));
+            }
+        '
+    wait_for_service "MongoDB CDC primary" 90 2 \
+        docker exec reporthub-mongo-cdc-test mongosh --quiet \
+            -u test_user -p test_password --authenticationDatabase admin \
+            --eval 'if (!db.hello().isWritablePrimary) quit(1)'
+    docker exec reporthub-mongo-cdc-test mongosh --quiet \
+        -u test_user -p test_password --authenticationDatabase admin \
+        --file /docker-entrypoint-initdb.d/01-init.js >/dev/null
+    echo "   ✅ MongoDB CDC replica set and seed data are ready."
+}
+
 ACTION=start
 ACTION_SELECTED=false
 RESET_VOLUMES=false
+MONGO_CDC_ONLY=false
 for arg in "$@"; do
     case "$arg" in
         --start)
@@ -60,10 +95,26 @@ for arg in "$@"; do
             ACTION_SELECTED=true
             ;;
         --reset|--rebuild) RESET_VOLUMES=true ;;
+        --mongo-cdc-only) MONGO_CDC_ONLY=true ;;
         --help|-h) usage ;;
         *) echo "Unknown option: $arg"; exit 1 ;;
     esac
 done
+
+if [ "$MONGO_CDC_ONLY" = true ]; then
+    if [ "$ACTION" != start ] || [ "$RESET_VOLUMES" = true ]; then
+        echo "Error: --mongo-cdc-only cannot be combined with --stop or --reset." >&2
+        exit 1
+    fi
+    if ! docker network inspect reporthub_shared_network >/dev/null 2>&1; then
+        echo "🔌 Creating shared Docker network..."
+        docker network create reporthub_shared_network >/dev/null
+    fi
+    docker compose -f "$COMPOSE_FILE" up -d --no-deps mongo-cdc-test
+    initialize_mongo_cdc
+    echo "MongoDB CDC: localhost:27019 (direct connection), mongo-cdc-test:27017 from containers."
+    exit 0
+fi
 
 if [ "$ACTION" = stop ]; then
     if [ "$RESET_VOLUMES" = true ]; then
@@ -384,6 +435,7 @@ wait_for_service "MongoDB" 90 2 \
 echo "   - Applying MongoDB seed data..."
 docker exec reporthub-mongo-test mongosh -u "test_user" -p "test_password" \
     --authenticationDatabase "admin" --file /docker-entrypoint-initdb.d/01-init.js >/dev/null
+initialize_mongo_cdc
 
 # Wait for Oracle (Oracle takes a couple of minutes to boot its internal services fully)
 wait_for_service "Oracle Database Free" 90 5 \
@@ -408,7 +460,8 @@ echo "PostgreSQL (Chinook):    localhost:5433"
 echo "MySQL (Northwind):       localhost:3307"
 echo "Microsoft SQL Server:    localhost:1434"
 echo "MongoDB (app_analytics): localhost:27018"
+echo "MongoDB CDC replica set: localhost:27019 (direct connection)"
 echo "Oracle Free (app_user):  localhost:1522"
 echo "From ReportHub containers use postgres-test:5432, mysql-test:3306, mssql-test:1433,"
-echo "  mongo-test:27017, and oracle-test:1521."
+echo "  mongo-test:27017, mongo-cdc-test:27017, and oracle-test:1521."
 echo "--------------------------------------------------"

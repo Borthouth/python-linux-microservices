@@ -16,10 +16,11 @@
         <form method="post" action="{% url 'control_plane:cdc_rebuild_start' source_table.pk %}" class="flex flex-wrap items-center gap-3">
             {% csrf_token %}
             <input type="hidden" name="confirm" value="yes">
+            <input type="hidden" name="return_to" value="{{ return_to }}">
             <button type="submit" class="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-sm font-medium">
                 Start CDC rebuild
             </button>
-            <a href="{% url 'control_plane:cdc_rebuild_list' %}" class="px-4 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 text-sm">
+            <a href="{{ cancel_url }}" class="px-4 py-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 text-sm">
                 Cancel
             </a>
         </form>

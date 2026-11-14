@@ -237,6 +237,16 @@ BREADCRUMB_REGISTRY = {
         {"name": "Dashboard", "url": "control_plane:dashboard"},
         {"name": "CDC Table Rebuilds", "url": ""},
     ],
+    "cdc_rebuild_source_tables": [
+        {"name": "Dashboard", "url": "control_plane:dashboard"},
+        {"name": "CDC Table Rebuilds", "url": "control_plane:cdc_rebuild_list"},
+        {"name": "Tables", "url": ""},
+    ],
+    "cdc_rebuild_table_history": [
+        {"name": "Dashboard", "url": "control_plane:dashboard"},
+        {"name": "CDC Table Rebuilds", "url": "control_plane:cdc_rebuild_list"},
+        {"name": "Rebuild History", "url": ""},
+    ],
     "cdc_rebuild_start": [
         {"name": "Dashboard", "url": "control_plane:dashboard"},
         {"name": "CDC Table Rebuilds", "url": "control_plane:cdc_rebuild_list"},
@@ -250,6 +260,16 @@ BREADCRUMB_REGISTRY = {
     "cdc_cleanup_list": [
         {"name": "Dashboard", "url": "control_plane:dashboard"},
         {"name": "CDC Resource Cleanup", "url": ""},
+    ],
+    "cdc_cleanup_source": [
+        {"name": "Dashboard", "url": "control_plane:dashboard"},
+        {"name": "CDC Resource Cleanup", "url": "control_plane:cdc_cleanup_list"},
+        {"name": "Source Resources", "url": ""},
+    ],
+    "cdc_cleanup_attempt": [
+        {"name": "Dashboard", "url": "control_plane:dashboard"},
+        {"name": "CDC Resource Cleanup", "url": "control_plane:cdc_cleanup_list"},
+        {"name": "Cleanup Attempt", "url": ""},
     ],
     "cdc_cleanup_scan": [
         {"name": "Dashboard", "url": "control_plane:dashboard"},
