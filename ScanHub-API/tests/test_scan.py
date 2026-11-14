@@ -1,5 +1,6 @@
 import os
 
+import pytest
 from fastapi.testclient import TestClient
 
 import scan_api
@@ -47,7 +48,8 @@ def test_scan_clean_file(monkeypatch):
     assert data["pool_strategy"] == "least_connections"
 
 
-def test_scan_rejects_unsafe_filename_suffix(monkeypatch, tmp_path):
+@pytest.mark.parametrize("filename", ["../../report.<bad>", "report.pdf"])
+def test_scan_temporary_path_does_not_use_filename(monkeypatch, tmp_path, filename):
     scanned = {}
 
     def mock_scan(file_path, fd=None, filename=None, size=None):
@@ -68,8 +70,6 @@ def test_scan_rejects_unsafe_filename_suffix(monkeypatch, tmp_path):
 
     monkeypatch.setattr(scan_api, "TEMP_DIR", str(tmp_path))
     monkeypatch.setattr(scanner_pool, "scan", mock_scan)
-    filename = "../../report.<bad>"
-
     response = client.post(
         "/scan",
         headers={"X-API-Key": "replace-with-a-real-secret"},

@@ -1,5 +1,4 @@
 import os
-import re
 import time
 import logging
 import tempfile
@@ -37,11 +36,6 @@ TEMP_DIR = os.getenv("SCANHUB_TEMP_DIR", "/var/lib/scanhub/tmp")
 
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "scan_api.log")
-
-
-def safe_upload_suffix(filename: Optional[str]) -> str:
-    suffix = os.path.splitext(filename or "")[1]
-    return suffix if re.fullmatch(r"\.[A-Za-z0-9_-]{1,32}", suffix) else ""
 
 
 METRICS_DB = os.getenv(
@@ -404,12 +398,9 @@ async def scan(
     upload_start = time.time()
 
     try:
-        suffix = safe_upload_suffix(file.filename)
-
         with tempfile.NamedTemporaryFile(
             mode="w+b",
             delete=False,
-            suffix=suffix,
             dir=TEMP_DIR
         ) as tmp:
             temp_path = tmp.name
@@ -520,7 +511,7 @@ async def scan_stream(
     Scan raw request-body bytes.
 
     Optional header:
-        X-Filename: original file name used only for logging/response/suffix.
+        X-Filename: original file name used for logging, scanning, and response.
 
     This is useful for clients that do not want multipart/form-data.
     """
@@ -533,12 +524,9 @@ async def scan_stream(
     upload_start = time.time()
 
     try:
-        suffix = safe_upload_suffix(x_filename)
-
         with tempfile.NamedTemporaryFile(
             mode="w+b",
             delete=False,
-            suffix=suffix,
             dir=TEMP_DIR
         ) as tmp:
             temp_path = tmp.name
