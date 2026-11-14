@@ -5,6 +5,12 @@
 
 For overall progress and future work, see [ROADMAP.md](./ROADMAP.md). The [CDC-to-batch handoff](./CDC_TO_BATCH_HANDOFF.md) is the detailed tracker and next-task guide for CDC work.
 
+## 🤝 How This Was Built
+
+I designed ReportHub's architecture, data model, and operational safeguards, including the CDC recovery flow, cleanup safety rules, migration procedure, and the decision to keep source databases read-only. I set the roadmap and made the trade-offs documented in the handoff and roadmap files.
+
+GitHub Copilot assisted with implementation and test writing. I reviewed, ran, and verified every change, and the full test suite (over 550 tests) passes.
+
 ---
 
 ## 🏗️ Core Architecture & Design
