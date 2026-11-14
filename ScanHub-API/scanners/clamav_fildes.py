@@ -162,8 +162,6 @@ class ClamAVFildesScanner(BaseScanner):
             sock.connect(clamd_socket_path)
 
             # z-command form: command is null-terminated and response is null-terminated.
-            sock.sendall(b"zFILDES\0")
-
             ancdata = [
                 (
                     socket.SOL_SOCKET,
@@ -172,7 +170,7 @@ class ClamAVFildesScanner(BaseScanner):
                 )
             ]
 
-            # Send one byte along with the file descriptor.
+            sock.sendall(b"zFILDES\0")
             sock.sendmsg([b"\0"], ancdata)
 
             response_chunks = []

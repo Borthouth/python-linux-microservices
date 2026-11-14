@@ -182,6 +182,71 @@ Check status:
 systemctl status scanhub-api.service
 
 ===============================================================================
+DOCKER INSTALLATION
+===============================================================================
+
+This runs the API in a container. ClamAV stays on the host as two clamd
+services, because the fast FILDES scan path needs the host clamd sockets.
+
+Requirements:
+ - Docker Engine with the Compose plugin (docker compose version)
+ - Root access (sudo) for the host setup
+ - Ubuntu/Debian or RHEL-family host
+
+Install and start:
+
+cd ScanHub-API
+sudo ./deploy/install-docker.sh
+
+The script is safe to re-run. It does the following:
+ - Installs ClamAV and starts clamd@scan and clamd@scan2 (deploy/setup-clamd.sh).
+ - On Ubuntu, adds the AppArmor flag attach_disconnected to the clamd profile.
+   Without it, clamd cannot receive file descriptors from the container.
+ - Writes .env with CLAMD_GID and SCANHUB_CONFIG.
+ - Creates /var/lib/scanhub/tmp and logs/, owned by uid 10001.
+ - Creates /etc/scanhub/config.py with a new random API_KEY if it does not exist.
+   Existing files are kept.
+ - Creates a self-signed TLS certificate in secrets/ if none exists. The
+   certificate must include host.docker.internal in its SAN, which ReportHub
+   uses. If an older certificate lacks it, the script regenerates it.
+ - Runs docker compose up -d --build, then waits for https://localhost:9443/health.
+
+Using from ReportHub:
+ - ReportHub's reporthub-stack.sh start runs ./scanhub-antivirus.sh start first.
+   ReportHub is optional for ScanHub: if ScanHub-API is not installed next to
+   ReportHub, reporthub-stack.sh starts ReportHub without it.
+ - ReportHub reads SCANHUB_URL, SCANHUB_API_KEY, and SCANHUB_CA_CERT_PATH from
+   its .env. The API key must match API_KEY in /etc/scanhub/config.py.
+ - Changing the certificate requires ReportHub to be restarted to pick it up.
+
+Files kept on the host (not in the image or the repo):
+ - /etc/scanhub/config.py   API key and scanner settings (mounted read-only)
+ - secrets/scanhubapi.key   TLS private key (mounted read-only)
+ - secrets/scanhubapi.crt   TLS certificate (mounted read-only)
+ - .env                     CLAMD_GID and SCANHUB_CONFIG
+
+Test a scan (the file must be readable by the host user):
+
+curl -sk -H "X-API-Key: <API_KEY>" -F file=@/path/to/file https://localhost:9443/scan
+
+Read the API key with: sudo grep API_KEY /etc/scanhub/config.py
+
+Manage the container:
+
+docker compose logs -f scanhub-api     (logs)
+docker compose restart scanhub-api     (needed after changing config.py or after restarting clamd)
+docker compose down                    (stop)
+
+Troubleshooting:
+ - "No response from clamd": check the AppArmor flag with
+   sudo grep attach_disconnected /etc/apparmor.d/usr.sbin.clamd
+   and the kernel log with sudo dmesg | grep -i apparmor
+ - Socket permission errors: CLAMD_GID in .env must match the clamav group.
+   Check it with getent group clamav
+ - Stale sockets after a clamd restart: restart the container.
+ - Self-signed certificate warnings: use curl -k, or replace the certificate.
+
+===============================================================================
 CLAMAV CONFIGURATION
 ===============================================================================
 

@@ -1,0 +1,32 @@
+services:
+  scanhub-api:
+    build: .
+    container_name: scanhub-api
+    restart: unless-stopped
+    ports:
+      - "9443:9443"
+    environment:
+      SCANHUB_TEMP_DIR: /var/lib/scanhub/tmp
+    # Numeric GID of the group that owns the host clamd sockets.
+    # Find it with: getent group <clamav-group-name>
+    group_add:
+      - "${CLAMD_GID:?set CLAMD_GID in .env}"
+    volumes:
+      # Same host and container path, so clamd can read uploaded files by path.
+      # Holds tmp/ (uploads) and metrics.db. Owned by uid 10001 on the host.
+      - /var/lib/scanhub:/var/lib/scanhub
+      - ./logs:/app/logs
+      # Host clamd sockets. Connecting requires write access to the socket.
+      - /run/clamd.scan:/run/clamd.scan
+      - /run/clamd.scan2:/run/clamd.scan2
+      # Per-host settings and API key. Edit on the host, then restart the
+      # container. It is not baked into the image.
+      - ${SCANHUB_CONFIG:-./config.py}:/app/config.py:ro
+      # TLS key is kept outside the repo and image.
+      - ./secrets/scanhubapi.key:/app/scanhubapi.key:ro
+      - ./secrets/scanhubapi.crt:/app/scanhubapi.crt:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true

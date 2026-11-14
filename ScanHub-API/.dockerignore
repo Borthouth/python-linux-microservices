@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+logs/
+*.log
+*.key
+secrets/
+.env
+.env.*
+config.py
+install.sh
+run_http.sh
+run_https.sh
+scanhub-api.service
