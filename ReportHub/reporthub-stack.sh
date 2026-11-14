@@ -4,7 +4,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+SCANHUB_DIR="${SCANHUB_DIR:-$(dirname "$SCRIPT_DIR")/ScanHub-API}"
+
 compose=(docker compose -f docker-compose.yml -f docker-compose.cdc.yml)
+# ScanHub is optional. Its settings are only wired in when ScanHub-API is present.
+if [ -f "$SCANHUB_DIR/docker-compose.yml" ]; then
+    compose+=(-f docker-compose.scanhub.yml)
+fi
 
 if [ "$#" -ne 1 ]; then
     echo "Usage: $0 {start|stop}" >&2
@@ -13,6 +19,11 @@ fi
 
 case "$1" in
     start)
+        if [ -f "$SCANHUB_DIR/docker-compose.yml" ]; then
+            "$SCRIPT_DIR/scanhub-antivirus.sh" start
+        else
+            echo "ScanHub-API not found at $SCANHUB_DIR; starting ReportHub without antivirus." >&2
+        fi
         "${compose[@]}" up -d
         ;;
     stop)

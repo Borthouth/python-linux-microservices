@@ -1,0 +1,23 @@
+# Connects ReportHub to the ScanHub-API antivirus service on this host.
+# Included by reporthub-stack.sh. Values are read from .env.
+services:
+  app: &scanhub_settings
+    environment:
+      - SCANHUB_URL=${SCANHUB_URL:?set SCANHUB_URL in .env}
+      - SCANHUB_API_KEY=${SCANHUB_API_KEY:?set SCANHUB_API_KEY in .env}
+      - SCANHUB_CA_CERT=/run/secrets/scanhub_ca.crt
+    volumes:
+      - ${SCANHUB_CA_CERT_PATH:-../ScanHub-API/secrets/scanhubapi.crt}:/run/secrets/scanhub_ca.crt:ro
+
+  celery_ux_worker: *scanhub_settings
+  celery_warm_worker: *scanhub_settings
+  celery_cdc_worker: *scanhub_settings
+  celery_batch_worker: *scanhub_settings
+  celery_cold_worker: *scanhub_settings
+  celery_periodic_worker: *scanhub_settings
+  celery_maintenance_worker: *scanhub_settings
+
+  celery_transfer_worker:
+    <<: *scanhub_settings
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

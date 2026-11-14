@@ -455,6 +455,27 @@ source logs must remain available until the connector catches up after restart.
 This script does not start or stop the separate test database stack; start it
 with `./tests/start_test_dbs.sh` first if your sources depend on it.
 
+### Optional ScanHub antivirus
+
+ReportHub can use the ScanHub-API antivirus service. ScanHub is optional. If
+`../ScanHub-API` exists, `./reporthub-stack.sh start` starts it first, and the
+ReportHub containers get its settings. Otherwise ReportHub starts without it.
+Set `SCANHUB_DIR` if ScanHub lives elsewhere.
+
+To install ScanHub, follow the Docker installation section in
+[ScanHub-API/readme.txt](../ScanHub-API/readme.txt). In short, run
+`sudo ./deploy/install-docker.sh` from the ScanHub-API directory.
+
+Add these to `.env` (see `.env.example`):
+
+- `SCANHUB_URL`: `https://host.docker.internal:9443`
+- `SCANHUB_API_KEY`: the `API_KEY` from `/etc/scanhub/config.py` on the ScanHub host
+- `SCANHUB_CA_CERT_PATH`: path to ScanHub's `secrets/scanhubapi.crt`
+
+`./scanhub-antivirus.sh {start|stop|status}` manages only the ScanHub container.
+`./reporthub-stack.sh stop` does not stop ScanHub. ReportHub does not call
+ScanHub yet; the integration is tracked in ROADMAP.md.
+
 ---
 
 ## 🧪 Polyglot Test Database & Test Email Server Environment
@@ -791,7 +812,9 @@ reporthub/
 ├── docker-compose.yml    # Service orchestration (Web, Postgres, Redis, ClickHouse, MinIO, Celery)
 ├── docker-compose.cdc.yml # Kafka and Debezium Connect overlay
 ├── requirements.txt      # Python dependencies
-├── reporthub-stack.sh    # Start/stop the main stack with the CDC overlay
+├── reporthub-stack.sh    # Start/stop the main stack with the CDC overlay (and ScanHub when installed)
+├── scanhub-antivirus.sh  # Start/stop/status for the optional ScanHub-API container
+├── docker-compose.scanhub.yml # Optional ScanHub settings overlay
 ├── entrypoint.sh         # Container startup & auto-migration script
 ├── ROADMAP.md            # Project implementation tracker & audit cleanup checklist
 └── README.md             # Project documentation
