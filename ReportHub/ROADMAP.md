@@ -40,6 +40,13 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   ownership-transfer candidate and real-worker cancellation probes are recorded
   in [CDC_TO_BATCH_HANDOFF.md](./CDC_TO_BATCH_HANDOFF.md), along with the next
   steps. The switch remains fail-closed until fencing and recovery are proven.
+- MongoDB CDC: migration `0050` adds an optional encrypted customer connection
+  string. A read-only replica-set readiness check and the Debezium URI builder
+  are implemented and unit-tested. MongoDB CDC stays disabled until ingestion
+  and end-to-end validation pass.
+- Completed CDC groundwork (staging, cleanup probes, migrations `0047`–`0049`)
+  is summarised here. The [handoff](./CDC_TO_BATCH_HANDOFF.md) tracks only open
+  work.
 - The running app uses Django 5.2.19; a 6.1 upgrade is deferred because the
   released `django-celery-beat` requires Django <6.1 and Python must also be
   upgraded. The requirements file does not pin Django to the 5.2 series.
@@ -128,7 +135,7 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [x] Configure periodic dispatch tasks (`trigger_all_active_clickhouse_ingestion_task`) and dedicated worker queue routing (`queue_hot`, `queue_backfill`, `queue_periodic`, and other application queues).
 - [ ] **CDC readiness checks for supported databases:** Add a control-plane check for each supported CDC source type before allowing a new CDC configuration. Use source-specific, non-mutating checks for supported versions, topology, CDC/change-capture settings, required source permissions and connector-network reachability where verifiable. Report failed prerequisites and actionable setup guidance to the user; distinguish failed, unknown and stale checks from verified readiness. Users configure their own databases and explicitly choose CDC; do not enable CDC, modify source configuration, or silently fall back to batch automatically. Preserve existing source-mode safety gates and do not disrupt running CDC sources based on a failed check.
   - [ ] Test ready, misconfigured, insufficient-permission and unreachable cases for PostgreSQL, MySQL, SQL Server and Oracle using disposable sources; include MongoDB when its CDC support is implemented. A passing preflight is not proof of ongoing CDC health or safe mode transition.
-- [ ] **Restore MongoDB CDC support (current CDC priority):** MongoDB currently uses batch refresh; CDC remains disabled until implemented and validated. Debezium requires MongoDB change streams from a replica set or sharded cluster, not a standalone server. The detailed parity checklist and next task are in [CDC_TO_BATCH_HANDOFF.md](./CDC_TO_BATCH_HANDOFF.md).
+- [ ] **Restore MongoDB CDC support (current CDC priority):** MongoDB currently uses batch refresh; CDC remains disabled until implemented and validated. A customer-supplied connection string (migration `0050`), the Debezium URI builder and a read-only replica-set readiness check are implemented; ingestion and end-to-end validation remain. Debezium requires MongoDB change streams from a replica set or sharded cluster, not a standalone server. The detailed parity checklist and next task are in [CDC_TO_BATCH_HANDOFF.md](./CDC_TO_BATCH_HANDOFF.md).
   - [x] Add a separate, persistent single-node replica-set fixture to the test database setup without replacing or resetting the existing standalone MongoDB data. Configure authentication, initialization, readiness and addresses reachable by ReportHub and Kafka Connect; a second member is unnecessary for basic CDC tests.
   - [x] Capture snapshot, insert, full update and delete event shapes with an isolated Debezium 3.5.2/MongoDB/Kafka probe. The generated connector URI currently omits the required replica-set name; the probe supplies it explicitly, and MongoDB CDC remains disabled.
   - [ ] Add an explicit, read-only MongoDB CDC readiness check in the control plane. Check supported server/version and replica-set or sharded topology, change-stream access and required permissions, and connectivity from the connector's network where verifiable. Explain each failed or unverified prerequisite and tell the user CDC cannot work until they configure MongoDB and rerun the check. Do not change MongoDB configuration or enable CDC automatically; unknown, stale, inaccessible or insufficiently privileged checks are not a ready verdict.

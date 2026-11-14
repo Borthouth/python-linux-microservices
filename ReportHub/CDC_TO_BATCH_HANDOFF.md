@@ -4,51 +4,25 @@ Last updated: 2026-11-14
 
 ## Goal and current status
 
-This is the working checklist and cross-session source of truth for CDC
-progress, CDC-to-batch work and the next task. MongoDB CDC parity with the
-relational sources is the current priority. Update its checkboxes, evidence,
-and next-task section as work is completed; reflect overall milestones in
-[ROADMAP.md](./ROADMAP.md). Operational details are in [README.md](./README.md).
+This is the working checklist and cross-session source of truth for CDC progress,
+CDC-to-batch work and the next task. MongoDB CDC parity with the relational
+sources is the current priority. Update its checkboxes and next-task section as
+work is completed; reflect overall milestones in [ROADMAP.md](./ROADMAP.md).
+Operational details are in [README.md](./README.md).
 
 The goal is a safe, confirmed control-plane operation to transition a
-CDC-managed source to batch ingestion. Source writes should remain possible
-during staging and cutover; temporary inconsistency until a later batch refresh
-is acceptable. Staging and progress reporting exist, but no user-facing
-source-wide switch or resume operation is available. The experimental executor
-remains fail-closed.
+CDC-managed source to batch ingestion. The experimental executor remains
+fail-closed.
 
-The blocking issue is not staging alone: old workers, direct clients, delayed
-external requests, and in-flight writes must be fenced and safely recovered
-before publication. Cancellation and an absent ClickHouse query do not prove a
-delayed request cannot still execute.
+The blocking issue is that old workers, direct clients, delayed external
+requests and in-flight writes must be fenced and safely recovered before
+publication. Cancellation and an absent ClickHouse query do not prove a delayed
+request cannot still execute.
 
-The staff-only CDC resource cleanup workflow is implemented. Migration `0048`
-reconciles historical cleanup-field defaults; migration consistency and all 12
-focused view/service tests pass with an isolated SQLite test database. An
-isolated `0047` to `0048` upgrade preserved existing audit records. The migration
-pair `0047` and `0048` was applied to the running ReportHub database on
-2026-11-14; migration and model consistency checks pass there. Read-only
-inventory, selected deletion and permission-failure scenarios, and one
-real-worker interruption boundary now pass against isolated external services.
-Migration `0049` and the current worktree add a durable uncertainty marker:
-failed or interrupted deletion attempts block subsequent cleanup of that source.
-An administrator may explicitly accept the risk for each failed uncertain
-attempt; the action and reason are audited, old inventories are invalidated,
-and a new inventory and confirmation are required. The uncertainty remains
-recorded: an override is not proof that the old request stopped and may still
-result in deletion or data loss. There is no automatic termination proof yet.
-Existing failed and running attempts are conservatively marked uncertain during
-migration. Migration `0049` was applied to the running database on 2026-11-14
-after draining and stopping the maintenance worker; the worker was restarted
-and responded to a Celery ping. Future deployments must also stop and drain old
-cleanup workers before applying it, since older code ignores the marker.
-Control-plane source deletion and Django admin source/table deletion
-are blocked while cleanup is queued, running, or unresolved without a risk
-override. The override also permits deletion through those paths. Direct record
-deletion, source reconfiguration, and duplicate or recreated source profiles
-are not fenced; cascading deletion can still remove the marker. Do not bypass
-it. The marker does not fence other clients. Recovery from uncertain deletion requests remains
-unverified. Do not use cleanup against production or shared resources.
+Cleanup safety: failed or interrupted deletion attempts mark the source uncertain
+(migration `0049`). An administrator may accept that risk per attempt, which is
+audited and requires a fresh inventory. The override is not proof that the old
+request stopped. Do not use cleanup against production or shared resources.
 
 ## Next task
 
@@ -58,44 +32,19 @@ Check the worktree and service state before starting.
 
 Agreed replica-set approach: the customer enters the full MongoDB connection
 string they already use, including `replicaSet` for replica sets. ReportHub must
-not hardcode `rs0` and must not silently rewrite the URI. Steps, in order:
+not hardcode `rs0` and must not silently rewrite the URI.
 
-1. Done: optional encrypted `mongodb_connection_string` on the MongoDB source
-   profile, migration `0050_mongodb_connection_string` (untracked). It was applied
-   to the live database after stopping the maintenance worker container
-   (`reporthub_celery_maintenance_worker`); the worker was restarted and
-   responded to a Celery ping. Its last task had finished before the stop.
-2. Done: `mongodb_connection_string()` in [cdc.py](./etl/cdc.py) builds the
-   Debezium URI from the stored string, or from the old host/port with
-   `authSource=admin` when none is stored. Credential encoding is preserved and
-   `replicaSet` is no longer dropped.
-3. Done: read-only `check_mongodb_replica_set()` in [cdc.py](./etl/cdc.py) calls
-   `hello` with `replicaSet` overridden to `None`, so a wrong name is reported
-   as `replica_set_name_mismatch` rather than as unreachable. Outcomes are
-   `ok`, `sharded`, `not_replica_set`, `missing_replica_set_name`,
-   `replica_set_name_mismatch`, `unreachable` and `invalid_connection_string`.
-   Live check against the fixture: `rs0` gives `ok`, a missing name gives
-   `missing_replica_set_name`, and `rsX` gives `replica_set_name_mismatch`.
-   It is not yet wired into the control plane UI.
-4. Done (unit level): tests in `DebeziumConnectorConfigTests`
-   ([tests.py](./etl/tests.py)) cover the stored-string path and each readiness
-   outcome. The form test in `SourceProfileFormTests` checks that `mongodb://`
-   and `mongodb+srv://` are accepted and other schemes are rejected. Still to do:
-   wire the decoder into ingestion, following the MongoDB checklist below.
+Completed so far: the encrypted connection-string field and migration `0050`
+(applied), the Debezium URI builder, and the read-only replica-set readiness
+check (not yet wired into the control plane UI), with unit tests. Details are in
+the checklist below.
 
-Verification: in isolated SQLite, `etl.tests.DebeziumConnectorConfigTests`,
-`SourceProfileFormTests` and `MongoIngestionTests` pass (39 tests), and
-`control_plane.test_cdc_cleanup` and `etl.test_cdc_cleanup` pass (39 tests),
-so the cleanup rerun listed below is done.
+Next step: wire the MongoDB decoder into ingestion, then validate the Debezium
+run with the stored connection string end to end.
 
 Open decisions: whether the customer string should also drive batch ingestion,
 whether readiness should check change-stream permissions, and whether
 `mongodb+srv` needs live validation.
-
-Status of the cleanup UI: the source page and attempt page split is implemented
-([cdc_cleanup_attempt.html](./control_plane/templates/control_plane/cdc_cleanup_attempt.html)).
-The focused cleanup tests pass in isolated SQLite (39 tests). The attempt page
-has not been checked in a browser.
 
 Shared-task status: no database type has reached the shared readiness and
 switching stage. PostgreSQL, MySQL, SQL Server and Oracle have basic CDC and
@@ -184,89 +133,11 @@ inventory or delete shared resources.
   establish the intended behavior. Document supported topologies, prerequisites,
   operational limits and remaining parity gaps.
 
-## Completed groundwork
+## Completed work
 
-- [x] Add source-page preparation, per-table staging, status, explicit retry
-  and cancellation, and restricted pending-cutover abandonment. Staging leaves
-  the source in CDC mode; interrupted tables are retained for manual cleanup.
-- [x] Add staging schema, engine, row-count, username and physical UUID checks,
-  plus whole-transition verification status. These checks do not prove source
-  scan completeness, equal-count data changes, or safety after validation.
-- [x] Add private checkpointed exchange/finalization and generation-publication
-  prototypes, including uncertain-command markers and atomic publication.
-  Neither path establishes a fence or safe recovery.
-- [x] Add source-row and report locks, task mode provenance, and experimental
-  external-operation records. They do not cover old workers, direct clients,
-  connection loss, or prove external requests have stopped.
-- [x] Add optional application credentials and an opt-in migration service.
-  Test candidate PostgreSQL and ClickHouse roles, a single-legacy-owner
-  transfer, and migration gating in disposable environments; production
-  provisioning and deployment remain unfinished.
-- [x] Fix query-ID propagation and exercise cancellation with real workers.
-  The tests show a delayed request can execute after worker termination even
-  after cancellation finds no active query. UI cancellation remains cooperative.
-- [x] Exercise PostgreSQL CDC changes during staging and private generation
-  publication in an opt-in live test. Tasks ran in the test process, not through
-  a production switch; this is not an end-to-end rollout or fencing proof.
-- [x] Move single-table rebuild initiation and monitoring into the control
-  plane. This is separate from source-wide switching.
-- [x] Implement staff-only rebuild-resource cleanup with read-only inventory,
-  explicit confirmation, a dedicated maintenance queue, eligibility rechecks,
-  recorded outcomes, and interruption controls. Twelve focused tests passed in
-  an isolated Django test database; external services were not exercised.
-- [x] Reconcile cleanup history defaults with migration `0048`; migration
-  consistency and the focused tests pass, and an isolated SQLite upgrade from
-  `0047` preserves existing historical values. The running database now has
-  `0047` and `0048` applied.
-- [x] Run a read-only inventory against disposable PostgreSQL, Kafka,
-  Debezium Connect and ClickHouse with unique resources and no published ports.
-  The probe checked present and absent resources, preserved a paused connector,
-  replication slot, publication, consumer group, topic and two table UUIDs,
-  and rejected an active reference, unfinished rebuild and mismatched staging
-  UUID. It did not exercise deletion, permission failures or worker recovery.
-- [x] Fix Kafka inventory compatibility for the installed kafka-python 3.0.13
-  and retain compatibility with the 2.x group-listing API. The isolated live
-  probe passed with 3.0.13; mocked tests cover both group-listing shapes and
-  15 focused cleanup tests passed with isolated SQLite and local cache.
-- [x] Fix Kafka group/topic deletion response handling for kafka-python 2.x
-  and 3.x. Mocked tests cover both response formats; a disposable live 3.0.13
-  probe confirms deletion of a paused connector, inactive group, slot,
-  publication, topic and retained ClickHouse table after control-plane
-  confirmation. The active table remains unchanged. Celery dispatch is mocked
-  and the cleanup service runs in the probe, not a maintenance worker.
-- [x] Exercise a real active Kafka group failure after confirmed cleanup:
-  completed earlier operations remain recorded, the group failure is visible,
-  and subsequent Kafka and ClickHouse resources remain untouched.
-- [x] Exercise a real PostgreSQL replication-slot permission denial after
-  inventory and confirmation. Cleanup records the failure, redacts the source
-  password and stops before the publication, topic and retained table.
-- [x] Exercise a real ClickHouse `DROP TABLE` permission denial with a
-  separate restricted runtime identity and distinct source and warehouse
-  passwords. Cleanup records failure and uncertainty while retaining the
-  active and staging tables.
-- [x] Terminate a real solo Celery maintenance worker while a read-only
-  connector configuration request is held before forwarding. With deletion
-  explicitly blocked by the test proxy and the request allowed to finish, the
-  control plane requires interruption acknowledgement, blocks a fresh
-  inventory until explicit risk acceptance, and permits a fresh inventory
-  afterwards. No deletion request was in flight; this does not establish safe
-  recovery from a delayed or uncertain deletion.
-- [x] Hold a real connector DELETE at a test proxy, kill the maintenance
-  worker, verify source deletion and new inventory are blocked, and accept the
-  risk explicitly. A fresh inventory reports the connector present; releasing
-  the old DELETE afterwards removes it. This demonstrates that worker
-  termination and fresh inventory do not prove safety.
-- [x] Block control-plane source deletion and admin source/table deletion while
-  a cleanup is queued, running or unresolved without an override. This does
-  not protect direct database changes, duplicate sources or all metadata paths.
-- [x] Persist uncertainty before potentially mutating cleanup operations, retain
-  it on failure or interruption, and block further cleanup for the same source.
-  Focused tests cover late success after interruption and read-only inventory
-  recovery. An isolated SQLite `0048` to `0049` upgrade marks existing failed
-  and running attempts uncertain; migration consistency and the updated
-  real-worker and successful-deletion probes pass. An audited administrator
-  override preserves the uncertainty and requires a fresh inventory. This does not prove an
-  uncertain deletion has terminated or implement recovery.
+Completed staging, cleanup, migration and probe work is summarised in
+[ROADMAP.md](./ROADMAP.md) and recorded in git history. Only open items are
+tracked here.
 
 ## Remaining work checklist
 
@@ -292,6 +163,8 @@ inventory or delete shared resources.
 - [ ] Extend uncertainty protection beyond the guarded deletion UI paths to
   direct record deletion, metadata changes and duplicate or recreated source
   profiles; the current source-scoped guard depends on those records.
+- [ ] Check the cleanup source and attempt pages in a browser; they have only
+  been covered by unit tests.
 - [ ] Document verified operating and recovery procedures before using cleanup
   on shared or production resources; never automatically delete retained
   resources.
