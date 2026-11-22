@@ -2,10 +2,11 @@
     <table class="w-full text-left border-collapse table-fixed">
         <thead>
             <tr class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400 bg-slate-950/40">
-                <th class="py-3 px-4" style="width: 25%;">Task Name</th>
-                <th class="py-3 px-4" style="width: 42%;">Error Summary</th>
-                <th class="py-3 px-4" style="width: 18%;">Failed At</th>
-                <th class="py-3 px-4 text-right" style="width: 15%;">Actions</th>
+                <th class="py-3 px-4">Task Name</th>
+                <th class="py-3 px-4">Error Summary</th>
+                <th class="py-3 px-4">Failed At</th>
+                <th class="py-3 px-4">Status</th>
+                <th class="py-3 px-4 text-right">Actions</th>
             </tr>
         </thead>
         <tbody class="divide-y divide-slate-800/60 text-sm">
@@ -17,8 +18,19 @@
                     <td class="py-3.5 px-4 text-rose-400 text-xs font-normal truncate" title="{{ task.error_message }}">
                         {{ task.error_message }}
                     </td>
-                    <td class="py-3.5 px-4 text-slate-400 text-xs font-mono truncate" title="{{ task.failed_timestamp }}">
-                        {{ task.failed_timestamp }}
+                    <td class="py-3.5 px-4 text-slate-400 text-xs font-mono truncate" title="{{ task.failed_timestamp|date:'M j, Y H:i:s' }}">
+                        {{ task.failed_timestamp|date:"M j, Y H:i:s"|default:"Unknown" }}
+                    </td>
+                    <td class="py-3.5 px-4 text-slate-300 text-xs">
+                        {{ task.status_label }}
+                        {% if task.attempts %}
+                        <details class="mt-2">
+                            <summary class="cursor-pointer text-indigo-300">Retry history</summary>
+                            {% for attempt in task.attempts %}
+                            <p class="mt-2">{{ attempt.created_at|date:"M j, Y H:i:s" }}: {{ attempt.get_status_display }} (task {{ attempt.task_id }}){% if attempt.error_message %} &mdash; {{ attempt.error_message }}{% endif %}</p>
+                            {% endfor %}
+                        </details>
+                        {% endif %}
                     </td>
                     <td class="py-3.5 px-4 text-right" style="white-space: nowrap; width: 15%;">
                         <div class="inline-flex items-center space-x-1.5 justify-end">
@@ -30,20 +42,23 @@
                                 class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-all">
                                     Inspect
                                 </a>
-                            <!-- Re-queue matches sky blue action button style -->
-                            <button hx-post="{% url 'control_plane:dlq_requeue' task.id %}" 
-                                hx-target="#dlq-row-{{ task.id }}"
-                                hx-swap="outerHTML"
-                                class="px-3 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 text-xs font-medium rounded-lg transition-all shadow-sm">
-                                Re-queue
-                            </button>
+                            {% if task.retryable %}
+                            <form method="post" action="{% url 'control_plane:dlq_retry' task.id %}" onsubmit="return confirm('Retry this task? Report runs may send emails or deliver files again.');">
+                                {% csrf_token %}
+                                <button type="submit" class="px-3 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 text-xs font-medium rounded-lg transition-all shadow-sm">Re-queue</button>
+                            </form>
+                            {% elif task.legacy or task.status == 'failed' and not task.retryable %}
+                            <span class="text-xs text-slate-500">Retry details unavailable</span>
+                            {% elif task.status == 'uncertain' %}
+                            <span class="text-xs text-amber-300">Review before retrying</span>
+                            {% endif %}
                         </div>
                     </td>
                 </tr>
             {% empty %}
                 <tr>
-                    <td colspan="4" class="py-12 text-center text-slate-500 text-sm">
-                        No unresolved background task failures.
+                    <td colspan="5" class="py-12 text-center text-slate-500 text-sm">
+                        No dead-letter entries match your search.
                     </td>
                 </tr>
             {% endfor %}

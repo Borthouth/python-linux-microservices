@@ -1,0 +1,18 @@
+# Evaluation only. Recombine does not validate partial_ordinal or prove completeness.
+operators:
+  - type: add
+    if: 'attributes["partial_id"] != nil'
+    field: attributes["probe.stream_identity"]
+    value: 'EXPR(toJSON([attributes["fluent.tag"], attributes["container_id"], attributes["source"], attributes["partial_id"]]))'
+  - type: recombine
+    if: 'attributes["partial_id"] != nil'
+    combine_field: body
+    combine_with: ""
+    source_identifier: attributes["probe.stream_identity"]
+    is_last_entry: 'attributes["partial_last"] == "true"'
+    overwrite_with: oldest
+    force_flush_period: 1s
+    max_log_size: 262144
+    max_batch_size: 32
+    max_unmatched_batch_size: 32
+    max_sources: 8

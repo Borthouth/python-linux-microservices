@@ -1,6 +1,6 @@
 # CDC and CDC-to-batch continuation handoff
 
-Last updated: 2026-11-14
+Last updated: 2026-11-22
 
 ## Goal and current status
 
@@ -8,7 +8,9 @@ This is the working checklist and cross-session source of truth for CDC progress
 CDC-to-batch work and the next task. MongoDB CDC parity with the relational
 sources is the current priority. Update its checkboxes and next-task section as
 work is completed; reflect overall milestones in [ROADMAP.md](./ROADMAP.md).
-Operational details are in [README.md](./README.md).
+Operational details are in [README.md](./README.md). Logging progress and its
+separate next steps are tracked in
+[OPERATIONS_LOGGING_HANDOFF.md](./OPERATIONS_LOGGING_HANDOFF.md).
 
 The goal is a safe, confirmed control-plane operation to transition a
 CDC-managed source to batch ingestion. The experimental executor remains
@@ -55,6 +57,46 @@ CDC-to-batch switching and cleanup recovery remain parked, not completed.
 Outstanding delayed requests still need service-specific termination proof or
 an explicit audited risk override; a fresh inventory is not proof. Do not
 inventory or delete shared resources.
+
+## November 17 operations checkpoint
+
+The Operations logging work improves investigation of CDC failures; it does not
+advance the CDC ingestion, readiness, fencing or switching checklists:
+
+- Structured Python and Java stdout records, source attribution and normal-size
+  exception/redaction probes are implemented. The separate Operations Plane
+  has Live logs, explicit paginated log search, saved history and saved-event AI
+  analysis. Logs are diagnostic evidence, not authoritative transition state.
+- Search results are saved page snapshots in PostgreSQL, normally up to 25
+  events per queried page; older snapshots can contain 100. Historical-entry
+  text/level/source filtering and pagination use only that saved snapshot.
+  New AI runs also use only its matching saved events, not the entire original
+  ClickHouse range. Each run retains its own filters and can be reopened.
+- Recorded Debezium messages include MongoDB change-stream/standalone failures.
+  Treat these as evidence of the recorded operation, not a current readiness
+  assessment or permission to reconfigure a shared MongoDB instance.
+  A RUNNING connector/task or successful log query does not prove CDC parity.
+- Docker transport-fragment reassembly, broad source coverage and operational
+  failure recovery remain open logging work. An AI summary cannot establish
+  that a complete exception, source event stream or cutover was captured.
+
+November 22 update: the running Collector's supervisor, source policy and
+mounted configuration match the current source files. Live delivery and
+attribution remain unverified; follow the current
+[logging handoff](./OPERATIONS_LOGGING_HANDOFF.md). The November 18 stopping
+checkpoint remains there as historical context.
+The user requested host shutdown after saving documentation. Keep OTel;
+fragment reassembly and replacement-collector work are parked. None of this
+changes the MongoDB parity priority or any CDC switching/cleanup gate.
+
+**Resume CDC work here:** wire the already-tested MongoDB decoder into ingestion,
+preserving typed BSON identity, offset/write ordering and existing batch
+behavior; then validate the stored customer URI through disposable end-to-end
+snapshot/insert/update/delete tests. Wire readiness into the Control Plane
+without silently rewriting URIs or enabling CDC. Resolve the open MongoDB
+decisions above before expanding supported behavior. Keep the experimental
+CDC-to-batch executor and MongoDB CDC gates closed until their separate safety
+and end-to-end requirements are met.
 
 ## Database CDC baseline
 
@@ -259,6 +301,7 @@ tracked here.
 
 ## Useful references
 
+- [Operations logging continuation and validation](./OPERATIONS_LOGGING_HANDOFF.md)
 - [CDC transition implementation](./control_plane/views/cdc_transition.py)
 - [Staging and cutover primitives](./etl/cdc_to_batch.py)
 - [CDC task and writer guards](./etl/tasks.py)

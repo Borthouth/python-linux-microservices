@@ -1,0 +1,8 @@
+    <div data-messages class="mx-auto mt-4 w-full max-w-7xl space-y-2 px-6 {% if not messages %}hidden{% endif %}" aria-live="polite">
+        {% for message in messages %}
+            {% include "operations_plane/components/message.html" with text=message level=message.tags %}
+        {% endfor %}
+    </div>
+<template data-message-template="info">{% include "operations_plane/components/message.html" with text="" level="info" %}</template>
+<template data-message-template="success">{% include "operations_plane/components/message.html" with text="" level="success" %}</template>
+<template data-message-template="error">{% include "operations_plane/components/message.html" with text="" level="error" %}</template>

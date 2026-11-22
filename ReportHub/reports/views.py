@@ -4,6 +4,7 @@ from django.contrib.auth.decorators import login_required, user_passes_test
 from django.shortcuts import render, get_object_or_404, redirect
 from django.http import JsonResponse
 from django.db.models import OuterRef, Subquery
+from django.db import transaction
 from django.core.paginator import Paginator
 from .models import (
     ReportDefinition, 
@@ -26,6 +27,7 @@ from django.views.decorators.http import require_POST
 from control_plane.models import SourceRelationship
 from .query_builder import relationship_groups
 from .ai_design import OllamaUnavailable, generate_report_design
+from .access import report_access_start
 from .email_webhooks import handle_email_webhook
 from .metadata_views import guard_report_creation, guard_report_mutation
 
@@ -38,7 +40,6 @@ def is_admin(user):
 
 
 @login_required
-@user_passes_test(is_admin)
 def report_list(request):
     search_query = request.GET.get('q', '').strip()
     status_filter = request.GET.get('status', '')
@@ -60,6 +61,17 @@ def report_list(request):
         downloadable_execution_pk=Subquery(downloadable_execution.values('pk')[:1]),
         downloadable_file_path=Subquery(downloadable_execution.values('file_path')[:1]),
     ).order_by('-created_at')
+
+    if not is_admin(request.user):
+        account = getattr(request.user, "control_plane_account", None)
+        if not account or not account.is_active or account.archived_at or not request.user.is_active:
+            reports = reports.none()
+        else:
+            reports = reports.filter(
+                Q(user_recipients__user=account) |
+                Q(profile_recipients__profile__is_active=True,
+                  profile_recipients__profile__memberships__user=account)
+            ).distinct()
 
     if search_query:
         reports = reports.filter(
@@ -88,6 +100,7 @@ def report_list(request):
 @login_required
 @user_passes_test(is_admin)
 @guard_report_creation
+@transaction.atomic
 def report_create(request):
     if request.method == 'POST':
         form = ReportDefinitionForm(request.POST, user=request.user)
@@ -122,6 +135,7 @@ def report_create(request):
                     
             report.save()
             form.save_m2m()
+            form.save_recipients(request.user)
             return redirect('reports:report_list')
     else:
         form = ReportDefinitionForm(user=request.user)
@@ -131,6 +145,7 @@ def report_create(request):
 @login_required
 @user_passes_test(is_admin)
 @guard_report_mutation(post_only=True, may_change_source=True)
+@transaction.atomic
 def report_edit(request, pk):
     report = get_object_or_404(ReportDefinition, pk=pk)
     previous_active_state = report.is_active
@@ -165,6 +180,7 @@ def report_edit(request, pk):
                     
             report.save()
             form.save_m2m()
+            form.save_recipients(request.user)
             return redirect('reports:report_list')
     else:
         form = ReportDefinitionForm(instance=report, user=request.user)
@@ -397,17 +413,21 @@ def ai_report_design(request):
 
 
 @login_required
-@user_passes_test(is_admin)
 def report_history(request, pk):
     report = get_object_or_404(ReportDefinition, pk=pk)
     search_query = request.GET.get('q', '').strip()
     status_filter = request.GET.get('status', '')
     executions = report.executions.prefetch_related("file_deliveries").order_by('-created_at')
+    if not is_admin(request.user):
+        start = report_access_start(report, getattr(request.user, "control_plane_account", None))
+        if not start:
+            raise Http404
+        executions = executions.filter(created_at__gte=start)
     if search_query:
-        executions = executions.filter(
-            Q(status__icontains=search_query) |
-            Q(file_path__icontains=search_query)
-        )
+        search = Q(status__icontains=search_query)
+        if is_admin(request.user):
+            search |= Q(file_path__icontains=search_query)
+        executions = executions.filter(search)
     if status_filter in dict(ReportExecution.STATUS_CHOICES):
         executions = executions.filter(status=status_filter)
     page_obj = Paginator(executions, 20).get_page(request.GET.get('page'))
@@ -456,9 +476,12 @@ def get_internal_minio_client():
 
 
 @login_required
-@user_passes_test(is_admin)
 def report_download(request, execution_pk):
-    execution = get_object_or_404(ReportExecution, pk=execution_pk)
+    execution = get_object_or_404(ReportExecution.objects.select_related("report"), pk=execution_pk)
+    if not is_admin(request.user):
+        start = report_access_start(execution.report, getattr(request.user, "control_plane_account", None))
+        if not start or not execution.created_at or execution.created_at < start or execution.status != "completed":
+            raise Http404
     
     if not execution.file_path:
         raise Http404("Report file path not found.")

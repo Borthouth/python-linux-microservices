@@ -5,14 +5,15 @@
     <div class="mb-6">
         <div>
             <h1 class="text-2xl font-extrabold text-white">Dead Letter Queue Management</h1>
-            <p class="text-slate-400 text-xs mt-1">Inspect, analyze stack traces, and re-queue failed background tasks across your infrastructure.</p>
+            <p class="text-slate-400 text-xs mt-1">Inspect failures and retry supported report and data-source tasks. Older entries without retry details cannot be requeued.</p>
+            <p class="text-slate-400 text-xs mt-1">Statuses show the last observed outcome; queued or running tasks may need review if a worker stops.</p>
         </div>
     </div>
 
     <!-- Search Component with bottom margin gap -->
     <div class="mb-6">
         {% url 'control_plane:dlq_list' as search_action_url %}
-        {% include "control_plane/components/search_bar.html" with action_url=search_action_url placeholder="Search failed tasks by name or error summary..." search_query=search_query %}
+        {% include "control_plane/components/search_bar.html" with action_url=search_action_url placeholder="Search tasks by name or error summary..." search_query=search_query filter_name="status" filter_value=status_filter filter_label="All Statuses" filter_options=filter_options %}
     </div>
 
     <!-- DLQ Table Container -->

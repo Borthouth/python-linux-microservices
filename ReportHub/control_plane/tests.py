@@ -16,6 +16,7 @@ from django.test import (
     Client, RequestFactory, SimpleTestCase, TestCase, TransactionTestCase, override_settings,
     skipUnlessDBFeature,
 )
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 from kombu.exceptions import OperationalError
@@ -27,8 +28,10 @@ from control_plane.models import (
     CdcTableRebuild,
     CdcToBatchTableCheckpoint,
     CdcToBatchTransition,
+    ControlPlaneUser,
     DbChoice,
     IngestionMode,
+    PipelineAutomationAuditLog,
     Role,
     SourceField,
     SourceProfile,
@@ -42,7 +45,6 @@ from control_plane.models import (
 )
 from control_plane.forms.transfer_destinations import TransferDestinationForm
 from control_plane.tasks import test_transfer_destination_task
-from control_plane.views.dlq import dlq_requeue_view
 from control_plane.views.dashboard import update_widget_preferences
 from etl.progress import PIPELINE_STEPS, PREPARING_INGESTION
 from etl.tasks import stage_cdc_to_batch_transition_task
@@ -171,6 +173,41 @@ class SourceConnectionPollingTests(TestCase):
                             self.assertContains(response, 'hx-trigger="every 2s"', count=1)
                         else:
                             self.assertNotContains(response, f'hx-get="{status_url}"')
+
+
+class AuditSearchTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="audit-tester", is_staff=True)
+        self.client.force_login(self.user)
+        self.url = reverse("control_plane:audit_log")
+
+    def test_initial_page_does_not_query_audit_records(self):
+        PipelineAutomationAuditLog.objects.create(name="Hidden entry", action_type="+")
+        with CaptureQueriesContext(connection) as queries:
+            response = self.client.get(self.url)
+        self.assertContains(response, "select Search to view audit logs")
+        self.assertNotContains(response, "Hidden entry")
+        audit_queries = [
+            query["sql"] for query in queries
+            if "historical" in query["sql"].lower()
+            or "pipelineautomationauditlog" in query["sql"].lower()
+        ]
+        self.assertEqual(audit_queries, [])
+
+    def test_search_and_pagination_preserve_filters_including_blank_search(self):
+        for index in range(16):
+            PipelineAutomationAuditLog.objects.create(name=f"Match {index}", action_type="~")
+        PipelineAutomationAuditLog.objects.create(name="Other entry", action_type="+")
+
+        response = self.client.get(self.url, {"q": "Match", "action": "~"})
+        self.assertEqual(response.context["page_obj"].paginator.count, 16)
+        self.assertContains(response, "q=Match&amp;action=~&amp;page=2")
+        response = self.client.get(self.url, {"q": "Match", "action": "~", "page": 2})
+        self.assertEqual(len(response.context["audit_data"]), 1)
+
+        response = self.client.get(self.url, {"q": "", "action": ""})
+        self.assertTrue(response.context["searched"])
+        self.assertContains(response, "q=&amp;action=&amp;page=2")
 
 
 class TransferDestinationTests(TestCase):
@@ -413,7 +450,7 @@ class TransferDestinationTests(TestCase):
         url = reverse("control_plane:transfer_destination_edit", args=[destination.pk])
         response = self.client.post(url, self.destination_data(name="Renamed target", password=""))
         self.assertRedirects(response, self.list_url)
-        response = self.client.get(reverse("control_plane:audit_log"))
+        response = self.client.get(reverse("control_plane:audit_log"), {"q": "Renamed target"})
         self.assertContains(response, "Renamed target")
         self.assertNotContains(response, "synthetic-password")
 
@@ -447,13 +484,13 @@ class TransferDestinationTests(TestCase):
         self.create_destination(name="Other destination", is_active=True)
         response = self.client.get(self.list_url, {"q": "target", "status": "active"})
         self.assertEqual(response.context["page_obj"].paginator.count, 16)
-        self.assertContains(response, "?page=2&q=target&status=active")
+        self.assertContains(response, "?q=target&amp;status=active&amp;page=2")
         self.assertNotContains(response, disabled.name)
         self.assertContains(response, 'value="active" selected')
         self.assertContains(response, "Clear")
         response = self.client.get(self.list_url, {"q": "target", "status": "active", "page": 2})
         self.assertEqual([item.name for item in response.context["page_obj"]], ["Target 15"])
-        self.assertContains(response, "?page=1&q=target&status=active")
+        self.assertContains(response, "?q=target&amp;status=active&amp;page=1")
         response = self.client.get(self.list_url, {"q": "target", "status": "inactive"})
         self.assertEqual([item.pk for item in response.context["page_obj"]], [disabled.pk])
         self.assertContains(response, 'value="inactive" selected')
@@ -1662,10 +1699,10 @@ class CdcRebuildMonitorTests(TestCase):
         response = self.client.get(self.url, {"q": "events", "status": "FAILED"})
 
         self.assertEqual(response.context["page_obj"].paginator.count, 21)
-        self.assertContains(response, "?page=2&q=events&status=FAILED")
+        self.assertContains(response, "?q=events&amp;status=FAILED&amp;page=2")
         response = self.client.get(self.tables_url, {"q": "events"})
         self.assertEqual(response.context["page_obj"].paginator.count, 22)
-        self.assertContains(response, "?page=2&q=events")
+        self.assertContains(response, "?q=events&amp;page=2")
 
     def test_connections_and_tables_are_searchable_and_history_is_per_table(self):
         admin = get_user_model().objects.create_user(
@@ -1743,9 +1780,9 @@ class CdcRebuildMonitorTests(TestCase):
             )
         response = self.client.get(self.sources_url, {"q": "Monitored", "status": "active"})
         self.assertEqual(response.context["page_obj"].paginator.count, 21)
-        self.assertContains(response, "?page=2&q=Monitored&status=active")
+        self.assertContains(response, "?q=Monitored&amp;status=active&amp;page=2")
         response = self.client.get(self.sources_url, {"q": "Monitored", "status": "active", "page": 2})
-        self.assertContains(response, "?page=1&q=Monitored&status=active")
+        self.assertContains(response, "?q=Monitored&amp;status=active&amp;page=1")
 
     def test_breadcrumbs_link_back_through_connection_and_tables(self):
         admin = get_user_model().objects.create_user(
@@ -1927,41 +1964,6 @@ class CdcRebuildMonitorTests(TestCase):
         apply_async.assert_not_called()
 
 
-class DlqRequeueViewTests(SimpleTestCase):
-    def test_htmx_response_escapes_task_id(self):
-        task_id = '"><script>alert(1)</script>'
-        request = RequestFactory().post(
-            "/dlq/task/requeue/", HTTP_HX_REQUEST="true"
-        )
-        request.user = get_user_model()(is_staff=True)
-
-        with patch("control_plane.views.dlq.get_redis_client") as get_redis_client:
-            get_redis_client.return_value = Mock()
-            response = dlq_requeue_view(request, task_id)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.content.decode(),
-            '<div id="dlq-row-&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;" '
-            'class="hidden"></div>',
-        )
-
-    def test_requeue_error_does_not_expose_exception_details(self):
-        request = RequestFactory().post("/dlq/task/requeue/")
-        request.user = get_user_model()(is_staff=True)
-
-        with patch("control_plane.views.dlq.get_redis_client") as get_redis_client:
-            get_redis_client.side_effect = RuntimeError("sensitive backend details")
-            with self.assertLogs("control_plane.views.dlq", level="ERROR"):
-                response = dlq_requeue_view(request, "task-id")
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            json.loads(response.content),
-            {"status": "error", "message": "Unable to re-queue task."},
-        )
-
-
 class WidgetPreferenceViewTests(SimpleTestCase):
     def test_update_error_does_not_expose_exception_details(self):
         request = RequestFactory().post(
@@ -1989,6 +1991,53 @@ class WidgetPreferenceViewTests(SimpleTestCase):
 
 
 class PipelineAutomationMessageTests(TestCase):
+    def test_pipeline_actions_follow_source_order_and_colors(self):
+        from django_celery_beat.models import IntervalSchedule, PeriodicTask
+
+        admin = get_user_model().objects.create_user(
+            username="pipeline-action-admin", is_staff=True, is_superuser=True
+        )
+        self.client.force_login(admin)
+        task = PeriodicTask.objects.create(
+            name="Actions pipeline",
+            task="etl.tasks.trigger_all_active_clickhouse_ingestion_task",
+            interval=IntervalSchedule.objects.create(every=1, period="hours"),
+        )
+        for enabled, toggle_color in ((True, "text-amber-400"), (False, "text-emerald-400")):
+            with self.subTest(enabled=enabled):
+                task.enabled = enabled
+                task.save(update_fields=["enabled"])
+                response = self.client.get(
+                    reverse("control_plane:pipeline_automation_list"), {"q": task.name}
+                )
+                html = response.content.decode()
+                run = html.index(reverse("control_plane:pipeline_automation_run", args=[task.pk]))
+                toggle = html.index(reverse("control_plane:pipeline_automation_toggle", args=[task.pk]))
+                edit = html.index(reverse("control_plane:pipeline_automation_edit", args=[task.pk]))
+                delete = html.index(reverse("control_plane:pipeline_automation_delete", args=[task.pk]))
+                self.assertLess(run, toggle)
+                self.assertLess(toggle, edit)
+                self.assertLess(edit, delete)
+                self.assertIn("text-sky-400", html[run:toggle])
+                self.assertIn(toggle_color, html[toggle:edit])
+                self.assertIn("text-slate-200", html[edit:delete])
+                self.assertIn("text-red-400", html[delete:delete + 500])
+
+    def test_flash_message_dismiss_button_matches_operations_spacing(self):
+        from django.contrib.messages import SUCCESS
+        from django.contrib.messages.storage.base import Message
+        from django.template.loader import render_to_string
+
+        html = render_to_string(
+            "control_plane/components/messages.html",
+            {"messages": [Message(SUCCESS, "Saved")]},
+        )
+        self.assertIn("gap-4", html)
+        self.assertIn("px-1", html)
+        self.assertIn('aria-label="Dismiss message"', html)
+        self.assertIn("data-dismiss-message", html)
+        self.assertIn("control_plane/js/messages.js", html)
+
     def test_manual_run_message_is_rendered_once_below_navbar(self):
         from django_celery_beat.models import IntervalSchedule, PeriodicTask
 
@@ -2091,11 +2140,11 @@ class CdcFailureDashboardTests(TestCase):
         self.assertEqual(len(response.context["page_obj"]), 10)
         self.assertContains(response, "matching-24")
         self.assertNotContains(response, "matching-00")
-        self.assertContains(response, "page=2&q=search%20%26%20test")
+        self.assertContains(response, "q=search+%26+test&amp;page=2")
         response = self.client.get(url, {"q": "search & test", "page": 3})
         self.assertEqual(len(response.context["page_obj"]), 5)
         self.assertContains(response, "matching-00")
-        self.assertContains(response, "page=2&q=search%20%26%20test")
+        self.assertContains(response, "q=search+%26+test&amp;page=2")
         response = self.client.get(url, {"page": "not-a-page"})
         self.assertEqual(response.context["page_obj"].number, 1)
 
@@ -2358,7 +2407,7 @@ class ActivePipelineExecutionsTests(TestCase):
         response = self.client.get(url, {"q": "source"})
         self.assertEqual(response.context["page_obj"].paginator.count, 12)
         self.assertEqual(len(response.context["page_obj"]), 10)
-        self.assertContains(response, "?page=2&q=source")
+        self.assertContains(response, "?q=source&amp;page=2")
         response = self.client.get(url, {"q": "SOURCE", "page": 2})
         self.assertEqual(len(response.context["page_obj"]), 2)
         self.assertContains(response, "Source 00")
@@ -2383,12 +2432,12 @@ class ActivePipelineExecutionsTests(TestCase):
         response = self.client.get(url, {"q": "source", "step": PREPARING_INGESTION})
         self.assertEqual(response.context["page_obj"].paginator.count, 11)
         self.assertContains(response, 'value="Preparing ingestion..." selected')
-        self.assertContains(response, "?page=2&q=source&step=Preparing%20ingestion...")
+        self.assertContains(response, "?q=source&amp;step=Preparing+ingestion...&amp;page=2")
         response = self.client.get(url, {"q": "source", "step": PREPARING_INGESTION, "page": 2})
         self.assertEqual(len(response.context["page_obj"]), 1)
         self.assertContains(response, "Source 00")
         self.assertNotContains(response, "Source 11")
-        self.assertContains(response, "?page=1&q=source&step=Preparing%20ingestion...")
+        self.assertContains(response, "?q=source&amp;step=Preparing+ingestion...&amp;page=1")
         response = self.client.get(url, {"q": "db.customers"})
         self.assertEqual(response.context["page_obj"].paginator.count, 1)
         self.assertContains(response, "Source 11")
@@ -2496,7 +2545,7 @@ class ActiveReportGenerationsTests(TestCase):
         response = self.client.get(url, {"q": "report"})
         self.assertEqual(response.context["page_obj"].paginator.count, 12)
         self.assertEqual(len(response.context["page_obj"]), 10)
-        self.assertContains(response, "?page=2&q=report")
+        self.assertContains(response, "?q=report&amp;page=2")
         response = self.client.get(url, {"q": "REPORT", "page": 2})
         self.assertEqual(len(response.context["page_obj"]), 2)
         self.assertContains(response, "Report 00")
@@ -2533,10 +2582,10 @@ class ActiveReportGenerationsTests(TestCase):
         url = reverse("control_plane:active_report_generations")
         response = self.client.get(url, {"q": "report", "step": "querying"})
         self.assertEqual(response.context["page_obj"].paginator.count, 12)
-        self.assertContains(response, "?page=2&q=report&step=querying")
+        self.assertContains(response, "?q=report&amp;step=querying&amp;page=2")
         self.assertContains(response, "Clear")
         response = self.client.get(url, {"q": "report", "step": "querying", "page": 2})
-        self.assertContains(response, "?page=1&q=report&step=querying")
+        self.assertContains(response, "?q=report&amp;step=querying&amp;page=1")
         self.assertEqual(len(response.context["page_obj"]), 2)
         response = self.client.get(url, {"q": "report 03", "step": "querying"})
         self.assertEqual(response.context["page_obj"].paginator.count, 1)
@@ -2584,6 +2633,8 @@ class UserStatusViewTests(TestCase):
             username="target",
             password="test-password",
         )
+        self.admin_account = ControlPlaneUser.objects.create(auth_user=self.admin, username="admin")
+        self.target_account = ControlPlaneUser.objects.create(auth_user=self.target, username="target")
         self.client.force_login(self.admin)
 
     def test_toggle_deactivates_user_and_records_audit_history(self):
@@ -2591,7 +2642,7 @@ class UserStatusViewTests(TestCase):
             reverse("control_plane:user_toggle_active", args=[self.target.pk])
         )
 
-        self.assertRedirects(response, reverse("control_plane:user_management"))
+        self.assertRedirects(response, reverse("control_plane:account_list"))
         self.target.refresh_from_db()
         self.assertFalse(self.target.is_active)
 
@@ -2603,24 +2654,91 @@ class UserStatusViewTests(TestCase):
     def test_user_status_filter_shows_only_inactive_accounts(self):
         self.target.is_active = False
         self.target.save(update_fields=["is_active"])
+        self.target_account.is_active = False
+        self.target_account.save(update_fields=["is_active"])
         response = self.client.get(
-            reverse("control_plane:user_management"),
+            reverse("control_plane:account_list"),
             {"status": "inactive"},
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, self.target.username)
         self.assertEqual(
             [user.pk for user in response.context["page_obj"].object_list],
-            [self.target.pk],
+            [self.target_account.pk],
         )
+
+    def test_user_list_omits_assigned_sources_column(self):
+        response = self.client.get(reverse("control_plane:account_list"))
+        self.assertNotContains(response, "Assigned Sources")
+        self.assertNotContains(response, "No sources assigned")
+        self.assertNotContains(response, ">User</th>")
+        self.assertContains(response, reverse("control_plane:account_source_access", args=[self.target_account.pk]))
+
+        response = self.client.get(reverse("control_plane:account_list"), {"q": "no-such-user"})
+        self.assertContains(response, 'colspan="5"')
+        self.assertContains(response, "No Control Plane accounts found.")
+
+    def test_user_pagination_is_separate_and_preserves_filters(self):
+        for index in range(16):
+            user = self.user_model.objects.create_user(username=f"paging-user-{index:02d}")
+            ControlPlaneUser.objects.create(auth_user=user, username=user.username)
+        url = reverse("control_plane:account_list")
+        response = self.client.get(url, {"q": "paging-user", "status": "active"})
+        html = response.content.decode()
+        self.assertRegex(
+            html,
+            r'</table>\s*</div>\s*</section>\s*<div class="mt-6 flex items-center justify-between bg-gray-900',
+        )
+        self.assertContains(response, "?q=paging-user&amp;status=active&amp;page=2")
+        self.assertContains(response, "Showing page")
+        response = self.client.get(
+            url, {"q": "paging-user", "status": "active", "page": 2}
+        )
+        self.assertContains(response, "?q=paging-user&amp;status=active&amp;page=1")
+        self.assertEqual(len(response.context["page_obj"]), 1)
+
+    def test_user_actions_match_source_order_and_colors(self):
+        for active, toggle_color, toggle_label in (
+            (True, "text-amber-400", "Deactivate"),
+            (False, "text-emerald-400", "Activate"),
+        ):
+            with self.subTest(active=active):
+                self.target.is_active = active
+                self.target.save(update_fields=["is_active"])
+                self.target_account.is_active = active
+                self.target_account.save(update_fields=["is_active"])
+                response = self.client.get(
+                    reverse("control_plane:account_list"), {"q": self.target.username}
+                )
+                html = response.content.decode()
+                manage = html.index(reverse("control_plane:account_source_access", args=[self.target_account.pk]))
+                toggle = html.index(reverse("control_plane:user_toggle_active", args=[self.target.pk]))
+                edit = html.index(f'href="{reverse("control_plane:account_edit", args=[self.target_account.pk])}"')
+                self.assertLess(manage, toggle)
+                self.assertLess(toggle, edit)
+                self.assertIn("text-sky-400", html[manage:toggle])
+                self.assertIn(toggle_color, html[toggle:edit])
+                self.assertIn(toggle_label, html[toggle:edit])
+                self.assertIn("text-slate-200", html[edit:edit + 300])
+
+    def test_current_user_deactivation_stays_disabled_before_edit(self):
+        response = self.client.get(
+            reverse("control_plane:account_list"), {"q": self.admin.username}
+        )
+        html = response.content.decode()
+        manage = html.index(reverse("control_plane:account_source_access", args=[self.admin_account.pk]))
+        disabled = html.index("You cannot deactivate your own account")
+        edit = html.index(f'href="{reverse("control_plane:account_edit", args=[self.admin_account.pk])}"')
+        self.assertLess(manage, disabled)
+        self.assertLess(disabled, edit)
+        self.assertIn('disabled', html[manage:disabled])
 
     def test_admin_cannot_deactivate_their_own_account(self):
         response = self.client.post(
             reverse("control_plane:user_toggle_active", args=[self.admin.pk])
         )
 
-        self.assertRedirects(response, reverse("control_plane:user_management"))
+        self.assertRedirects(response, reverse("control_plane:account_list"))
         self.admin.refresh_from_db()
         self.assertTrue(self.admin.is_active)
 
@@ -2632,7 +2750,7 @@ class UserStatusViewTests(TestCase):
             reverse("control_plane:user_toggle_active", args=[self.target.pk])
         )
 
-        self.assertRedirects(response, reverse("control_plane:user_management"))
+        self.assertRedirects(response, reverse("control_plane:account_list"))
         self.target.refresh_from_db()
         self.assertTrue(self.target.is_active)
         history = TrackedUser.history.filter(id=self.target.pk).latest()

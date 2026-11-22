@@ -1,0 +1,33 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-slate-950 slate-scrollbar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token }}">
+    <title>{% block title %}ReportHub Operations Plane{% endblock %}</title>
+    {% if operations_tailwind_cdn_enabled %}<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>{% endif %}
+    <link rel="stylesheet" href="{% static 'control_plane/css/scrollbars.css' %}">
+    {% block head %}{% endblock %}
+</head>
+<body class="flex min-h-full flex-col bg-slate-950 font-sans antialiased text-slate-100">
+    {% include "operations_plane/components/navbar.html" %}
+    {% include "operations_plane/components/messages.html" %}
+    {% include "operations_plane/logs/components/log_dialog.html" %}
+    <main class="mx-auto w-full max-w-screen-2xl flex-1 px-5 py-6 sm:px-8 sm:py-8">
+        {% include "operations_plane/components/breadcrumbs.html" %}
+        {% block content %}{% endblock %}
+    </main>
+    <footer class="border-t border-slate-800 bg-slate-950">
+        <div class="mx-auto flex max-w-screen-2xl flex-col gap-1 px-5 py-4 text-[11px] text-slate-500 sm:flex-row sm:items-center sm:justify-between sm:px-8">
+            <span>ReportHub Operations Plane</span>
+            <span>Restricted operations workspace</span>
+        </div>
+    </footer>
+    <script src="{% static 'operations_plane/js/notifications.js' %}{% if operations_tailwind_cdn_enabled %}?v={% now 'U' %}{% endif %}" defer></script>
+    <script src="{% static 'operations_plane/js/navbar.js' %}" defer></script>
+    <script src="{% static 'operations_plane/js/log_details.js' %}{% if operations_tailwind_cdn_enabled %}?v={% now 'U' %}{% endif %}" defer></script>
+    <script src="{% static 'operations_plane/js/log_analysis.js' %}{% if operations_tailwind_cdn_enabled %}?v={% now 'U' %}{% endif %}" defer></script>
+    {% block javascript %}{% endblock %}
+</body>
+</html>

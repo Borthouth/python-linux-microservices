@@ -10,7 +10,7 @@ from django.urls import reverse
 from kombu.exceptions import OperationalError
 import paramiko
 
-from control_plane.models import SourceField, SourceProfile, SourceTable, TransferDestination
+from control_plane.models import ControlPlaneUser, SourceField, SourceProfile, SourceTable, TransferDestination
 from reports.delivery import (
     DeliveryError, deliver_report_file_task, destination_signature,
     queue_delivery, queue_report_deliveries,
@@ -56,6 +56,11 @@ class ReportDeliveryTests(TestCase):
         return ReportFileDelivery.objects.create(**data)
 
     def test_edit_saves_multiple_destinations_independently_of_email(self):
+        auth_user = get_user_model().objects.create_user(username=str(uuid4()))
+        recipient = ControlPlaneUser.objects.create(
+            auth_user=auth_user, username="delivery-recipient",
+            email="synthetic@example.test",
+        )
         other = TransferDestination.objects.create(
             name="Second SFTP", host="other.test", username="writer", password="synthetic",
             is_active=True, host_key_sha256=self.destination.host_key_sha256,
@@ -65,12 +70,13 @@ class ReportDeliveryTests(TestCase):
             "base_table": self.report.base_table_id, "export_format": "csv",
             "selected_fields_json": '["id"]', "is_file_delivery_active": "on",
             "transfer_destinations": [self.destination.pk, other.pk],
-            "is_email_active": "on", "email_recipients": "synthetic@example.test",
+            "is_email_active": "on", "user_recipients": [recipient.pk],
         })
         self.assertRedirects(response, reverse("reports:report_list"))
         self.report.refresh_from_db()
         self.assertTrue(self.report.is_file_delivery_active)
         self.assertTrue(self.report.is_email_active)
+        self.assertTrue(self.report.user_recipients.filter(user=recipient).exists())
         self.assertSetEqual(
             set(self.report.transfer_destinations.values_list("pk", flat=True)),
             {self.destination.pk, other.pk},

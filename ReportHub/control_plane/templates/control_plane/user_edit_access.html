@@ -1,7 +1,7 @@
 {% extends 'control_plane/base.html' %}
 {% load static %}
 
-{% block title %}Manage Access: {{ target_user.username }} - ReportHub{% endblock %}
+{% block title %}Manage Access: {{ target_identity.label }} - ReportHub{% endblock %}
 
 {% block content %}
     {% include 'control_plane/user/user_edit_access_content.html' %}

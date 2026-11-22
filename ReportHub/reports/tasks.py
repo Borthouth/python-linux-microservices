@@ -145,6 +145,8 @@ def send_report_email_task(self, report_id, execution_id=None):
     recording an audit log for every attempt.
     """
     from .models import EmailAuditLog, ReportDefinition, ReportExecution
+    from .access import report_access_start, report_recipient_accounts
+    from control_plane.models import ControlPlaneUser
     
     report = None
     execution = None
@@ -152,12 +154,36 @@ def send_report_email_task(self, report_id, execution_id=None):
     
     try:
         report = ReportDefinition.objects.get(pk=report_id)
-        recipients = report.get_recipient_list()
-        recipient_str = ", ".join(recipients)
-
-        if not report.is_email_active or not recipients:
+        if not report.is_email_active:
             logger.info(f"Email notifications disabled or no recipients configured for report: {report.name}")
             return f"Skipped: Email inactive or empty for {report.name}"
+
+        if not execution_id:
+            raise ValueError("A report execution is required for authorized email delivery.")
+        execution = ReportExecution.objects.get(pk=execution_id, report=report)
+        skipped = []
+        eligible_ids = []
+        for account in report_recipient_accounts(report):
+            access_start = report_access_start(report, account)
+            if access_start and execution.created_at and execution.created_at >= access_start and account.email:
+                recipients.append(account.email)
+                eligible_ids.append(account.pk)
+            else:
+                skipped.append(account.email or f"User ID {account.auth_user_id}")
+        if skipped:
+            EmailAuditLog.objects.create(
+                report=report, execution=execution, recipients=", ".join(skipped),
+                status="skipped", error_message="Recipient inactive or not authorized for this run.",
+            )
+        recipient_str = ", ".join(recipients)
+        if not recipients:
+            logger.warning("No authorized email recipients for report %s execution %s", report.pk, execution.pk)
+            if not skipped:
+                EmailAuditLog.objects.create(
+                    report=report, execution=execution, recipients="", status="skipped",
+                    error_message="No user or profile recipients configured.",
+                )
+            return "Skipped: No authorized recipients."
 
         subject = f"[ReportHub] Automated Report Output: {report.name}"
         body = (
@@ -179,7 +205,6 @@ def send_report_email_task(self, report_id, execution_id=None):
         # Retrieve and attach the report file artifact from MinIO if execution_id is provided
         if execution_id:
             try:
-                execution = ReportExecution.objects.get(pk=execution_id)
                 if execution.file_path:
                     endpoint = getattr(settings, 'AWS_S3_ENDPOINT_URL', 'http://minio:9000')
                     if endpoint.startswith('http://'): endpoint = endpoint[7:]
@@ -204,6 +229,25 @@ def send_report_email_task(self, report_id, execution_id=None):
                     email.attach(filename, file_data, content_type)
             except Exception as attachment_err:
                 logger.warning(f"Could not attach report artifact to email for execution {execution_id}: {attachment_err}")
+
+        recipients = []
+        skipped = []
+        for account in ControlPlaneUser.objects.filter(pk__in=eligible_ids).select_related("auth_user"):
+            access_start = report_access_start(report, account)
+            if access_start and execution.created_at >= access_start and account.email:
+                recipients.append(account.email)
+            else:
+                skipped.append(account.email or f"User ID {account.auth_user_id}")
+        if skipped:
+            EmailAuditLog.objects.create(
+                report=report, execution=execution, recipients=", ".join(skipped),
+                status="skipped", error_message="Recipient inactive or not authorized at dispatch.",
+            )
+        if not recipients:
+            logger.warning("No authorized email recipients remain for report %s execution %s", report.pk, execution.pk)
+            return "Skipped: No authorized recipients remain."
+        email.to = recipients
+        recipient_str = ", ".join(recipients)
 
         # Send Email via SMTP / Mailpit
         email.send(fail_silently=False)
@@ -250,6 +294,10 @@ def execute_report_task(self, report_id, execution_id=None):
         ) if report.is_file_delivery_active else []
 
         execution, artifact_attempt = _start_report_execution(report, execution_id)
+        set_task_progress(
+            task_id, percentage=5, status="RUNNING",
+            current_step="Initializing report execution...", execution_id=str(execution.pk),
+        )
 
         # Check cancellation early
         execution.refresh_from_db()
@@ -530,7 +578,10 @@ def execute_report_task(self, report_id, execution_id=None):
                     ])
         if 'task_id' in locals():
             status_val = "CANCELLED" if isinstance(e, InterruptedError) else "FAILED"
-            set_task_progress(task_id, percentage=100, status=status_val, error=str(e))
+            set_task_progress(
+                task_id, percentage=100, status=status_val, error=str(e),
+                execution_id=str(execution.pk) if execution else None,
+            )
         raise
 
     if delivery_destinations:

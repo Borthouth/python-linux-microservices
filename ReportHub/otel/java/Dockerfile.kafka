@@ -1,0 +1,25 @@
+FROM apache/kafka:3.8.0 AS kafka_base
+
+FROM eclipse-temurin:17-jdk AS compiler
+COPY --from=kafka_base /opt/kafka/libs/ /kafka-libs/
+WORKDIR /src
+COPY JsonLayout.java LoggingProbe.java ./
+RUN javac --release 11 -cp '/kafka-libs/*' -d /classes JsonLayout.java \
+    && jar --create --file /reporthub-logging.jar -C /classes . \
+    && javac --release 11 -cp '/kafka-libs/*' -d /probe-classes LoggingProbe.java \
+    && jar --create --file /logging-probe.jar -C /probe-classes .
+
+FROM kafka_base AS runtime
+COPY --from=compiler /reporthub-logging.jar /opt/kafka/libs/
+USER root
+RUN sed -i \
+    -e 's|^log4j.appender.stdout.layout=.*|log4j.appender.stdout.layout=reporthub.logging.JsonLayout|' \
+    -e '/^log4j.appender.stdout.layout.ConversionPattern=/d' \
+    /etc/kafka/docker/log4j.properties /opt/kafka/config/log4j.properties
+USER appuser
+
+FROM runtime AS probe
+COPY --from=compiler /logging-probe.jar /opt/kafka/libs/
+ENTRYPOINT ["java", "-Dlog4j.configuration=file:/opt/kafka/config/log4j.properties", "-Dkafka.logs.dir=/tmp", "-cp", "/opt/kafka/libs/*", "LoggingProbe"]
+
+FROM runtime AS kafka

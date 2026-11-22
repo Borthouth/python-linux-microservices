@@ -1,0 +1,29 @@
+{% for field in form %}
+    {% if field.name == 'announcement_permissions' %}
+    <fieldset>
+        <legend class="block text-xs font-medium text-slate-300 uppercase mb-1.5">{{ field.label }}</legend>
+        <div class="space-y-2 text-sm text-slate-300">
+            {% regroup field by data.value.instance.category as permission_groups %}
+            {% for group in permission_groups %}
+            <h3 class="font-semibold text-white">{{ group.grouper }}</h3>
+            {% for checkbox in group.list %}
+            <label for="{{ checkbox.id_for_label }}" class="flex items-start gap-2">
+                {{ checkbox.tag }}
+                <span>{{ checkbox.choice_label }}<span class="block text-xs text-slate-400">{{ checkbox.data.value.instance.description }}</span></span>
+            </label>
+            {% endfor %}
+            {% empty %}<p class="text-slate-500">No active feature permissions available.</p>{% endfor %}
+        </div>
+        <p class="text-xs text-slate-500 mt-2">{{ field.help_text }}</p>
+        <a href="{% url 'control_plane:permission_list' %}" class="inline-block mt-2 text-xs text-indigo-400 hover:text-indigo-300">View permission catalogue</a>
+        {% for error in field.errors %}<p class="text-xs text-red-400 mt-1">{{ error }}</p>{% endfor %}
+    </fieldset>
+    {% else %}
+    <div>
+        <label for="{{ field.id_for_label }}" class="block text-xs font-medium text-slate-300 uppercase mb-1.5">{{ field.label }}</label>
+        {{ field }}
+        {% for error in field.errors %}<p class="text-xs text-red-400 mt-1">{{ error }}</p>{% endfor %}
+    </div>
+    {% endif %}
+{% endfor %}
+{% for error in form.non_field_errors %}<p class="text-xs text-red-400">{{ error }}</p>{% endfor %}

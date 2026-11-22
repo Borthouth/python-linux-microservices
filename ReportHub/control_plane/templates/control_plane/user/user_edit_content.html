@@ -1,7 +1,7 @@
 <div class="max-w-7xl mx-auto px-6 py-8">
     <div class="mb-6">
         <div>
-            <h1 class="text-2xl font-extrabold text-white">Edit User: {{ target_user.username }}</h1>
+            <h1 class="text-2xl font-extrabold text-white">Edit User: {{ target_identity.label }}</h1>
             <p class="text-slate-400 text-xs mt-1">Update profile information, screen-level access roles, or reset user credentials.</p>
         </div>
     </div>
@@ -16,7 +16,7 @@
                 <label class="block text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">
                     Username (Locked)
                 </label>
-                <input type="text" value="{{ target_user.username }}" disabled 
+                <input type="text" value="{{ target_identity.username|default:'Unavailable' }}" disabled
                        class="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-slate-500 text-sm cursor-not-allowed">
                 <p class="text-xs text-slate-500 mt-1">Usernames cannot be changed to protect audit log consistency.</p>
             </div>

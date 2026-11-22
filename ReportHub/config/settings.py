@@ -35,6 +35,7 @@ DEBUG = env('DEBUG')
 FIELD_ENCRYPTION_KEY = env('FIELD_ENCRYPTION_KEY')
 
 ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=['localhost', '127.0.0.1'])
+OPERATIONS_HOST = env('OPERATIONS_HOST', default='').strip().lower()
 
 # Application definition
 
@@ -48,6 +49,7 @@ INSTALLED_APPS = [
     'storages',  # Required for django-storages (MinIO S3 backend)
     'simple_history',
     'control_plane',
+    'operations_plane',
     'etl',
     'reports',
     'django_celery_beat', # Required for database-backed periodic task scheduling
@@ -59,6 +61,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',  # Prevents Cross-Site Request Forgery
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'operations_plane.middleware.OperationsRealmMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django_auto_logout.middleware.auto_logout',    
     'django.middleware.clickjacking.XFrameOptionsMiddleware', # Prevents Clickjacking (UI redressing)
@@ -140,6 +143,14 @@ CELERY_TASK_QUEUES = {
         'exchange': 'queue_maintenance',
         'routing_key': 'queue_maintenance',
     },
+    'queue_operations_logs': {
+        'exchange': 'queue_operations_logs',
+        'routing_key': 'queue_operations_logs',
+    },
+    'queue_operations_ai': {
+        'exchange': 'queue_operations_ai',
+        'routing_key': 'queue_operations_ai',
+    },
 }
 
 CELERY_TASK_DEFAULT_QUEUE = 'queue_warm'
@@ -186,6 +197,7 @@ TEMPLATES = [
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
                 'control_plane.context_processors.breadcrumbs_processor',
+                'operations_plane.context_processors.tailwind_cdn',
             ],
         },
     },
@@ -195,7 +207,10 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 # Content Security Policy (CSP) Settings
 CSP_DEFAULT_SRC = ("'self'",)
-CSP_SCRIPT_SRC = ("'self'",)  # Only allow scripts from your own domain
+CSP_SCRIPT_SRC = ("'self'",)
+if DEBUG:
+    # Tailwind's browser CDN uses runtime code generation during development.
+    CSP_SCRIPT_SRC += ("https://cdn.jsdelivr.net", "'unsafe-eval'")
 CSP_STYLE_SRC = ("'self'", "'unsafe-inline'",)  # Adjust if using inline styles
 CSP_IMG_SRC = ("'self'", "data:",)
 
@@ -254,6 +269,12 @@ CLICKHOUSE_USER, CLICKHOUSE_PASSWORD = service_credentials(
     os.environ, "APP_CLICKHOUSE",
     env('CLICKHOUSE_USER', default='default'),
     env('CLICKHOUSE_PASSWORD', default='your_secure_password'),
+)
+OPERATIONS_LOGS_CLICKHOUSE_USER, OPERATIONS_LOGS_CLICKHOUSE_PASSWORD = service_credentials(
+    os.environ,
+    "OPERATIONS_LOGS_CLICKHOUSE",
+    CLICKHOUSE_USER,
+    CLICKHOUSE_PASSWORD,
 )
 
 # Experimental groundwork; does not by itself enable CDC-to-batch cutover.
@@ -331,3 +352,34 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'json': {'()': 'config.logging.JsonLogFormatter'},
+    },
+    'filters': {
+        'require_debug_false': {'()': 'django.utils.log.RequireDebugFalse'},
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'json',
+        },
+        'mail_admins': {
+            'class': 'django.utils.log.AdminEmailHandler',
+            'level': 'ERROR',
+            'filters': ['require_debug_false'],
+        },
+    },
+    'root': {'handlers': ['console'], 'level': 'WARNING'},
+    'loggers': {
+        'django': {
+            'handlers': ['console', 'mail_admins'], 'level': 'INFO', 'propagate': False,
+        },
+        'django.server': {
+            'handlers': ['console'], 'level': 'INFO', 'propagate': False,
+        },
+    },
+}

@@ -1,0 +1,57 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}Shared Access Profiles - ReportHub{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-6 py-8">
+    <div class="flex flex-wrap items-center justify-between gap-4 mb-8">
+        <div>
+            <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">Shared Access Profiles</h1>
+            <p class="text-sm text-slate-400">Assign reusable profiles to users to share source access and feature permissions.</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+            <a href="{% url 'control_plane:permission_list' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all">Permission catalogue</a>
+            <a href="{% url 'control_plane:profile_create' %}" class="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">Add Access Profile</a>
+        </div>
+    </div>
+    {% url 'control_plane:profile_list' as search_action_url %}
+    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search profile name or description..." search_query=search_query filter_name="status" filter_value=status_filter filter_label="All Statuses" filter_options=filter_options %}
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="border-b border-slate-800 text-xs uppercase tracking-wider text-slate-400">
+                        <th class="py-3 px-4">Name</th>
+                        <th class="py-3 px-4">Description</th>
+                        <th class="py-3 px-4">Members</th>
+                        <th class="py-3 px-4">Status</th>
+                        <th class="py-3 px-4 text-right">Actions</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/60 text-sm">
+                    {% for profile in page_obj %}
+                    <tr class="hover:bg-slate-800/40 transition-all">
+                        <td class="py-3.5 px-4 font-medium text-white">{{ profile.name }}</td>
+                        <td class="py-3.5 px-4 text-slate-300">{{ profile.description|default:"No description" }}</td>
+                        <td class="py-3.5 px-4 text-slate-300">{{ profile.memberships.count }}</td>
+                        <td class="py-3.5 px-4">
+                            {% if profile.is_active %}
+                            <span class="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full text-xs font-semibold">Active</span>
+                            {% else %}
+                            <span class="px-2.5 py-1 bg-red-500/10 border border-red-500/20 text-red-400 rounded-full text-xs font-semibold">Inactive</span>
+                            {% endif %}
+                        </td>
+                        <td class="py-3.5 px-4 text-right">
+                            <a href="{% url 'control_plane:profile_edit' profile.pk %}" class="inline-flex px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-all">Edit</a>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="5" class="py-12 text-center text-slate-500">{% if search_query or status_filter %}No access profiles match your search.{% else %}No access profiles yet. Select Add Access Profile to create one.{% endif %}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+    {% include 'control_plane/components/pagination.html' %}
+</div>
+{% endblock %}

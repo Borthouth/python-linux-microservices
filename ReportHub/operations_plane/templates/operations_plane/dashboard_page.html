@@ -1,0 +1,16 @@
+{% extends "operations_plane/base.html" %}
+{% load static %}
+
+{% block title %}Dashboard | ReportHub Operations Plane{% endblock %}
+
+{% block head %}
+    <meta name="update-widget-preferences-url" content="{% url 'operations_plane:update_widget_preferences' %}">
+{% endblock %}
+
+{% block content %}
+    {% include "operations_plane/dashboard/dashboard_content.html" %}
+{% endblock %}
+
+{% block javascript %}
+    <script src="{% static 'operations_plane/js/dashboard.js' %}" defer></script>
+{% endblock %}

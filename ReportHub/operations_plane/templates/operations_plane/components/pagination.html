@@ -1,0 +1,17 @@
+{% if pagination.previous_url or pagination.next_url %}
+<nav aria-label="Results pagination" class="mt-6 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-gray-800 bg-gray-900 px-6 py-4 shadow-xl">
+    <p class="text-xs text-gray-400">{{ pagination.summary }}</p>
+    <div class="flex items-center gap-2">
+        {% if pagination.previous_url %}
+            <a href="{{ pagination.previous_url }}" rel="prev" class="rounded-xl border border-gray-700 bg-gray-800 px-3.5 py-2 text-xs font-medium text-gray-300 transition hover:bg-gray-700 hover:text-white">&larr; Previous</a>
+        {% else %}
+            <span aria-disabled="true" class="cursor-not-allowed rounded-xl border border-gray-800 bg-gray-950/40 px-3.5 py-2 text-xs font-medium text-gray-600">&larr; Previous</span>
+        {% endif %}
+        {% if pagination.next_url %}
+            <a href="{{ pagination.next_url }}" rel="next" class="rounded-xl border border-gray-700 bg-gray-800 px-3.5 py-2 text-xs font-medium text-gray-300 transition hover:bg-gray-700 hover:text-white">Next &rarr;</a>
+        {% else %}
+            <span aria-disabled="true" class="cursor-not-allowed rounded-xl border border-gray-800 bg-gray-950/40 px-3.5 py-2 text-xs font-medium text-gray-600">Next &rarr;</span>
+        {% endif %}
+    </div>
+</nav>
+{% endif %}

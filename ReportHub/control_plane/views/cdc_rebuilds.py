@@ -10,6 +10,7 @@ from django.urls import reverse
 from django.views.decorators.http import require_http_methods, require_POST
 
 from control_plane.breadcrumbs import get_breadcrumbs_for_request
+from control_plane.access import authorized_source_ids
 from control_plane.models import (
     CdcTableRebuild,
     CdcToBatchTransition,
@@ -18,7 +19,6 @@ from control_plane.models import (
     Role,
     SourceProfile,
     SourceTable,
-    UserSourceAccess,
 )
 from etl.tasks import (
     create_cdc_table_rebuild_record,
@@ -48,15 +48,15 @@ def _visible_rebuilds(user):
     if _is_global_admin(user):
         return rebuilds
     return rebuilds.filter(
-        source_table__source__user_access__user=user
-    ).distinct()
+        source_table__source_id__in=authorized_source_ids(user),
+    )
 
 
 def _visible_sources(user):
     sources = SourceProfile.objects.all()
     if _is_global_admin(user):
         return sources
-    return sources.filter(user_access__user=user).distinct()
+    return sources.filter(pk__in=authorized_source_ids(user))
 
 
 def _visible_rebuild_tables(user):
@@ -77,11 +77,10 @@ def _return_url(request, table):
 
 
 def _can_resume_rebuild(user, source_id):
-    return _is_global_admin(user) or UserSourceAccess.objects.filter(
-        user=user,
-        source_id=source_id,
+    return _is_global_admin(user) or source_id in authorized_source_ids(
+        user,
         role=Role.ADMIN,
-    ).exists()
+    )
 
 
 def _manageable_source_tables(user):
@@ -89,9 +88,8 @@ def _manageable_source_tables(user):
     if _is_global_admin(user):
         return tables
     return tables.filter(
-        source__user_access__user=user,
-        source__user_access__role=Role.ADMIN,
-    ).distinct()
+        source_id__in=authorized_source_ids(user, role=Role.ADMIN),
+    )
 
 
 def _startable_source_tables(user, query):

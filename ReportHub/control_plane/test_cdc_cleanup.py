@@ -180,7 +180,7 @@ class CdcResourceCleanupViewTests(TestCase):
         list_url = reverse("control_plane:cdc_cleanup_list")
         response = self.client.get(list_url, {"q": "Cleanup", "status": "active"})
         self.assertEqual(response.context["page_obj"].paginator.count, 21)
-        self.assertContains(response, "?page=2&q=Cleanup&status=active")
+        self.assertContains(response, "?q=Cleanup&amp;status=active&amp;page=2")
         self.assertContains(response, "1 source with unresolved uncertain cleanup operations")
         self.assertNotContains(response, "Inactive cleanup source")
         self.assertNotContains(response, self.rebuild.connector_name)
@@ -191,7 +191,7 @@ class CdcResourceCleanupViewTests(TestCase):
         self.assertContains(response, '<option value="inactive" selected>Inactive</option>', html=True)
         self.assertContains(response, f'href="{list_url}"')
         response = self.client.get(list_url, {"q": "Cleanup", "status": "active", "page": 2})
-        self.assertContains(response, "?page=1&q=Cleanup&status=active")
+        self.assertContains(response, "?q=Cleanup&amp;status=active&amp;page=1")
 
     def test_source_page_scopes_generations_and_uncertainty(self):
         other = SourceProfile.objects.create(

@@ -13,6 +13,7 @@ staticfiles/
 venv/
 env/
 ENV/
+node_modules/
 
 # IDEs and Editors
 .vscode/
@@ -28,6 +29,12 @@ docker/redis_data/
 docker/redis_data/
 docker/redis_data/
 docker/minio_data/
+
+# Keep edited Operations list templates despite the root logs/ rule.
+!operations_plane/templates/operations_plane/logs/
+operations_plane/templates/operations_plane/logs/*
+!operations_plane/templates/operations_plane/logs/search_history.html
+!operations_plane/templates/operations_plane/logs/logs_page.html
 docker/postgres_data/
 docker/clickhouse/data/
 docker/redis_data/

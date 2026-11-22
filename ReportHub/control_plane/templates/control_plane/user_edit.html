@@ -1,7 +1,7 @@
 {% extends 'control_plane/base.html' %}
 {% load static %}
 
-{% block title %}Edit User: {{ target_user.username }} - Control Plane{% endblock %}
+{% block title %}Edit User: {{ target_identity.label }} - Control Plane{% endblock %}
 
 {% block content %}
     {% include 'control_plane/user/user_edit_content.html' %}

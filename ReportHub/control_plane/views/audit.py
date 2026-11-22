@@ -9,6 +9,22 @@ from control_plane.models import PipelineAutomationAuditLog
 
 @login_required
 def audit_log_view(request):
+    q = request.GET.get('q', '').strip()
+    action_type = request.GET.get('action', '').strip()
+    searched = 'q' in request.GET or 'action' in request.GET
+    filter_options = [
+        {'value': '+', 'label': 'Created (+)'},
+        {'value': '~', 'label': 'Updated (~)'},
+        {'value': '-', 'label': 'Deleted (-)'},
+    ]
+    if not searched:
+        return render(request, 'control_plane/audit_list.html', {
+            'search_query': q,
+            'selected_action': action_type,
+            'filter_options': filter_options,
+            'searched': False,
+        })
+
     cp_config = apps.get_app_config('control_plane')
     all_history_entries = []
     
@@ -32,7 +48,6 @@ def audit_log_view(request):
         reverse=True
     )
     
-    q = request.GET.get('q', '').strip()
     if q:
         filtered_list = []
         for entry in audit_list:
@@ -42,7 +57,6 @@ def audit_log_view(request):
                 filtered_list.append(entry)
         audit_list = filtered_list
         
-    action_type = request.GET.get('action', '').strip()
     if action_type in ['+', '~', '-']:
         audit_list = [entry for entry in audit_list if entry.history_type == action_type]
 
@@ -126,10 +140,7 @@ def audit_log_view(request):
         'audit_data': audit_data,
         'search_query': q,
         'selected_action': action_type,
-        'filter_options': [
-            {'value': '+', 'label': 'Created (+)'},
-            {'value': '~', 'label': 'Updated (~)'},
-            {'value': '-', 'label': 'Deleted (-)'},
-        ],
+        'filter_options': filter_options,
+        'searched': True,
     }
     return render(request, 'control_plane/audit_list.html', context)

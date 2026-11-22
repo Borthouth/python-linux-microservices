@@ -2,6 +2,7 @@ import uuid
 
 from django.db import models
 from django.db.models import Q
+from django.db.models.functions import Lower, Trim
 from django.urls import reverse
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -132,6 +133,46 @@ class TimeStampedAuditedModel(models.Model):
     class Meta:
         abstract = True  # Tells Django not to create a database table for this model
 
+
+class DeadLetterTask(models.Model):
+    class Status(models.TextChoices):
+        FAILED = "failed", "Failed"
+        DISPATCHING = "dispatching", "Publishing"
+        QUEUED = "queued", "Queued"
+        RUNNING = "running", "Running"
+        SUCCEEDED = "succeeded", "Succeeded"
+        FAILED_AGAIN = "failed_again", "Failed again"
+        UNCERTAIN = "uncertain", "Needs review"
+        CANCELLED = "cancelled", "Cancelled"
+
+    original_task_id = models.CharField(max_length=255, unique=True)
+    task_name = models.CharField(max_length=255)
+    target_id = models.CharField(max_length=255, blank=True)
+    original_execution_id = models.CharField(max_length=36, blank=True)
+    error_message = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.FAILED)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-pk"]
+
+
+class DeadLetterAttempt(models.Model):
+    failure = models.ForeignKey(DeadLetterTask, on_delete=models.CASCADE, related_name="attempts")
+    task_id = models.UUIDField(unique=True, default=uuid.uuid4, editable=False)
+    execution_id = models.CharField(max_length=36, blank=True)
+    status = models.CharField(max_length=20, choices=DeadLetterTask.Status.choices)
+    error_message = models.TextField(blank=True)
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="dlq_attempts"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-pk"]  # Tells Django not to create a database table for this model
+
 class Role(models.TextChoices):
     VIEWER = 'VIEWER', 'Viewer'
     ANALYST = 'ANALYST', 'Analyst/Builder'
@@ -234,6 +275,156 @@ class UserSourceAccess(TimeStampedAuditedModel):
 
     def get_audit_display_name(self):
         return f"Access: {self.user.username} &rarr; {self.source.name}"
+
+
+class ControlPlaneUser(TimeStampedAuditedModel):
+    auth_user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="control_plane_account",
+    )
+    username = models.CharField(max_length=150, unique=True)
+    email = models.EmailField(blank=True, default="")
+    first_name = models.CharField(max_length=150, blank=True, default="")
+    last_name = models.CharField(max_length=150, blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
+    profiles = models.ManyToManyField(
+        "ControlPlaneProfile",
+        through="ControlPlaneProfileMembership",
+        related_name="users",
+        blank=True,
+    )
+
+    class Meta:
+        ordering = ["username"]
+        verbose_name = "Control Plane user"
+        verbose_name_plural = "Control Plane users"
+        constraints = [
+            models.UniqueConstraint(
+                Lower(Trim("email")),
+                condition=Q(archived_at__isnull=True) & ~Q(email=""),
+                name="control_plane_user_email_unique",
+            ),
+        ]
+
+    def __str__(self):
+        return self.username
+
+    @property
+    def full_name(self):
+        return f"{self.first_name} {self.last_name}".strip() or self.username
+
+    @property
+    def has_source_access(self):
+        return self.profiles.filter(
+            is_active=True,
+            source_access__isnull=False,
+        ).exists()
+
+
+class ControlPlaneProfile(TimeStampedAuditedModel):
+    name = models.CharField(max_length=100, unique=True)
+    description = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = "Control Plane profile"
+        verbose_name_plural = "Control Plane profiles"
+
+    def __str__(self):
+        return self.name
+
+
+class ControlPlaneProfileMembership(TimeStampedAuditedModel):
+    user = models.ForeignKey(
+        ControlPlaneUser,
+        on_delete=models.CASCADE,
+        related_name="profile_memberships",
+    )
+    profile = models.ForeignKey(
+        ControlPlaneProfile,
+        on_delete=models.CASCADE,
+        related_name="memberships",
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "profile"],
+                name="unique_control_plane_profile_membership",
+            ),
+        ]
+
+
+class AnnouncementPermission(models.TextChoices):
+    PUBLISH = "publish_announcements", "Publish announcements"
+    PUBLISH_CROSS_PLANE = "publish_cross_plane_announcements", "Publish across both planes"
+    PIN = "pin_announcements", "Pin notices"
+    REQUIRE_ACKNOWLEDGEMENT = "require_announcement_acknowledgement", "Require acknowledgement"
+    VIEW_AUDIT = "view_announcement_audit", "Inspect announcement audit"
+
+
+class ControlPlanePermission(models.Model):
+    code = models.CharField(max_length=50, primary_key=True)
+    name = models.CharField(max_length=100)
+    category = models.CharField(max_length=50)
+    description = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["category", "name", "code"]
+
+    def __str__(self):
+        return self.name
+
+
+class ControlPlaneProfilePermission(TimeStampedAuditedModel):
+    profile = models.ForeignKey(
+        ControlPlaneProfile,
+        on_delete=models.CASCADE,
+        related_name="announcement_permissions",
+    )
+    permission = models.ForeignKey(
+        ControlPlanePermission,
+        on_delete=models.PROTECT,
+        related_name="profile_grants",
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "permission"],
+                name="unique_control_plane_profile_permission",
+            ),
+        ]
+
+
+class ControlPlaneProfileSourceAccess(TimeStampedAuditedModel):
+    profile = models.ForeignKey(
+        ControlPlaneProfile,
+        on_delete=models.CASCADE,
+        related_name="source_access",
+    )
+    source = models.ForeignKey(
+        SourceProfile,
+        on_delete=models.CASCADE,
+        related_name="profile_access",
+    )
+    role = models.CharField(max_length=20, choices=Role.choices, default=Role.VIEWER)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile", "source"],
+                name="unique_profile_source_access",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.profile.name} -> {self.source.name} [{self.role}]"
+
 
 class TrackedUser(User):
     history = HistoricalRecords()

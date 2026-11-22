@@ -12,7 +12,6 @@ from kombu.exceptions import OperationalError
 from control_plane.models import (
     CdcExecutionFailure,
     SourceProfile, 
-    UserSourceAccess, 
     SyncStatus,
     UserWidgetPreference
 )
@@ -26,6 +25,9 @@ from reports.models import (
 )
 from reports.progress import REPORT_RUNNING_STEPS
 from reports.tasks import reconcile_report_artifact_task
+from control_plane.access import authorized_source_ids
+from control_plane.models import DeadLetterTask
+from control_plane.views.dlq import load_dlq_entries
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +76,7 @@ def _active_report_generations():
 def dashboard_view(request):
     prefs, _ = UserWidgetPreference.objects.get_or_create(user=request.user)
     total_sources = SourceProfile.objects.count()
-    user_access_count = UserSourceAccess.objects.filter(user=request.user).count()
+    user_access_count = len(authorized_source_ids(request.user))
     
     # Pipelines: Scan Redis DB for active running tasks
     r = get_redis_client()
@@ -86,26 +88,20 @@ def dashboard_view(request):
     active_running_reports = _active_report_generations()[:5]
 
     # Dead Letter Queue Tasks & Count
-    dlq_keys = r.keys("dlq:task:*")
-    dlq_tasks = []
-    for key in dlq_keys:
-        data = r.get(key)
-        if data:
-            try:
-                task_dict = json.loads(data.decode('utf-8') if isinstance(data, bytes) else data)
-                task_dict['id'] = task_dict.get('id') or task_dict.get('task_id') or key.decode('utf-8').split(':')[-1]
-                task_dict['display_name'] = task_dict.get('task_name') or task_dict.get('name') or task_dict['id']
-                task_dict['error_message'] = task_dict.get('error_summary') or task_dict.get('traceback') or 'Exception raised during execution'
-                
-                raw_time = task_dict.get('failed_at') or task_dict.get('timestamp')
-                task_dict['failed_timestamp'] = parse_datetime(raw_time) if raw_time else None
-                
-                dlq_tasks.append(task_dict)
-            except Exception:
-                pass
-
-    # Sort newest failures first
-    dlq_tasks.sort(key=lambda x: x.get('failed_timestamp') or '', reverse=True)
+    dlq_tasks, invalid_dlq_records = load_dlq_entries(r)
+    dlq_tasks = [
+        task for task in dlq_tasks if task["status"] in (
+            DeadLetterTask.Status.FAILED, DeadLetterTask.Status.FAILED_AGAIN, DeadLetterTask.Status.UNCERTAIN,
+        )
+    ]
+    if not is_admin(request.user):
+        dlq_tasks = [
+            {**task, "error_message": "Details available to administrators."}
+            if not task["legacy"] else task
+            for task in dlq_tasks
+        ]
+    if invalid_dlq_records:
+        messages.warning(request, "Some dead-letter records could not be read. Check the application logs.")
 
     context = {
         'stats': {

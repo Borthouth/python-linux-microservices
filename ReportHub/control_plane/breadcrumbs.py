@@ -28,6 +28,44 @@ BREADCRUMB_REGISTRY = {
         {"name": "Dashboard", "url": "control_plane:dashboard"},
         {"name": "Users & Access", "url": ""},
     ],
+    "account_list": [
+        {"name": "Dashboard", "url": "control_plane:dashboard"},
+        {"name": "Control Plane Accounts", "url": ""},
+    ],
+    "account_edit": [
+        {"name": "Dashboard", "url": "control_plane:dashboard"},
+        {"name": "Control Plane Accounts", "url": "control_plane:account_list"},
+        {"name": "Edit Account", "url": ""},
+    ],
+    "archived_accounts": [
+        {"name": "Dashboard", "url": "control_plane:dashboard"},
+        {"name": "Control Plane Accounts", "url": "control_plane:account_list"},
+        {"name": "Archived Accounts", "url": ""},
+    ],
+    "account_source_access": [
+        {"name": "Dashboard", "url": "control_plane:dashboard"},
+        {"name": "Control Plane Accounts", "url": "control_plane:account_list"},
+        {"name": "Direct Source Access", "url": ""},
+    ],
+    "profile_list": [
+        {"name": "Dashboard", "url": "control_plane:dashboard"},
+        {"name": "Shared Access Profiles", "url": ""},
+    ],
+    "profile_create": [
+        {"name": "Dashboard", "url": "control_plane:dashboard"},
+        {"name": "Shared Access Profiles", "url": "control_plane:profile_list"},
+        {"name": "Create Profile", "url": ""},
+    ],
+    "profile_edit": [
+        {"name": "Dashboard", "url": "control_plane:dashboard"},
+        {"name": "Shared Access Profiles", "url": "control_plane:profile_list"},
+        {"name": "Edit Profile", "url": ""},
+    ],
+    "permission_list": [
+        {"name": "Dashboard", "url": "control_plane:dashboard"},
+        {"name": "Shared Access Profiles", "url": "control_plane:profile_list"},
+        {"name": "Permission Catalogue", "url": ""},
+    ],
     "user_edit": [
         {"name": "Dashboard", "url": "control_plane:dashboard"},
         {"name": "Users & Access", "url": "control_plane:user_management"},

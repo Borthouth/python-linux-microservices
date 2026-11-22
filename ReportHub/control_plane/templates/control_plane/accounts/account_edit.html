@@ -1,0 +1,38 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}Edit {{ account.username }} - Control Plane{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto px-6 py-8">
+    <div class="mb-6">
+        <h1 class="text-3xl font-extrabold text-white">Edit {{ account.username }}</h1>
+        <p class="mt-2 text-sm text-slate-400">Last login: {{ account.auth_user.last_login|date:"M j, Y H:i"|default:"Never" }}</p>
+    </div>
+    <form method="post" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+        {% csrf_token %}
+        {% for field in form %}
+            <div>
+                <label for="{{ field.id_for_label }}" class="block text-xs font-medium text-slate-300 uppercase tracking-wider mb-1.5">{{ field.label }}</label>
+                {{ field }}
+                {% if field.help_text %}<p class="text-xs text-slate-500 mt-1">{{ field.help_text }}</p>{% endif %}
+                {% for error in field.errors %}<p class="text-xs text-red-400 mt-1">{{ error }}</p>{% endfor %}
+            </div>
+        {% endfor %}
+        {% for error in form.non_field_errors %}<p class="text-sm text-red-400">{{ error }}</p>{% endfor %}
+        <div class="pt-6 flex flex-wrap items-center justify-end gap-3 border-t border-slate-800">
+            <a href="{% url 'control_plane:account_list' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all">Cancel</a>
+            <button type="submit" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">Save account</button>
+        </div>
+    </form>
+    <section class="mt-6 bg-slate-900 border border-slate-800 rounded-2xl p-6">
+        <h2 class="text-lg font-bold text-white mb-3">Announcement permission grants</h2>
+        <p class="text-xs text-slate-400 mb-4">Granted through active profiles after saving memberships. Inactive accounts receive no effective grants. Publishing across planes requires both publishing grants. Announcement workflows are not implemented yet.</p>
+        <ul class="space-y-2 text-sm text-slate-300">
+            {% for permission in announcement_permissions %}
+            <li>{{ permission }}</li>
+            {% empty %}<li class="text-slate-500">No announcement permissions granted.</li>{% endfor %}
+        </ul>
+        <a href="{% url 'control_plane:profile_list' %}" class="inline-block mt-4 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all">Manage access profiles</a>
+    </section>
+</div>
+{% endblock %}

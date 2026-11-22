@@ -1,12 +1,14 @@
 import io
 import json
+from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
+from django.core import mail
 from django.db import close_old_connections, connection, transaction
-from django.test import RequestFactory, TestCase, TransactionTestCase, override_settings
+from django.test import RequestFactory, SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from openpyxl import load_workbook
@@ -15,6 +17,9 @@ from reportlab.platypus import SimpleDocTemplate
 from control_plane.models import (
     CdcSourceExternalOperation,
     CdcToBatchTransition,
+    ControlPlaneProfile,
+    ControlPlaneProfileMembership,
+    ControlPlaneUser,
     IngestionMode,
     SourceField,
     SourceProfile,
@@ -30,12 +35,94 @@ from reports.ai_summary import build_summary_metrics, generate_report_summary
 from reports.charting import build_chart_data, build_pdf_chart
 from reports.cutover_guard import acquire_report_cutover_lock, report_query_guard
 from reports.exporters import build_json_report, build_xlsx_report
-from reports.models import EmailAuditLog, ReportDefinition, ReportExecution
-from reports.ollama import OllamaUnavailable
+from reports.models import EmailAuditLog, ReportDefinition, ReportExecution, ReportProfileRecipient, ReportUserRecipient
+from reports.ollama import OllamaUnavailable, generate_text
 from reports.pdf_export import build_pdf_report
 from reports.query_builder import build_clickhouse_report_query
-from reports.tasks import execute_report_task
+from reports.tasks import execute_report_task, send_report_email_task
 from reports.views import email_webhook_receiver
+
+
+@override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
+class ReportRecipientAccessTests(TestCase):
+    def setUp(self):
+        source = SourceProfile.objects.create(
+            name="Recipient source", host="localhost", database_name="synthetic", username="reader",
+        )
+        table = SourceTable.objects.create(source=source, table_name="items")
+        self.report = ReportDefinition.objects.create(
+            name="Recipient report", source=source, base_table=table,
+            is_email_active=True, email_recipients="old-external@example.test",
+        )
+        self.auth = get_user_model().objects.create_user(
+            username="recipient-auth", password="recipient-password",
+        )
+        self.account = ControlPlaneUser.objects.create(
+            auth_user=self.auth, username="recipient", email="recipient@example.test",
+        )
+        self.profile = ControlPlaneProfile.objects.create(name="Recipient team")
+
+    def test_selected_user_access_only_future_runs_and_revocation(self):
+        old = ReportExecution.objects.create(report=self.report, status="completed", file_path="old.csv")
+        grant = ReportUserRecipient.objects.create(report=self.report, user=self.account)
+        current = ReportExecution.objects.create(report=self.report, status="completed", file_path="new.csv")
+        self.client.force_login(self.auth)
+        response = self.client.get(reverse("reports:report_list"))
+        self.assertContains(response, self.report.name)
+        self.assertNotContains(response, reverse("reports:report_edit", args=[self.report.pk]))
+        response = self.client.get(reverse("reports:report_history", args=[self.report.pk]))
+        self.assertContains(response, str(current.pk))
+        self.assertNotContains(response, str(old.pk))
+        self.assertEqual(self.client.get(reverse("reports:report_download", args=[old.pk])).status_code, 404)
+        with patch("reports.views.get_internal_minio_client") as minio:
+            minio.return_value.bucket_exists.return_value = True
+            minio.return_value.get_object.return_value.read.return_value = b"report"
+            self.assertEqual(self.client.get(reverse("reports:report_download", args=[current.pk])).content, b"report")
+        grant.delete()
+        self.assertEqual(self.client.get(reverse("reports:report_history", args=[self.report.pk])).status_code, 404)
+        self.assertEqual(self.client.get(reverse("reports:report_download", args=[current.pk])).status_code, 404)
+
+    def test_profile_grant_starts_at_membership_and_changes_take_effect(self):
+        ReportProfileRecipient.objects.create(report=self.report, profile=self.profile)
+        old = ReportExecution.objects.create(report=self.report, status="completed")
+        membership = ControlPlaneProfileMembership.objects.create(user=self.account, profile=self.profile)
+        current = ReportExecution.objects.create(report=self.report, status="completed")
+        self.client.force_login(self.auth)
+        response = self.client.get(reverse("reports:report_history", args=[self.report.pk]))
+        self.assertNotContains(response, str(old.pk))
+        self.assertContains(response, str(current.pk))
+        self.profile.is_active = False
+        self.profile.save(update_fields=["is_active"])
+        self.assertEqual(self.client.get(reverse("reports:report_history", args=[self.report.pk])).status_code, 404)
+        self.profile.is_active = True
+        self.profile.save(update_fields=["is_active"])
+        membership.delete()
+        self.assertEqual(self.client.get(reverse("reports:report_history", args=[self.report.pk])).status_code, 404)
+
+    def test_email_sends_once_and_skips_inactive_or_old_run(self):
+        ReportUserRecipient.objects.create(report=self.report, user=self.account)
+        ReportProfileRecipient.objects.create(report=self.report, profile=self.profile)
+        ControlPlaneProfileMembership.objects.create(user=self.account, profile=self.profile)
+        execution = ReportExecution.objects.create(report=self.report, status="completed")
+        send_report_email_task.apply(args=[self.report.pk, execution.pk], throw=True).get()
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [self.account.email])
+        self.account.is_active = False
+        self.account.save(update_fields=["is_active"])
+        send_report_email_task.apply(args=[self.report.pk, execution.pk], throw=True).get()
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertTrue(EmailAuditLog.objects.filter(report=self.report, status="skipped").exists())
+        self.account.is_active = True
+        self.account.save(update_fields=["is_active"])
+        ReportExecution.objects.filter(pk=execution.pk).update(created_at=timezone.now() - timedelta(days=1))
+        send_report_email_task.apply(args=[self.report.pk, execution.pk], throw=True).get()
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_raw_emails_are_not_delivered_without_user_grants(self):
+        execution = ReportExecution.objects.create(report=self.report, status="completed")
+        send_report_email_task.apply(args=[self.report.pk, execution.pk], throw=True).get()
+        self.assertEqual(len(getattr(mail, "outbox", [])), 0)
+        self.assertTrue(EmailAuditLog.objects.filter(report=self.report, status="skipped").exists())
 
 
 class ReportCutoverGuardTests(TransactionTestCase):
@@ -824,6 +911,23 @@ class ExcelReportExportTests(TestCase):
         self.assertEqual(worksheet["A1"].value, "Summary Aggregates")
         self.assertEqual(worksheet["A4"].value, "Album")
         self.assertEqual(worksheet.freeze_panes, "A5")
+
+
+class OllamaRequestTests(SimpleTestCase):
+    @override_settings(OLLAMA_BASE_URL='http://ollama:11434', OLLAMA_MODEL='local-test')
+    @patch('reports.ollama.urlopen')
+    def test_per_request_options_preserve_default_callers_and_response_format(self, urlopen):
+        response = MagicMock()
+        response.read.return_value = b'{"response":"summary","done_reason":"length"}'
+        urlopen.return_value.__enter__.return_value = response
+        self.assertEqual(generate_text('prompt', response_format='json'), 'summary')
+        body = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual(body['options'], {'temperature': 0.1})
+        self.assertEqual(body['format'], 'json')
+        generate_text('bounded', options={'num_ctx': 8192, 'num_predict': 256})
+        self.assertEqual(json.loads(urlopen.call_args.args[0].data)['options'], {
+            'temperature': 0.1, 'num_ctx': 8192, 'num_predict': 256,
+        })
 
 
 class AiReportSummaryTests(TestCase):

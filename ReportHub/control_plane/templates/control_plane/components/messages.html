@@ -1,10 +1,13 @@
+{% load static %}
 {% if messages %}
     <div class="max-w-7xl mx-auto px-6 mt-4">
         {% for message in messages %}
-            <div class="p-4 rounded-xl bg-slate-800 border border-slate-700 text-sm flex items-center justify-between {% if message.level_tag == 'success' %}text-emerald-400{% elif message.level_tag == 'error' %}text-red-400{% elif message.level_tag == 'info' %}text-blue-300{% else %}text-slate-300{% endif %}">
-                <span>{{ message }}</span>
-                <button type="button" onclick="this.parentElement.remove()" class="text-slate-500 hover:text-slate-300">&times;</button>
+            <div data-message class="p-4 rounded-xl bg-slate-800 border border-slate-700 text-sm flex items-center justify-between gap-4 {% if message.level_tag == 'success' %}text-emerald-400{% elif message.level_tag == 'error' %}text-red-400{% elif message.level_tag == 'info' %}text-blue-300{% else %}text-slate-300{% endif %}">
+                <span class="min-w-0">{{ message }}</span>
+                <button type="button" data-dismiss-message aria-label="Dismiss message"
+                    class="shrink-0 rounded px-1 text-lg leading-none text-slate-400 transition hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-300">&times;</button>
             </div>
         {% endfor %}
     </div>
+    <script src="{% static 'control_plane/js/messages.js' %}" defer></script>
 {% endif %}

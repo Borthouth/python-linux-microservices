@@ -7,6 +7,7 @@ class ControlPlaneConfig(AppConfig):
     name = 'control_plane'
 
     def ready(self):
+        from control_plane import dlq  # noqa: F401
         from django.contrib.auth import get_user_model
         User = get_user_model()
         # Register history on User if not already registered

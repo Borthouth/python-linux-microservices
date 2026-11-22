@@ -1,0 +1,24 @@
+<section aria-labelledby="recent-searches-title">
+    <article class="h-full rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
+        <div class="flex items-center justify-between gap-3">
+            <div>
+                <p class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Search history</p>
+                <h2 id="recent-searches-title" class="mt-2 text-lg font-semibold text-white">Recent searches</h2>
+            </div>
+            <a href="{% url 'operations_plane:log_search_history' %}" class="text-xs font-medium text-indigo-300 transition hover:text-indigo-200">View all</a>
+        </div>
+        <ul class="mt-5 divide-y divide-slate-800">
+            {% for job in recent_searches %}
+                <li class="flex items-center justify-between gap-3 py-3">
+                    <a href="{% url 'operations_plane:log_search_detail' job.pk %}" class="min-w-0">
+                        <span class="block truncate text-xs font-semibold text-slate-200">{{ job.range_start|date:"M j, Y H:i" }} - {{ job.range_end|date:"M j, H:i" }}</span>
+                        <span class="mt-1 block text-[10px] text-slate-500">{{ job.total_events|default:0 }} events returned</span>
+                    </a>
+                    <span class="shrink-0 rounded-full bg-slate-800 px-2.5 py-1 text-[10px] font-medium text-slate-300">{{ job.get_status_display }}</span>
+                </li>
+            {% empty %}
+                <li class="py-8 text-center text-xs text-slate-500">No saved searches yet.</li>
+            {% endfor %}
+        </ul>
+    </article>
+</section>

@@ -4,10 +4,12 @@
         <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">Report Management</h1>
         <p class="text-slate-400 text-sm">Configure analytical report definitions, execute asynchronous background tasks, and download generated artifacts.</p>
 </div>
+    {% if request.user.is_staff or request.user.is_superuser %}
     <a href="{% url 'reports:report_create' %}" class="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all flex items-center space-x-2">
         <span>➕</span>
         <span>+ Create Report</span>
     </a>
+    {% endif %}
 </div>
 
 {% url 'reports:report_list' as search_action_url %}
@@ -48,13 +50,16 @@
                         {% endif %}
                     </td>
                     <td class="py-3.5 px-4">
+                        {% if request.user.is_staff or request.user.is_superuser %}
                         {% url 'reports:report_status' report.pk as status_url %}
                         {% with report_id=report.pk|stringformat:'s' %}
                             {% include 'control_plane/components/celery_status.html' with component_id='report-status-'|add:report_id status=report.latest_status timestamp=report.latest_run_time error_message=report.latest_error_message poll_url=status_url poll_pending=True %}
                         {% endwith %}
+                        {% else %}See history{% endif %}
                     </td>
                     <td class="py-3.5 px-4 text-right">
                         <div class="inline-flex items-center space-x-1.5 justify-end">
+                            {% if request.user.is_staff or request.user.is_superuser %}
                             {% if report.downloadable_execution_pk and report.downloadable_file_path %}
                                 <a href="{% url 'reports:report_download' report.downloadable_execution_pk %}" class="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 text-xs font-medium rounded-lg transition-all">
                                     Download
@@ -81,6 +86,7 @@
                             <a href="{% url 'reports:report_edit' report.pk %}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-all">
                                 Edit
                             </a>
+                            {% endif %}
 
                             <a href="{% url 'reports:report_history' report.pk %}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded-lg border border-slate-700 transition-all">
                                 History
@@ -94,7 +100,7 @@
                 {% if search_query or status_filter %}
                     No reports match your search and status.
                     {% else %}
-                        No reports configured yet. Click "+ Create Report" to build your first analytical query.
+                        No reports available.
                     {% endif %}
                     </td>
                 </tr>
@@ -102,6 +108,6 @@
             </tbody>
         </table>
     </div>
-    {% include 'control_plane/components/pagination.html' %}
 </div>
+{% include 'control_plane/components/pagination.html' %}
 </div>

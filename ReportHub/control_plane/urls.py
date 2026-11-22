@@ -1,6 +1,8 @@
 from django.urls import path
 from django.contrib.auth import views as auth_views
+from .forms.auth import ControlPlaneAuthenticationForm
 from .views import (
+    accounts,
     sources, 
     dashboard, 
     users, 
@@ -19,7 +21,14 @@ from .views import (
 app_name = 'control_plane'
 
 urlpatterns = [
-    path('login/', auth_views.LoginView.as_view(template_name='control_plane/login.html'), name='login'),
+    path(
+        'login/',
+        auth_views.LoginView.as_view(
+            template_name='control_plane/login.html',
+            authentication_form=ControlPlaneAuthenticationForm,
+        ),
+        name='login',
+    ),
     path('logout/', auth_views.LogoutView.as_view(), name='logout'),
     
     # dashboard URL
@@ -68,7 +77,22 @@ urlpatterns = [
     path('users/<int:user_id>/edit/', users.user_edit_view, name='user_edit'),  
     path('users/<int:user_id>/access/', users.user_edit_access_view, name='user_edit_access'),
     path('password-change/', users.password_change_view, name='password_change'),
-    path('profile/', users.user_profile_view, name='user_profile'),
+    path('profile/', accounts.account_profile_view, name='user_profile'),
+    path('accounts/', accounts.account_list_view, name='account_list'),
+    path('accounts/archived/', accounts.archived_accounts_view, name='archived_accounts'),
+    path('accounts/<int:account_id>/archive/', accounts.account_archive_view, name='account_archive'),
+    path('accounts/<int:account_id>/restore/', accounts.account_restore_view, name='account_restore'),
+    path('accounts/<int:account_id>/', accounts.account_edit_view, name='account_edit'),
+    path('accounts/<int:account_id>/sources/', accounts.account_source_access_view, name='account_source_access'),
+    path('access-profiles/', accounts.profile_list_view, name='profile_list'),
+    path('access-profiles/create/', accounts.profile_create_view, name='profile_create'),
+    path('permissions/', accounts.permission_list_view, name='permission_list'),
+    path('access-profiles/<int:profile_id>/', accounts.profile_edit_view, name='profile_edit'),
+    path(
+        'access-profiles/<int:profile_id>/sources/<int:grant_id>/remove/',
+        accounts.profile_source_remove_view,
+        name='profile_source_remove',
+    ),
     
     # Source management URLs
     path('sources/', sources.source_list_view, name='source_list'),
@@ -105,5 +129,6 @@ urlpatterns = [
 
     # Dead Letter Queue (DLQ) URLs
     path('dlq/', dlq.dlq_list_view, name='dlq_list'),
+    path('dlq/entries/<int:failure_id>/retry/', dlq.dlq_retry_view, name='dlq_retry'),
     path('dlq/<str:task_id>/requeue/', dlq.dlq_requeue_view, name='dlq_requeue'),
 ]

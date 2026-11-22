@@ -1,15 +1,32 @@
 import json
 from django import forms
 from django.db.models import Q
-from .models import ReportDefinition
-from control_plane.models import SourceProfile, SourceTable, TransferDestination
+from .models import ReportDefinition, ReportProfileRecipient, ReportUserRecipient
+from control_plane.models import ControlPlaneProfile, ControlPlaneUser, SourceProfile, SourceTable, TransferDestination
 
 
 class DestinationChoiceField(forms.ModelMultipleChoiceField):
     def label_from_instance(self, obj):
         return f"{obj.name} (SFTP{'' if obj.is_active else ', inactive'})"
 
+
+class ReportUserChoiceField(forms.ModelMultipleChoiceField):
+    def label_from_instance(self, obj):
+        state = "archived" if obj.archived_at else "inactive" if not obj.is_active or not obj.auth_user.is_active else ""
+        return f"{obj.full_name} ({obj.username}; user ID {obj.auth_user_id}){f' [{state}]' if state else ''}"
+
+
 class ReportDefinitionForm(forms.ModelForm):
+    user_recipients = ReportUserChoiceField(
+        queryset=ControlPlaneUser.objects.none(), required=False,
+        widget=forms.CheckboxSelectMultiple,
+        label="User recipients",
+    )
+    profile_recipients = forms.ModelMultipleChoiceField(
+        queryset=ControlPlaneProfile.objects.none(), required=False,
+        widget=forms.CheckboxSelectMultiple,
+        label="Profile recipients",
+    )
     transfer_destinations = DestinationChoiceField(
         queryset=TransferDestination.objects.none(), required=False,
         widget=forms.CheckboxSelectMultiple(attrs={
@@ -34,7 +51,7 @@ class ReportDefinitionForm(forms.ModelForm):
         fields = [
             'name', 'description', 'source', 'base_table', 
             'selected_fields_json',
-            'export_format', 'include_ai_summary', 'email_recipients',
+            'export_format', 'include_ai_summary', 'user_recipients', 'profile_recipients',
             'is_email_active', 'is_file_delivery_active', 'transfer_destinations', 'is_active'
         ]
         widgets = {
@@ -57,11 +74,6 @@ class ReportDefinitionForm(forms.ModelForm):
                 'id': 'id_export_format',
                 'class': 'bg-slate-900 text-white block w-full border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs focus:outline-none focus:border-indigo-500'
             }),
-            'email_recipients': forms.Textarea(attrs={
-                'rows': 2,
-                'placeholder': 'admin@example.com, reporting-team@example.com',
-                'class': 'w-full bg-slate-950 border border-slate-800 text-white px-4 py-2.5 rounded-xl text-sm focus:outline-none focus:border-indigo-500'
-            }),
             'is_email_active': forms.CheckboxInput(attrs={
                 'class': 'w-4 h-4 text-indigo-600 bg-slate-950 border-slate-700 rounded focus:ring-indigo-500'
             }),
@@ -76,6 +88,15 @@ class ReportDefinitionForm(forms.ModelForm):
     def __init__(self, *args, **kwargs):
         self.user = kwargs.pop("user", None)
         super().__init__(*args, **kwargs)
+        users = Q(is_active=True, archived_at__isnull=True, auth_user__is_active=True)
+        profiles = Q(is_active=True)
+        if not self.instance._state.adding:
+            users |= Q(report_recipients__report=self.instance)
+            profiles |= Q(report_recipients__report=self.instance)
+            self.initial["user_recipients"] = self.instance.user_recipients.values_list("user_id", flat=True)
+            self.initial["profile_recipients"] = self.instance.profile_recipients.values_list("profile_id", flat=True)
+        self.fields["user_recipients"].queryset = ControlPlaneUser.objects.filter(users).select_related("auth_user").distinct()
+        self.fields["profile_recipients"].queryset = ControlPlaneProfile.objects.filter(profiles).distinct()
         destinations = Q(is_active=True)
         if not self.instance._state.adding:
             destinations |= Q(reports=self.instance)
@@ -111,8 +132,32 @@ class ReportDefinitionForm(forms.ModelForm):
         else:
             self.fields['base_table'].queryset = SourceTable.objects.none()
 
+    def save_recipients(self, actor):
+        for field, model, key in (
+            ("user_recipients", ReportUserRecipient, "user"),
+            ("profile_recipients", ReportProfileRecipient, "profile"),
+        ):
+            selected = {item.pk: item for item in self.cleaned_data[field]}
+            existing = model.objects.filter(report=self.instance)
+            for grant in existing:
+                target_id = getattr(grant, f"{key}_id")
+                if target_id not in selected:
+                    grant._history_user = actor
+                    grant.delete()
+                else:
+                    selected.pop(target_id)
+            for target in selected.values():
+                model.objects.create(
+                    report=self.instance, created_by=actor, updated_by=actor,
+                    **{key: target},
+                )
+
     def clean(self):
         cleaned_data = super().clean()
+        if cleaned_data.get("is_email_active") and not (
+            cleaned_data.get("user_recipients") or cleaned_data.get("profile_recipients")
+        ):
+            self.add_error("user_recipients", "Select at least one user or profile for email delivery.")
         if cleaned_data.get("is_file_delivery_active"):
             if self.user is not None and not (self.user.is_active and self.user.is_staff):
                 self.add_error("is_file_delivery_active", "Only staff can configure file delivery.")

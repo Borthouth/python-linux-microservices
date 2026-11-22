@@ -1,0 +1,63 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}{{ profile.name }} - Access Profile{% endblock %}
+
+{% block content %}
+<div class="max-w-6xl mx-auto px-6 py-8">
+    <div class="mb-6">
+        <h1 class="text-3xl font-extrabold text-white">{{ profile.name }}</h1>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
+        <section class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+            <h2 class="text-lg font-bold text-white mb-4">Profile settings</h2>
+            <form method="post" class="space-y-4">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="save_profile">
+                {% include 'control_plane/accounts/profile_form_fields.html' %}
+                <div class="pt-6 flex flex-wrap items-center justify-end gap-3 border-t border-slate-800">
+                    <a href="{% url 'control_plane:profile_list' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all">Cancel</a>
+                    <button type="submit" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">Save profile</button>
+                </div>
+            </form>
+            <h2 class="text-lg font-bold text-white mt-8 mb-4">Members</h2>
+            <ul class="space-y-2 text-sm text-slate-300">
+                {% for membership in members %}
+                <li class="flex items-center justify-between gap-3">
+                    <span>{{ membership.user.username }}</span>
+                    <a href="{% url 'control_plane:account_edit' membership.user_id %}" class="inline-flex px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-all" aria-label="Edit account {{ membership.user.username }}">Edit</a>
+                </li>
+                {% empty %}<li class="text-slate-500">No users assigned.</li>{% endfor %}
+            </ul>
+        </section>
+        <section class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+            <h2 class="text-lg font-bold text-white mb-4">Source permissions</h2>
+            <form method="post" class="space-y-4 mb-6">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="add_source">
+                {% for field in grant_form %}
+                    <div>
+                        <label for="{{ field.id_for_label }}" class="block text-xs font-medium text-slate-300 uppercase mb-1.5">{{ field.label }}</label>
+                        {{ field }}
+                        {% for error in field.errors %}<p class="text-xs text-red-400 mt-1">{{ error }}</p>{% endfor %}
+                    </div>
+                {% endfor %}
+                <button type="submit" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">Add or update permission</button>
+            </form>
+            <div class="divide-y divide-slate-800">
+                {% for grant in grants %}
+                <div class="flex items-center justify-between gap-4 py-3">
+                    <div>
+                        <p class="text-sm text-white">{{ grant.source.name }}</p>
+                        <p class="text-xs text-slate-400">{{ grant.get_role_display }}</p>
+                    </div>
+                    <form method="post" action="{% url 'control_plane:profile_source_remove' profile.pk grant.pk %}">
+                        {% csrf_token %}
+                        <button type="submit" class="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-medium rounded-lg border border-red-500/20 transition-all">Remove</button>
+                    </form>
+                </div>
+                {% empty %}<p class="py-6 text-sm text-slate-500">This profile grants no source access.</p>{% endfor %}
+            </div>
+        </section>
+    </div>
+</div>
+{% endblock %}

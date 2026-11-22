@@ -1,10 +1,9 @@
 import uuid
 from django.db import models
 from django.conf import settings
-from django.core.exceptions import ValidationError
 from django_celery_beat.models import PeriodicTask
 from simple_history.models import HistoricalRecords
-from control_plane.models import SourceProfile, SourceTable, SourceField
+from control_plane.models import ControlPlaneProfile, ControlPlaneUser, SourceProfile, SourceTable, SourceField
 from .validators import validate_comma_separated_emails
 
 class TimeStampedAuditedModel(models.Model):
@@ -91,15 +90,29 @@ class ReportDefinition(TimeStampedAuditedModel):
             return []
         return [email.strip() for email in self.email_recipients.split(',') if email.strip()]
 
-    def clean(self):
-        super().clean()
-        if self.is_email_active and not self.get_recipient_list():
-            raise ValidationError({
-                'email_recipients': 'At least one valid recipient email address is required when email activation is enabled.'
-            })
-
     def __str__(self):
         return self.name
+
+
+class ReportUserRecipient(TimeStampedAuditedModel):
+    report = models.ForeignKey(ReportDefinition, on_delete=models.CASCADE, related_name="user_recipients")
+    user = models.ForeignKey(ControlPlaneUser, on_delete=models.CASCADE, related_name="report_recipients")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["report", "user"], name="unique_report_user_recipient"),
+        ]
+
+
+class ReportProfileRecipient(TimeStampedAuditedModel):
+    report = models.ForeignKey(ReportDefinition, on_delete=models.CASCADE, related_name="profile_recipients")
+    profile = models.ForeignKey(ControlPlaneProfile, on_delete=models.CASCADE, related_name="report_recipients")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["report", "profile"], name="unique_report_profile_recipient"),
+        ]
+
 
 class ReportExecution(TimeStampedAuditedModel):
     STATUS_CHOICES = [
@@ -225,6 +238,7 @@ class ReportFileDelivery(models.Model):
 class EmailAuditLog(models.Model):
     STATUS_CHOICES = [
         ('sent', 'Sent'),
+        ('skipped', 'Skipped'),
         ('failed', 'Failed'),
         ('bounced', 'Bounced'),
         ('delivered', 'Delivered'),

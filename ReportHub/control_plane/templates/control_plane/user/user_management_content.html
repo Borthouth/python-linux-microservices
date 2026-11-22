@@ -60,7 +60,6 @@
                                 <tr class="text-xs uppercase tracking-wider text-slate-400">
                                     <th class="py-3 px-4">User</th>
                                     <th class="py-3 px-4">Email</th>
-                                    <th class="py-3 px-4">Assigned Sources</th>
                                     <th class="w-24 whitespace-nowrap py-3 px-2">Status</th>
                                     <th class="w-[360px] whitespace-nowrap py-3 px-4 text-right">Actions</th>
                                 </tr>
@@ -68,19 +67,8 @@
                             <tbody class="divide-y divide-slate-800/60 text-sm">
                                 {% for u_item in page_obj %}
                                     <tr class="hover:bg-slate-800/40 transition-all">
-                                        <td class="py-3.5 px-4 font-medium text-white">{{ u_item.username }}</td>
+                                        <td class="py-3.5 px-4 font-medium text-white">{{ u_item.display_identity.label }}</td>
                                         <td class="py-3.5 px-4 text-slate-300 text-xs">{{ u_item.email|default:"No email" }}</td>
-                                        <td class="py-3.5 px-4">
-                                            {% with source_count=u_item.source_access.count %}
-                                                {% if source_count > 0 %}
-                                                    <span class="px-2.5 py-1 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 rounded-lg text-xs font-mono font-medium">
-                                                        {{ source_count }} Source{% if source_count > 1 %}s{% endif %} Authorized
-                                                    </span>
-                                                {% else %}
-                                                    <span class="text-xs text-slate-500 italic">No sources assigned</span>
-                                                {% endif %}
-                                            {% endwith %}
-                                        </td>
                                         <td class="whitespace-nowrap py-3.5 px-2">
                                             {% if u_item.is_active %}
                                                 <span class="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full text-xs font-semibold">Active</span>
@@ -90,10 +78,7 @@
                                         </td>
                                         <td class="whitespace-nowrap py-3.5 px-4 text-right">
                                             <div class="inline-flex flex-nowrap items-center justify-end gap-1.5">
-                                            <a href="{% url 'control_plane:user_edit' u_item.id %}" class="px-3 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 rounded-lg text-xs font-medium transition-all">
-                                                Edit
-                                            </a>
-                                            <a href="{% url 'control_plane:user_edit_access' u_item.id %}" class="px-3 py-1.5 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 rounded-lg text-xs font-medium transition-all">
+                                            <a href="{% url 'control_plane:user_edit_access' u_item.id %}" class="px-3 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 rounded-lg text-xs font-medium transition-all">
                                                 Manage Access
                                             </a>
                                             {% if u_item.pk == request.user.pk and u_item.is_active %}
@@ -109,17 +94,26 @@
                                                         </button>
                                                     {% else %}
                                                         <button type="submit" class="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 rounded-lg text-xs font-medium transition-all">
-                                                            Reactivate
+                                                            Activate
                                                         </button>
                                                     {% endif %}
                                                 </form>
                                             {% endif %}
+                                                            {% if u_item.control_plane_account and not u_item.is_active and not u_item.control_plane_account.is_active %}
+                                                            <form method="post" action="{% url 'control_plane:account_archive' u_item.control_plane_account.pk %}" class="inline" onsubmit="return confirm('Archive this inactive account? Its audit history will be retained.');">
+                                                                {% csrf_token %}
+                                                                <button type="submit" class="px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 rounded-lg text-xs font-medium">Archive</button>
+                                                            </form>
+                                                            {% endif %}
+                                            <a href="{% url 'control_plane:user_edit' u_item.id %}" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-all">
+                                                Edit
+                                            </a>
                                             </div>
                                         </td>
                                     </tr>
                                 {% empty %}
                                     <tr>
-                                        <td colspan="5" class="py-12 text-center text-slate-500 text-sm">
+                                        <td colspan="4" class="py-12 text-center text-slate-500 text-sm">
                                             {% if search_query or status_filter %}
                                                 No users found matching your search and status.
                                             {% else %}
@@ -133,11 +127,8 @@
                     </div>
                 </div>
 
-                <!-- Paginator -->
-                <div class="mt-6">
-                    {% include 'control_plane/components/pagination.html' %}
-                </div>
             </div>
+            {% include 'control_plane/components/pagination.html' %}
         </div>
 
     </div>

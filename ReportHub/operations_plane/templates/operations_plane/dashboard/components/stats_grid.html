@@ -1,0 +1,24 @@
+<section id="widget-stats-wrapper" class="{% if not widget_prefs.show_stats %}hidden{% endif %} mb-8" aria-label="Operations activity statistics">
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <article class="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+            <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Active log jobs</p>
+            <p class="mt-3 text-3xl font-bold text-white">{{ stats.active_jobs }}</p>
+            <p class="mt-2 text-xs text-slate-500">Historical searches and AI analyses in progress</p>
+        </article>
+        <article class="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+            <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Completed searches</p>
+            <p class="mt-3 text-3xl font-bold text-emerald-300">{{ stats.completed_searches }}</p>
+            <p class="mt-2 text-xs text-slate-500">Your completed saved log-search pages</p>
+        </article>
+        <article class="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+            <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">AI analyses</p>
+            <p class="mt-3 text-3xl font-bold text-indigo-300">{{ stats.completed_analyses }}</p>
+            <p class="mt-2 text-xs text-slate-500">Your completed on-demand summaries</p>
+        </article>
+        <article class="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+            <p class="text-xs font-semibold uppercase tracking-wider text-slate-400">Failed jobs</p>
+            <p class="mt-3 text-3xl font-bold text-rose-300">{{ stats.failed_jobs }}</p>
+            <p class="mt-2 text-xs text-slate-500">Jobs that need review or another attempt</p>
+        </article>
+    </div>
+</section>

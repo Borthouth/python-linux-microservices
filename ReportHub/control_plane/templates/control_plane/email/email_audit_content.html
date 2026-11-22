@@ -41,6 +41,8 @@
                         <div class="flex items-center space-x-1.5">
                             {% if log.status == 'sent' %}
                                 <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20">Sent</span>
+                            {% elif log.status == 'skipped' %}
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-800 text-slate-300 border border-slate-700">Skipped</span>
                             {% elif log.status == 'delivered' %}
                                 <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Delivered</span>
                             {% elif log.status == 'failed' %}
@@ -75,12 +77,12 @@
                                 </button>
                             {% endif %}
 
-                            <form action="{% url 'control_plane:email_audit_requeue' log.pk %}" method="post" class="inline">
+                            {% if log.status != 'skipped' %}<form action="{% url 'control_plane:email_audit_requeue' log.pk %}" method="post" class="inline">
                                 {% csrf_token %}
                                 <button type="submit" class="px-2.5 py-1 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 text-xs font-medium rounded-lg transition-all shadow-sm">
                                     Re-queue
                                 </button>
-                            </form>
+                            </form>{% endif %}
 
                             <!-- Delete Button Triggering Confirmation Modal -->
                             <button type="button"
@@ -103,11 +105,8 @@
             </tbody>
         </table>
 
-        <!-- Pagination -->
-        <div class="p-4 border-t border-slate-800">
-            {% include 'control_plane/components/pagination.html' %}
-        </div>
     </div>
+    {% include 'control_plane/components/pagination.html' %}
 
     <!-- Inspect Modal -->
     <div x-show="inspectModalOpen" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">

@@ -1,7 +1,21 @@
+x-reporthub-logging: &reporthub-logging
+  driver: fluentd
+  options:
+    fluentd-address: "127.0.0.1:24224"
+    fluentd-async: "true"
+    fluentd-async-reconnect-interval: "1s"
+    fluentd-buffer-limit: "10000"
+    fluentd-write-timeout: "2s"
+    tag: "reporthub.{{.Name}}"
+
 services:
   kafka:
-    image: apache/kafka:3.8.0
+    build:
+      context: ./otel/java
+      dockerfile: Dockerfile.kafka
+      target: kafka
     container_name: reporthub-kafka
+    logging: *reporthub-logging
     ports:
       - "127.0.0.1:9092:29092"
     environment:
@@ -27,6 +41,7 @@ services:
   debezium-connect:
     image: quay.io/debezium/connect:3.5.2.Final
     container_name: reporthub-debezium-connect
+    logging: *reporthub-logging
     ports:
       - "127.0.0.1:8083:8083"
     environment:
@@ -38,6 +53,9 @@ services:
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
+      KAFKA_OPTS: "-Dlog4j2.configurationFile=/kafka/config/reporthub-log4j2.xml"
+    volumes:
+      - ./otel/java/debezium-log4j2.xml:/kafka/config/reporthub-log4j2.xml:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

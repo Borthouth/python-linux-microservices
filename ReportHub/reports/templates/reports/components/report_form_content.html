@@ -309,16 +309,21 @@
                 <section class="rounded-xl border border-slate-800 bg-slate-900/50 p-4 space-y-3">
                     <div>
                         <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">Automated Email Distribution</h3>
-                        <p class="mt-1 text-xs text-slate-500">Send completed report exports to configured recipients.</p>
+                        <p class="mt-1 text-xs text-slate-500">Selected users and active profile members can view runs started after access was granted and receive future report emails. Inactive and archived users are skipped.</p>
+                        {% if report.email_recipients %}<p class="mt-1 text-xs text-amber-400">Previous email-address recipients are no longer used. Select users or profiles to receive future emails.</p>{% endif %}
                     </div>
 
                     <div>
-                        <label class="block text-[11px] text-slate-400 mb-1.5" for="{{ form.email_recipients.id_for_label }}">
-                            Recipient Email Addresses
-                        </label>
-                        {{ form.email_recipients }}
-                        <p class="mt-1 text-[11px] text-slate-500">Separate multiple email addresses with commas.</p>
-                        {% for error in form.email_recipients.errors %}
+                        <label class="block text-[11px] text-slate-400 mb-1.5">User recipients</label>
+                        <div class="space-y-1 text-sm text-slate-300">{{ form.user_recipients }}</div>
+                        {% for error in form.user_recipients.errors %}
+                            <p class="mt-1 text-xs text-red-400">{{ error }}</p>
+                        {% endfor %}
+                    </div>
+                    <div>
+                        <label class="block text-[11px] text-slate-400 mb-1.5">Profile recipients</label>
+                        <div class="space-y-1 text-sm text-slate-300">{{ form.profile_recipients }}</div>
+                        {% for error in form.profile_recipients.errors %}
                             <p class="mt-1 text-xs text-red-400">{{ error }}</p>
                         {% endfor %}
                     </div>

@@ -13,12 +13,12 @@ class OllamaUnavailable(Exception):
     pass
 
 
-def generate_text(prompt, response_format=None):
+def generate_text(prompt, response_format=None, *, options=None):
     body = {
         "model": getattr(settings, "OLLAMA_MODEL", "qwen2.5:3b"),
         "prompt": prompt,
         "stream": False,
-        "options": {"temperature": 0.1},
+        "options": {"temperature": 0.1, **(options or {})},
     }
     if response_format:
         body["format"] = response_format
@@ -46,4 +46,6 @@ def generate_text(prompt, response_format=None):
     generated_text = ollama_response.get("response")
     if not isinstance(generated_text, str):
         raise OllamaUnavailable("Ollama response did not contain generated text.")
+    if ollama_response.get("done_reason") == "length":
+        logger.info("Ollama response reached its configured output limit.")
     return generated_text

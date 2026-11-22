@@ -12,6 +12,18 @@ if [ -f "$SCANHUB_DIR/docker-compose.yml" ]; then
     compose+=(-f docker-compose.scanhub.yml)
 fi
 
+wait_for_otel_collector() {
+    for _ in {1..30}; do
+        if curl -fsS http://127.0.0.1:13133/ >/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "OpenTelemetry Collector did not become healthy. Recent logs:" >&2
+    "${compose[@]}" logs --tail 50 otel_collector >&2 || true
+    return 1
+}
+
 if [ "$#" -ne 1 ]; then
     echo "Usage: $0 {start|stop}" >&2
     exit 2
@@ -19,6 +31,8 @@ fi
 
 case "$1" in
     start)
+        "${compose[@]}" up -d otel_collector
+        wait_for_otel_collector
         if [ -f "$SCANHUB_DIR/docker-compose.yml" ]; then
             "$SCRIPT_DIR/scanhub-antivirus.sh" start
         else

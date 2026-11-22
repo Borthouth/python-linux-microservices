@@ -1,0 +1,20 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}Create Access Profile - ReportHub{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl mx-auto px-6 py-8">
+    <div class="mb-6">
+        <h1 class="text-3xl font-extrabold text-white">Create Access Profile</h1>
+        <p class="mt-2 text-sm text-slate-400">Create a reusable profile and select its feature permissions.</p>
+    </div>
+    <form method="post" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+        {% csrf_token %}
+        {% include 'control_plane/accounts/profile_form_fields.html' %}
+        <div class="pt-6 flex flex-wrap items-center justify-end gap-3 border-t border-slate-800">
+            <a href="{% url 'control_plane:profile_list' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all">Cancel</a>
+            <button type="submit" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">Create profile</button>
+        </div>
+    </form>
+</div>
+{% endblock %}

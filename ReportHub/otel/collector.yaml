@@ -1,0 +1,128 @@
+extensions:
+  file_storage/otel:
+    directory: /var/lib/otelcol/storage
+    create_directory: true
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  fluent_forward:
+    endpoint: 0.0.0.0:24224
+  journald/host:
+    directory: /hostfs/var/log/journal
+    start_at: end
+    priority: debug
+    storage: file_storage/otel
+    convert_to_semantic_conventions: true
+    operators:
+      - type: add
+        field: attributes["reporthub.input"]
+        value: journal
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 384
+    spike_limit_mib: 96
+  # Resource mutations must not leak between differently tagged records in a batch.
+  groupbyattrs/source:
+    keys:
+      - fluent.tag
+      - log.file.path
+      - journald._SYSTEMD_UNIT
+      - journald._COMM
+  transform/logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - 'set(log.attributes["fluent.tag"], resource.attributes["fluent.tag"]) where resource.attributes["fluent.tag"] != nil'
+          - 'set(log.attributes["log.file.path"], resource.attributes["log.file.path"]) where resource.attributes["log.file.path"] != nil'
+          - 'set(log.attributes["journald._SYSTEMD_UNIT"], resource.attributes["journald._SYSTEMD_UNIT"]) where resource.attributes["journald._SYSTEMD_UNIT"] != nil'
+          - 'set(log.attributes["journald._COMM"], resource.attributes["journald._COMM"]) where resource.attributes["journald._COMM"] != nil'
+          - 'set(log.cache["structured"], ParseJSON(log.body)) where IsString(log.body) and IsMatch(log.body, "^\\{\"schema\"\\s*:\\s*\"reporthub[.]log[.]v1\"\\s*,")'
+          - 'set(log.body, log.cache["structured"]["message"]) where log.cache["structured"] != nil'
+          - 'set(log.severity_text, log.cache["structured"]["severity"]) where log.cache["structured"] != nil'
+          - 'set(log.attributes["logger.name"], log.cache["structured"]["logger"]) where log.cache["structured"] != nil'
+          - 'set(log.attributes["task_id"], log.cache["structured"]["task_id"]) where log.cache["structured"]["task_id"] != nil'
+          - 'set(log.attributes["task_name"], log.cache["structured"]["task_name"]) where log.cache["structured"]["task_name"] != nil'
+          - 'set(log.attributes["queue"], log.cache["structured"]["queue"]) where log.cache["structured"]["queue"] != nil'
+          - 'delete_matching_keys(log.attributes, "(?i)(password|passwd|secret|token|api[_-]?key|authorization|cookie)")'
+          - 'delete_matching_keys(resource.attributes, "(?i)(password|passwd|secret|token|api[_-]?key|authorization|cookie)")'
+          - 'replace_pattern(log.body, "(?i)(\"(password|passwd|secret|token|api[_-]?key)\"\\s*:\\s*\")[^\"\\\\]*(\\\\.[^\"\\\\]*)*(\")", "$1[REDACTED]$5") where IsString(log.body)'
+          - 'replace_pattern(log.body, "(?i)(password|passwd|secret|token|api[_-]?key)(\\s*[=:]\\s*)\"[^\"]*\"", "$1$2\"[REDACTED]\"") where IsString(log.body)'
+          - 'replace_pattern(log.body, "(?i)(password|passwd|secret|token|api[_-]?key)(\\s*[=:]\\s*)[^\\s,;\"'']+", "$1$2[REDACTED]") where IsString(log.body)'
+          - 'replace_pattern(log.body, "(?i)\\bBearer\\s+[A-Za-z0-9._~+/-]+=*", "Bearer [REDACTED]") where IsString(log.body)'
+          - 'replace_pattern(log.body, "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b", "[EMAIL]") where IsString(log.body)'
+          - 'replace_all_patterns(log.attributes, "value", "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", "[EMAIL]")'
+          - 'replace_all_patterns(resource.attributes, "value", "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", "[EMAIL]")'
+          - 'set(resource.attributes["service.name"], log.attributes["fluent.tag"]) where log.attributes["fluent.tag"] != nil'
+          - 'replace_pattern(resource.attributes["service.name"], "^[a-zA-Z0-9_-]+\\.", "") where log.attributes["fluent.tag"] != nil'
+          - 'replace_pattern(resource.attributes["service.name"], "^reporthub[-_]", "") where log.attributes["fluent.tag"] != nil'
+          - 'set(resource.attributes["service.name"], log.attributes["journald._SYSTEMD_UNIT"]) where log.attributes["journald._SYSTEMD_UNIT"] != nil'
+          - 'set(resource.attributes["service.name"], "clamav") where log.attributes["reporthub.input"] == "journal" and (log.attributes["journald._COMM"] == "clamd" or log.attributes["journald._COMM"] == "freshclam")'
+          - 'set(resource.attributes["service.name"], "host-file") where log.attributes["log.file.path"] != nil'
+          - 'set(resource.attributes["service.name"], "etl") where log.attributes["log.file.path"] != nil and IsMatch(log.attributes["log.file.path"], "etl_execution\\.log$")'
+          - 'set(resource.attributes["service.name"], "clamav") where log.attributes["log.file.path"] != nil and IsMatch(log.attributes["log.file.path"], "/clamav/")'
+          - 'set(resource.attributes["service.name"], "host-system") where resource.attributes["service.name"] == nil'
+          - 'set(log.attributes["queue"], log.attributes["REPORTHUB_LOG_QUEUE"]) where log.attributes["REPORTHUB_LOG_QUEUE"] != nil'
+          - 'merge_maps(log.attributes, ExtractPatterns(log.body, "REPORTHUB_TASK_EVENT task_id=(?P<task_id>[0-9a-f-]+) task_name=(?P<task_name>[A-Za-z0-9_.-]+) queue=(?P<queue>[A-Za-z0-9_-]+) state=(?P<state>[A-Za-z_-]+)"), "upsert") where IsString(log.body) and IsMatch(log.body, "REPORTHUB_TASK_EVENT")'
+          - 'merge_maps(log.attributes, ExtractPatterns(log.body, "\\bTask (?P<task_name>[A-Za-z0-9_.-]+)\\[(?P<task_id>[0-9a-f-]{36})\\]"), "upsert") where IsString(log.body) and IsMatch(log.body, "\\bTask [A-Za-z0-9_.-]+\\[[0-9a-f-]{36}\\]")'
+          - 'set(log.attributes["worker"], resource.attributes["service.name"]) where IsMatch(resource.attributes["service.name"], "(?i)celery")'
+          - 'set(log.attributes["source"], "journald") where log.attributes["reporthub.input"] == "journal" or log.attributes["journald._SYSTEMD_UNIT"] != nil'
+          - 'set(log.attributes["source"], "file") where log.attributes["log.file.path"] != nil'
+          - 'set(log.attributes["source"], "container") where log.attributes["fluent.tag"] != nil'
+          - 'set(log.severity_text, "CRITICAL") where log.severity_text == "crit" or log.severity_text == "alert" or log.severity_text == "emerg" or log.severity_text == "fatal" or log.severity_text == "FATAL"'
+          - 'set(log.severity_text, "ERROR") where log.severity_text == "err" or log.severity_text == "error"'
+          - 'set(log.severity_text, "WARNING") where log.severity_text == "warning" or log.severity_text == "warn" or log.severity_text == "WARN"'
+          - 'set(log.severity_text, "DEBUG") where log.severity_text == "debug"'
+          - 'set(log.severity_text, "INFO") where log.severity_text == "" or log.severity_text == "info" or log.severity_text == "notice"'
+          - 'set(log.severity_text, "CRITICAL") where log.cache["structured"] == nil and log.severity_text == "INFO" and IsString(log.body) and IsMatch(log.body, "(?i)\\b(CRITICAL|FATAL|PANIC)\\b")'
+          - 'set(log.severity_text, "ERROR") where log.cache["structured"] == nil and log.severity_text == "INFO" and IsString(log.body) and IsMatch(log.body, "(?i)\\b(ERROR|ERR)\\b")'
+          - 'set(log.severity_text, "WARNING") where log.cache["structured"] == nil and log.severity_text == "INFO" and IsString(log.body) and IsMatch(log.body, "(?i)\\b(WARNING|WARN)\\b")'
+          - 'set(log.severity_text, "DEBUG") where log.cache["structured"] == nil and log.severity_text == "INFO" and IsString(log.body) and IsMatch(log.body, "(?i)\\bDEBUG\\b")'
+
+exporters:
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?dial_timeout=10s
+    database: operations
+    username: ${env:CLICKHOUSE_USER}
+    password: ${env:CLICKHOUSE_PASSWORD}
+    logs_table_name: otel_logs
+    create_schema: false
+    async_insert: true
+    timeout: 10s
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 1000
+      storage: file_storage/otel
+      batch:
+        min_size: 5000
+        flush_timeout: 1s
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0s
+
+service:
+  extensions:
+    - file_storage/otel
+    - health_check
+  pipelines:
+    logs:
+      receivers:
+        - fluent_forward
+        - journald/host
+        - otlp
+      processors:
+        - memory_limiter
+        - groupbyattrs/source
+        - transform/logs
+      exporters:
+        - clickhouse

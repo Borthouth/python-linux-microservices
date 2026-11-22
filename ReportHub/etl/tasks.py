@@ -35,6 +35,7 @@ from control_plane.models import (
 )
 from control_plane.utils import set_task_progress
 from config.clickhouse_queries import cancel_clickhouse_query
+from config.logging import JsonLogFormatter
 from control_plane.metadata_guard import source_metadata_write_guard
 from etl.progress import (
     CONNECTING_TO_SOURCE,
@@ -507,7 +508,7 @@ def get_etl_logger():
         os.makedirs(log_dir, exist_ok=True)
         
         file_handler = logging.FileHandler(os.path.join(log_dir, "etl_execution.log"))
-        formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
+        formatter = JsonLogFormatter()
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
     return logger
@@ -527,8 +528,11 @@ def sync_data_source_task(self, source_pk):
     ETL pipeline task for database connection checks and basic status updates,
     recording detailed execution logs to the host-mounted volume.
     """
+    return _sync_data_source(source_pk, self.request.id)
+
+
+def _sync_data_source(source_pk, task_id):
     logger = get_etl_logger()
-    task_id = self.request.id
     set_task_progress(task_id, percentage=10, status="RUNNING", current_table=CONNECTING_TO_SOURCE)
     
     try:
@@ -634,7 +638,7 @@ def sync_data_source_task(self, source_pk):
 @shared_task(bind=True, queue='queue_ux')
 def test_source_connection_task(self, source_pk):
     """Background task wrapper specifically for Save & Test Connection workflow."""
-    return sync_data_source_task(source_pk)
+    return _sync_data_source(source_pk, self.request.id)
 
 
 @shared_task(bind=True, queue='queue_periodic')

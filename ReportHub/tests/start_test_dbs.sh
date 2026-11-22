@@ -286,7 +286,8 @@ fi
 
 echo "🚀 Starting ReportHub test databases..."
 "$SCRIPT_DIR/start_test_sftp.sh" --prepare-only
-docker compose -f "$COMPOSE_FILE" up -d
+docker compose -f "$COMPOSE_FILE" up -d \
+    postgres-test mysql-test mssql-test mongo-test mongo-cdc-test mailpit sftp-test
 
 # 5. Fully automated wait & import loop
 echo "⏳ Waiting for databases to accept connections and auto-importing schemas..."
@@ -437,7 +438,19 @@ docker exec reporthub-mongo-test mongosh -u "test_user" -p "test_password" \
     --authenticationDatabase "admin" --file /docker-entrypoint-initdb.d/01-init.js >/dev/null
 initialize_mongo_cdc
 
-# Wait for Oracle (Oracle takes a couple of minutes to boot its internal services fully)
+# Oracle needs stable host time and enough available memory during startup. Start it
+# after the other test databases to avoid competing for memory during initialization.
+if command -v timedatectl >/dev/null 2>&1; then
+    wait_for_service "host clock synchronization" 60 2 \
+        bash -c '[ "$(timedatectl show -p NTPSynchronized --value)" = "yes" ]'
+fi
+wait_for_service "at least 6 GiB of available host memory for Oracle" 120 5 \
+    awk -v required_kb=6291456 \
+        '/^MemAvailable:/ { found=1; exit ($2 >= required_kb ? 0 : 1) } END { if (!found) exit 1 }' \
+        /proc/meminfo
+docker compose -f "$COMPOSE_FILE" up -d oracle-test
+
+# Oracle takes a couple of minutes to boot its internal services fully.
 wait_for_service "Oracle Database Free" 90 5 \
     docker exec reporthub-oracle-test bash -lc \
         "echo 'SELECT 1 FROM DUAL;' | sqlplus -L -S 'sys/YourStrongPassword123!@localhost:1521/FREEPDB1 as sysdba'"

@@ -1,0 +1,33 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}Direct Source Access - Control Plane{% endblock %}
+{% block content %}
+<div class="max-w-3xl mx-auto px-6 py-8">
+    <h1 class="text-3xl font-extrabold text-white">Direct Source Access</h1>
+    <p class="mt-2 mb-6 text-sm text-slate-400">{{ account.full_name }} ({{ account.username }}) [User ID: {{ account.auth_user_id }}]. Direct grants combine with access from assigned profiles.</p>
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+        <form method="post" class="space-y-4 mb-6">
+            {% csrf_token %}<input type="hidden" name="action" value="save">
+            {% for field in form %}
+            <div>
+                <label for="{{ field.id_for_label }}" class="block text-xs font-medium text-slate-300 uppercase mb-1.5">{{ field.label }}</label>
+                {{ field }}
+                {% for error in field.errors %}<p class="text-xs text-red-400 mt-1">{{ error }}</p>{% endfor %}
+            </div>
+            {% endfor %}
+            <button type="submit" class="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl">Add or update permission</button>
+        </form>
+        <div class="divide-y divide-slate-800">
+            {% for grant in grants %}
+            <div class="flex items-center justify-between gap-4 py-3">
+                <div><p class="text-sm text-white">{{ grant.source.name }}</p><p class="text-xs text-slate-400">{{ grant.get_role_display }}</p></div>
+                <form method="post">
+                    {% csrf_token %}<input type="hidden" name="action" value="remove"><input type="hidden" name="grant_id" value="{{ grant.pk }}">
+                    <button type="submit" class="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-medium rounded-lg border border-red-500/20">Remove</button>
+                </form>
+            </div>
+            {% empty %}<p class="py-6 text-sm text-slate-500">No direct source access assigned.</p>{% endfor %}
+        </div>
+    </section>
+</div>
+{% endblock %}

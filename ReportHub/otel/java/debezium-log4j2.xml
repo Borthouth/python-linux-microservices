@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN">
+    <Appenders>
+        <Console name="stdout" target="SYSTEM_OUT">
+            <ThresholdFilter level="INFO" onMatch="ACCEPT" onMismatch="DENY"/>
+            <PatternLayout alwaysWriteExceptions="false">
+                <Pattern>{"schema": "reporthub.log.v1", "timestamp": "%d{yyyy-MM-dd'T'HH:mm:ss.SSS'Z'}{UTC}", "severity": "%p", "logger": "%enc{%c}{JSON}", "message": "%enc{%X{dbz.connectorType}|%X{dbz.connectorName}|%X{dbz.connectorContext}  %m%n%throwable}{JSON}"}%n</Pattern>
+            </PatternLayout>
+        </Console>
+        <RollingFile name="appender"
+                     fileName="${sys:kafka.logs.dir}/connect-service.log"
+                     filePattern="${sys:kafka.logs.dir}/connect-service.log.%d{yyyy-MM-dd-HH}">
+            <PatternLayout pattern="%d{ISO8601} %-5p  %X{dbz.connectorType}|%X{dbz.connectorName}|%X{dbz.connectorContext}  %m   [%c]%n"/>
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
+            </Policies>
+        </RollingFile>
+    </Appenders>
+    <Loggers>
+        <Logger name="org.reflections" level="ERROR"/>
+        <Root level="INFO">
+            <AppenderRef ref="stdout"/>
+            <AppenderRef ref="appender"/>
+        </Root>
+    </Loggers>
+</Configuration>

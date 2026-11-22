@@ -1,0 +1,85 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}Control Plane Accounts - ReportHub{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-6 py-8">
+    <div class="mb-8 flex flex-wrap items-start justify-between gap-4">
+        <div>
+            <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">Control Plane Accounts</h1>
+            <p class="text-slate-400 text-sm">Create app-scoped users and assign reusable profiles for source access and announcement permissions.</p>
+        </div>
+        <div class="flex gap-2">
+            <a href="{% url 'control_plane:archived_accounts' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all">Archived accounts</a>
+            <a href="{% url 'control_plane:profile_list' %}" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-xl border border-slate-700 transition-all">Manage access profiles</a>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
+        <section class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+            <h2 class="text-lg font-bold text-white mb-4">Create account</h2>
+            <form method="post" class="space-y-4">
+                {% csrf_token %}
+                {% for field in form %}
+                    <div>
+                        <label for="{{ field.id_for_label }}" class="block text-xs font-medium text-slate-300 uppercase tracking-wider mb-1.5">{{ field.label }}</label>
+                        {{ field }}
+                        {% if field.help_text %}<p class="text-xs text-slate-500 mt-1">{{ field.help_text }}</p>{% endif %}
+                        {% for error in field.errors %}<p class="text-xs text-red-400 mt-1">{{ error }}</p>{% endfor %}
+                    </div>
+                {% endfor %}
+                {% for error in form.non_field_errors %}<p class="text-xs text-red-400">{{ error }}</p>{% endfor %}
+                <button type="submit" class="w-full px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-xl shadow-lg shadow-indigo-600/20 transition-all">Create Control Plane account</button>
+            </form>
+        </section>
+
+        <div class="lg:col-span-2">
+            {% url 'control_plane:account_list' as search_action_url %}
+            {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search name, username or email..." search_query=search_query filter_name="status" filter_value=status_filter filter_label="All Statuses" filter_options=filter_options %}
+        <section class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+            <div class="overflow-x-auto">
+                <table class="w-full text-left">
+                    <thead class="border-b border-slate-800 text-xs uppercase text-slate-400">
+                        <tr><th class="py-3 px-3">Email</th><th class="py-3 px-3">Profiles</th><th class="py-3 px-3">Status</th><th class="py-3 px-3">Last login</th><th class="py-3 px-3 text-right">Actions</th></tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-800/60 text-sm">
+                        {% for account in page_obj %}
+                        <tr>
+                            <td class="py-3 px-3 text-slate-300">{{ account.email|default:"No email" }}</td>
+                            <td class="py-3 px-3 text-slate-300">{{ account.profiles.count }}</td>
+                            <td class="py-3 px-3">{% if account.is_active %}<span class="text-emerald-400">Active</span>{% else %}<span class="text-slate-500">Inactive</span>{% endif %}</td>
+                            <td class="py-3 px-3 text-slate-400">{{ account.auth_user.last_login|date:"M j, Y H:i"|default:"Never" }}</td>
+                            <td class="py-3 px-3 text-right whitespace-nowrap">
+                                <a href="{% url 'control_plane:account_source_access' account.pk %}" class="inline-flex px-3 py-1.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/20 rounded-lg text-xs font-medium">Direct access</a>
+                                {% if account.auth_user_id == request.user.pk and account.auth_user.is_active %}
+                                <button type="button" disabled title="You cannot deactivate your own account" class="px-3 py-1.5 bg-slate-800 text-slate-600 border border-slate-700 rounded-lg text-xs font-medium cursor-not-allowed">Deactivate</button>
+                                {% else %}
+                                <form method="post" action="{% url 'control_plane:user_toggle_active' account.auth_user_id %}" class="inline">
+                                    {% csrf_token %}
+                                    {% if account.auth_user.is_active %}
+                                    <button type="submit" class="px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/20 rounded-lg text-xs font-medium">Deactivate</button>
+                                    {% else %}
+                                    <button type="submit" class="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 rounded-lg text-xs font-medium">Activate</button>
+                                    {% endif %}
+                                </form>
+                                {% endif %}
+                                {% if not account.is_active and not account.auth_user.is_active %}
+                                <form method="post" action="{% url 'control_plane:account_archive' account.pk %}" class="inline" onsubmit="return confirm('Archive this inactive account? Its audit history will be retained.');">
+                                    {% csrf_token %}<button type="submit" class="px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 rounded-lg text-xs font-medium">Archive</button>
+                                </form>
+                                {% endif %}
+                                <a href="{% url 'control_plane:account_edit' account.pk %}" class="inline-flex px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg border border-slate-700 transition-all">Edit</a>
+                            </td>
+                        </tr>
+                        {% empty %}
+                        <tr><td colspan="5" class="py-8 text-center text-slate-500">No Control Plane accounts found.</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+        {% include 'control_plane/components/pagination.html' %}
+        </div>
+    </div>
+</div>
+{% endblock %}

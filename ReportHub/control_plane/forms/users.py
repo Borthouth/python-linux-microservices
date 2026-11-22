@@ -1,7 +1,11 @@
 from django import forms
 from django.contrib.auth.models import User, Group
 from django.contrib.auth.forms import PasswordChangeForm
-from control_plane.models import SourceProfile, UserSourceAccess, Role
+from django.db import transaction
+from uuid import uuid4
+
+from control_plane.models import ControlPlaneUser, Role
+from control_plane.utils import generate_control_plane_username, validate_control_plane_email
 
 class UserRegistrationWithAccessForm(forms.ModelForm):
     password = forms.CharField(
@@ -20,43 +24,59 @@ class UserRegistrationWithAccessForm(forms.ModelForm):
 
     class Meta:
         model = User
-        fields = ['username', 'email', 'first_name', 'last_name', 'password']
+        fields = ['email', 'first_name', 'last_name', 'password']
         widgets = {
-            'username': forms.TextInput(attrs={'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm'}),
             'email': forms.EmailInput(attrs={'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm'}),
             'first_name': forms.TextInput(attrs={'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm'}),
             'last_name': forms.TextInput(attrs={'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm'}),
         }
 
-    def save(self, commit=True):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for name in ('email', 'first_name', 'last_name'):
+            self.fields[name].required = True
+
+    def clean_email(self):
+        return validate_control_plane_email(self.cleaned_data['email'])
+
+    @transaction.atomic
+    def save(self, actor):
         user = super().save(commit=False)
+        user.username = str(uuid4())
         user.set_password(self.cleaned_data['password'])
-        if commit:
-            user.save()
-            # Assign screen-level role group
-            role_choice = self.cleaned_data.get('role')
-            if role_choice:
-                group, _ = Group.objects.get_or_create(name=role_choice)
-                user.groups.add(group)
+        user.save()
+        ControlPlaneUser.objects.create(
+            auth_user=user,
+            username=generate_control_plane_username(user.first_name, user.last_name),
+            email=user.email,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            created_by=actor,
+            updated_by=actor,
+        )
+        role_choice = self.cleaned_data.get('role')
+        if role_choice:
+            group, _ = Group.objects.get_or_create(name=role_choice)
+            user.groups.add(group)
         return user
 
 class UserEditForm(forms.ModelForm):
     first_name = forms.CharField(
-        required=False,
+        max_length=150,
         widget=forms.TextInput(attrs={
             'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm',
             'placeholder': 'Enter first name'
         })
     )
     last_name = forms.CharField(
-        required=False,
+        max_length=150,
         widget=forms.TextInput(attrs={
             'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm',
             'placeholder': 'Enter last name'
         })
     )
     email = forms.EmailField(
-        required=False,
+        max_length=254,
         widget=forms.EmailInput(attrs={
             'class': 'w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm',
             'placeholder': 'Enter email address'
@@ -82,11 +102,19 @@ class UserEditForm(forms.ModelForm):
         fields = ['first_name', 'last_name', 'email']
 
     def __init__(self, *args, **kwargs):
+        self.actor = kwargs.pop('actor', None)
         user = kwargs.get('instance')
         super().__init__(*args, **kwargs)
         if user and user.groups.exists():
             self.fields['role'].initial = user.groups.first().name
 
+    def clean_email(self):
+        account = getattr(self.instance, 'control_plane_account', None)
+        if account:
+            return validate_control_plane_email(self.cleaned_data['email'], account.pk)
+        return self.cleaned_data['email']
+
+    @transaction.atomic
     def save(self, commit=True):
         user = super().save(commit=False)
         
@@ -97,6 +125,14 @@ class UserEditForm(forms.ModelForm):
             
         if commit:
             user.save()
+            account = getattr(user, 'control_plane_account', None)
+            if account:
+                account.email = user.email
+                account.first_name = user.first_name
+                account.last_name = user.last_name
+                if self.actor:
+                    account.updated_by = self.actor
+                account.save()
             # Update screen-level role group
             user.groups.clear()
             role_choice = self.cleaned_data.get('role')

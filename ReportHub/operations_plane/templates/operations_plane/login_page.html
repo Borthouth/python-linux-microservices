@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Operations Plane | Sign in</title>
+    {% if operations_tailwind_cdn_enabled %}<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>{% endif %}
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-100">
+    <main class="mx-auto grid min-h-screen w-full max-w-6xl items-center gap-8 px-5 py-8 lg:grid-cols-[0.95fr_1.05fr] lg:px-10">
+        <section class="relative flex min-h-72 flex-col justify-between overflow-hidden rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 to-slate-900/40 p-8 text-slate-100 shadow-2xl sm:p-11">
+            <div class="absolute -right-20 -top-20 h-72 w-72 rounded-full border border-indigo-300/10 shadow-[0_0_0_36px_rgba(129,140,248,0.06),0_0_0_72px_rgba(129,140,248,0.04)]"></div>
+            <div class="relative flex h-12 w-12 items-center justify-center rounded-2xl border border-indigo-500/30 bg-indigo-500/10 text-sm font-black tracking-widest text-indigo-300">OP</div>
+            <div class="relative mt-14">
+                <p class="text-xs font-bold uppercase tracking-[0.2em] text-indigo-300">ReportHub / Operations</p>
+                <h1 class="mt-4 text-4xl font-black leading-tight tracking-tight sm:text-5xl">Operations<br>Plane</h1>
+                <p class="mt-5 max-w-sm text-sm leading-7 text-slate-400">
+                    Restricted workspace for authorized operations administrators and support staff.
+                </p>
+            </div>
+            <p class="relative mt-12 text-xs text-slate-500">Operations accounts are separate from Control Plane accounts.</p>
+        </section>
+
+        <section class="mx-auto w-full max-w-md rounded-3xl border border-slate-800 bg-slate-900/60 p-7 shadow-xl sm:p-10">
+            <p class="text-xs font-extrabold uppercase tracking-[0.18em] text-indigo-300">Authorized access only</p>
+            <h2 class="mt-3 text-2xl font-extrabold tracking-tight text-white">Sign in</h2>
+            <p class="mt-2 text-sm leading-6 text-slate-400">Use your Operations Plane username and password.</p>
+
+            {% if form.non_field_errors %}
+                <div class="mt-6 rounded-xl border border-rose-500/30 bg-rose-950/40 px-4 py-3 text-sm text-rose-200" role="alert">
+                    {% for error in form.non_field_errors %}{{ error }}{% endfor %}
+                </div>
+            {% endif %}
+
+            <form method="post" class="mt-7 space-y-5">
+                {% csrf_token %}
+                <div>
+                    <label class="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-300" for="{{ form.username.id_for_label }}">Username</label>
+                    {{ form.username }}
+                </div>
+                <div>
+                    <label class="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-300" for="{{ form.password.id_for_label }}">Password</label>
+                    {{ form.password }}
+                </div>
+                <button class="w-full rounded-xl bg-indigo-600 px-4 py-3.5 text-sm font-bold text-white shadow-lg shadow-indigo-950/40 transition hover:bg-indigo-500 focus:outline-none focus:ring-4 focus:ring-indigo-400/30" type="submit">
+                    Enter Operations Plane
+                </button>
+            </form>
+        </section>
+    </main>
+</body>
+</html>

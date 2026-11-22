@@ -1,0 +1,13 @@
+<div>
+    {% include "operations_plane/dashboard/components/welcome_banner.html" %}
+    {% include "operations_plane/dashboard/components/stats_grid.html" %}
+    <div id="recent-jobs" class="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
+        {% include "operations_plane/dashboard/components/log_store_widget.html" %}
+        <div id="widget-searches-wrapper" class="{% if not widget_prefs.show_searches %}hidden{% endif %} lg:col-span-1">
+            {% include "operations_plane/dashboard/components/recent_jobs_widget.html" %}
+        </div>
+        <div id="widget-analyses-wrapper" class="{% if not widget_prefs.show_analyses %}hidden{% endif %} lg:col-span-1">
+            {% include "operations_plane/dashboard/components/recent_analyses_widget.html" %}
+        </div>
+    </div>
+</div>

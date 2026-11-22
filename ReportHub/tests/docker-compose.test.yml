@@ -88,6 +88,7 @@ services:
     container_name: reporthub-oracle-test
     environment:
       - ORACLE_PWD=YourStrongPassword123!
+    shm_size: 2gb
     ports:
       - "1522:1521"
       - "5500:5500"

@@ -4,16 +4,44 @@ Track the development phases, architectural milestones, and codebase optimizatio
 
 ## Suggested next priorities
 
-1. Complete safe CDC-to-batch switching in the control plane: resolve uncertain external requests, migrate existing-object ownership and privileges, coordinate restricted-identity rollout and worker/client fencing, then expose confirmed switch and resume actions. Real-worker cancellation behavior is tested, but delayed requests are not fenced or safely recovered. Candidate roles and query-ID propagation are verified in isolation; staging and status are available, but switching remains disabled. Use [the continuation handoff](./CDC_TO_BATCH_HANDOFF.md) as the detailed CDC work tracker and next-task source.
-2. Continue validating the CDC cleanup workflow against disposable connector/PostgreSQL/Kafka/ClickHouse services. Uncertain attempts block cleanup by default; administrators may explicitly accept the risk. Automatic proof of termination and protection against deleting the marker are unfinished; do not use on shared resources.
-3. Enforce source and tenant access before introducing cross-source linking references and linked reports.
-4. Evaluate explicit incremental strategies and S3/Parquet sources where their source guarantees and operational costs justify them.
-5. Extend AI layouts or diagnostics and dashboard navigation where they improve the existing workflows.
+1. Resume MongoDB CDC parity: wire the tested decoder into ingestion, preserve BSON identity and offset/write safety, expose read-only readiness guidance, and validate the stored customer URI end to end using disposable services. MongoDB CDC stays disabled. Use [the continuation handoff](./CDC_TO_BATCH_HANDOFF.md) as the detailed CDC tracker.
+2. Keep CDC-to-batch switching parked until uncertain external requests, existing-object ownership/privileges, restricted identities and worker/client fencing are safely resolved. Candidate roles and cancellation probes do not prove delayed requests cannot execute. Continue cleanup validation only against disposable services; do not inventory or delete shared resources.
+3. Verify the running logical log-source consolidation and representative source coverage, exercise outage/queue/disk recovery, agree raw/snapshot/AI audit retention, and automate safe worker-scope rollout. Keep OTel; oversized-fragment reassembly and alternative collectors are parked by the November 18 user decision. See [the logging handoff](./OPERATIONS_LOGGING_HANDOFF.md) for current evidence and concrete next steps.
+4. Enforce source and tenant access before introducing cross-source linking references and linked reports.
+5. Evaluate explicit incremental strategies and S3/Parquet sources where their source guarantees and operational costs justify them.
+6. Extend AI layouts or diagnostics and dashboard navigation where they improve the existing workflows.
 
 The unchecked items below are proposals, not implemented capabilities. Existing CDC and AI features have the limitations described in [README.md](./README.md).
 
-## Current checkpoint (2026-11-14)
+## Current checkpoint (2026-11-22)
 
+- Account management is consolidated at `/control-plane/accounts/`, with
+  generated usernames, unique non-archived email addresses, deactivation and
+  archival. Report recipients can be selected as accounts or shared profiles;
+  grants apply to future runs. See the README for access and delivery limits.
+- Dedicated list/history pages use shared search and pagination; audit records
+  are queried only after Search is submitted. The DLQ tracks supported report
+  and data-source retries, with legacy and uncertain-state limitations described
+  in the README. Email Audit's legacy re-queue action does not resend email.
+- Control Plane migrations through `0056`, Reports through `0016`, and
+  Operations through `0010` are applied to the development database. The
+  relevant idle UX, warm and periodic workers were restarted and responded.
+  Recent focused suites passed 133 tests, including 17 PostgreSQL artifact and
+  delivery tests; this is not a full-project regression run.
+- The running Collector's supervisor, source policy and mounted configuration
+  match the current source files. This is a file comparison, not confirmation
+  of source coverage or end-to-end log delivery.
+
+## Previous checkpoint (2026-11-18)
+
+- Operations logical-source consolidation is implemented and tested, but not
+  deployed before the requested host shutdown: ETL uses container output,
+  ClamAV uses daemon/updater journal output, and duplicate file inputs are
+  removed. Celery/Django exclude ETL; Host/system excludes ClamAV. The targeted
+  Django suite passed 35 tests, two isolated Collector regressions passed, and
+  production-config validation plus eight synthetic ClickHouse classifications
+  passed. At that stopping checkpoint the Collector had not been rebuilt; see
+  the current checkpoint above and the [logging handoff](./OPERATIONS_LOGGING_HANDOFF.md).
 - The agreed SFTP scope is complete: reusable destinations, multi-destination
   Celery delivery, connection tests, Save & Test, Activate/Deactivate, delivery
   audit/resend and the optional dashboard widget. Enterprise cloud destinations
@@ -50,8 +78,27 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
 - The running app uses Django 5.2.19; a 6.1 upgrade is deferred because the
   released `django-celery-beat` requires Django <6.1 and Python must also be
   upgraded. The requirements file does not pin Django to the 5.2 series.
-- Browser verification of polling and the unused-dependency review are small
-  follow-up candidates, deferred until a later session.
+- Data-source polling was checked in a browser using a simulated running
+  response followed by the real completed-status endpoint: polling stopped on
+  completion. A real running task and report polling remain unverified in the
+  browser. The dependency review identified candidates for a future removal
+  decision; no packages were removed.
+- The OpenTelemetry Collector writes to `operations.otel_logs`. Synthetic OTLP
+  and real Docker Fluent Forward Python/Java exception probes verified normal
+  record attribution, severity and redaction; broad source coverage and
+  oversized-fragment reassembly remain incomplete. Vector has been retired.
+- Operations now has separate Live logs and explicit 25-row Log search,
+  owner-only saved history with View/Delete actions, saved-snapshot filtering
+  and pagination, and selectable/collapsible AI results. New runs analyze only
+  filtered saved events; older full-range runs are clearly labelled.
+  Migrations through Operations `0010` are applied. The latest Operations suite
+  passed 52 tests, with browser and real local AI checks on 100 unfiltered and
+  four ERROR-filtered saved events. This was not a full-project regression run.
+- During the AI scope rollout, an old worker processed one newly scoped run
+  against the original ClickHouse range. That run was recovered and verified
+  against its four saved ERROR events. Pausing submissions until the migrated,
+  scope-aware worker is reloaded is mandatory; automated rollout gating remains
+  next work.
 
 ## Phase 1: Infrastructure, Networking & Decoupled Architecture
 - [x] Initialize repository structure (`README.md`, `ROADMAP.md`, `.gitignore`).
@@ -97,6 +144,7 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [x] Implemented Redis-backed storage scanning (`dlq:task:*`) with JSON decoding and attribute normalization (`id`, `display_name`, `error_message`, `failed_timestamp`).
   - [x] Integrated robust timestamp parsing via `django.utils.dateparse.parse_datetime` to eliminate template rendering crashes and support formatted date displays.
   - [x] Refactored the dashboard DLQ widget into a grid-based layout matching the "Recent Pipeline" component, complete with failure counts, stack trace previews, and search/pagination controls on `/control-plane/dlq/`.
+  - [x] Track supported report-generation and data-source task failures and retry attempts durably, with status filtering and confirmed requeue. Legacy Redis entries lack retry details. Uncertain publication or stale queued/running states require investigation; delivery and CDC retries are deferred.
 - [x] **Asynchronous UI Status & Toast Notification Architecture:**
   - Configured HTMX polling integration (`hx-get`, `hx-trigger="every 2s"`, `hx-swap="outerHTML"`) for asynchronous database connection tests across MySQL, PostgreSQL, and MSSQL.
   - Developed CSP-compliant global toast event listeners (`htmx:afterSwap` decoupled handling) avoiding inline script violations.
@@ -263,6 +311,20 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [x] Implement backend views for record retrieval, webhook status transitions, and administrative actions (`Re-queue` via sky-blue action buttons, `Delete` via confirmation modals).
   - [x] Design fully responsive UI matching the Dead Letter Queue (DLQ) layout patterns, complete with error inspection modals, search filters, and status-coded badge pills.
 - [x] Use the existing email delivery dashboard widget and audit page for delivery monitoring; the audit page filters failed and bounced emails, avoiding a duplicate dashboard widget.
+- [ ] **Permission-controlled announcements across both planes (agreed proposal; not implemented):** Provide one-way announcements with separate Control Plane and Operations Plane inboxes and management screens, sharing underlying messaging and delivery functionality. Authorized publishers may target individual users within their own plane, or all active eligible users in the Control Plane, Operations Plane, or both. Ordinary user-to-user messaging, conversation replies and live chat are deferred.
+  - [ ] **Permissions and account boundaries:** Assign separate publishing, cross-plane publishing, shared pinning, required-acknowledgement and announcement-audit grants through reusable profiles/permission groups in each plane. Administrator status must not automatically confer cross-plane publishing or audit access. Never join accounts by matching usernames or email addresses.
+    - [x] Add the five explicit announcement grants to Control Plane shared profiles, backed by a migration-seeded permission catalogue with stable codes, names, categories, descriptions and active status. Provide a read-only catalogue page, database-driven grouped profile selections, inherited-grant display on account edit, active-account/profile/definition enforcement and audited grant changes. Preserve existing grants/history when upgrading from code-defined choices. Existing source access and administration behavior remain unchanged; no accounts receive automatic grants. Cross-plane publishing requires both publishing grants. This is permission groundwork only, not an implemented announcement workflow.
+    - [ ] Add equivalent Operations user/profile/permission management using separate Operations accounts; Operations currently has Admin/Support roles, not configurable permission groups. Enforce the grants in future announcement views, publishing tasks and audit access in both planes.
+  - [ ] **Audience and visibility:** Capture the initial active eligible recipient accounts at publication time, including scheduled publication, and add newly created eligible accounts to still-active all-user announcements, recording that they were added later. Individual-user announcements must not expand to new accounts. Define legacy Control Plane account eligibility explicitly. Enforce recipient and plane boundaries in screens, queries, background tasks and email links; recipients see only their own messages and status.
+  - [ ] **Draft, preview and scheduling:** Save drafts, preview the selected audience, channels and missing-email substitutions, then confirm publication now or at a future date/time. Validate publishing permissions and recipient eligibility again when scheduled publication executes.
+  - [ ] **Delivery channels:** Let the publisher choose email, web dashboard, or both. Keep an authenticated message page available for every channel choice. If a recipient has no configured email address, automatically substitute dashboard delivery and visibly report the substitution. Email contains the title, full announcement text and a link to view or acknowledge it in the correct plane; email copies cannot be recalled by expiring a notice.
+  - [ ] **Reliable asynchronous email:** Reuse Django's email backend, Celery and appropriate delivery/audit patterns, but do not assume the report-specific email task or existing audit requeue action provides announcement delivery. Send individually without exposing other recipients, track delivery attempts per recipient, surface failures and support bounded retries without unnecessarily resending successful recipients. SMTP delivery remains at-least-once in uncertain-send scenarios. Keep message, delivery and acknowledgement records authoritative in PostgreSQL rather than the Operations log store.
+  - [ ] **Inbox and pinning:** Provide message history and a compact pinned-notice area across authenticated pages in the target planes, not public login pages. Recipients may dismiss notices that do not require acknowledgement, retaining them in history. Required-acknowledgement notices remain discoverable even when an optional dashboard widget is hidden; outstanding reminders never block normal application work.
+  - [ ] **Explicit acknowledgement:** Offer an optional acknowledgement-required setting. An email link opens the appropriate authenticated page; only an explicit acknowledgement action records the recipient account, time and exact published message/version. Delivery, viewing or following a link must not count as acknowledgement. After acknowledging, a recipient may dismiss the notice while retaining it in history. Inbound email replies and email-based acknowledgement are deferred.
+  - [ ] **Expiry and corrections:** Support an optional expiry date/time and a manual Expire action for authorized publishers. Expiry stops reminders and further acknowledgement while preserving acknowledged and outstanding states in history. Freeze published content; corrections create a linked replacement and expire the original, with fresh acknowledgement if required on the replacement.
+  - [ ] **Reminder emails:** Allow optional reminders for outstanding acknowledgements, with frequency and maximum count set when creating the announcement. Default to at most once per day and three reminders per recipient per announcement. Stop on acknowledgement or expiry, recheck eligibility before sending, and define validated bounds and concurrency behavior so queued or retried reminders do not exceed the configured limits.
+  - [ ] **Audit and retention:** Show per-recipient delivery and acknowledgement status to the publisher and users with an explicit announcement-audit grant for the relevant plane(s); recipients can inspect their own status. Record publication, late recipient additions, acknowledgement, expiry and replacement actions without exposing private contents through general operational log search. Retain announcement and acknowledgement history until an explicit retention policy is agreed; provide no routine hard-delete action.
+  - [ ] **Validation:** Test within-plane individual delivery and all-user announcements to one or both planes, permission and account isolation, scheduled publication, new-account inclusion, missing-email substitution, partial delivery failures and uncertain retries. Cover pinning/dismissal, authenticated version-specific acknowledgement, expiry/replacement races, reminder limits and cancellation, audit visibility and desktop/mobile accessibility using disposable services and real email workers.
 
 ---
 
@@ -294,6 +356,10 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
 - [x] **Admin Navigation:** Split administrative links into Data & Pipelines, Operations, History, Governance, and Integrations menus; page breadcrumbs link back to relevant lists.
 - [x] **Global Cursor/Selection Optimization:** Applied a clean app-wide `select-none` approach on structural/UI chrome while targeted `select-text` preserves copy-paste usability on essential audit logs, error traces, and recipient strings.
 - [x] Evaluate optional accessible widget navigation menus: the email-delivery widget offers a native disclosure with sent/delivered/failed/bounced audit links, while retaining its direct "View all" link. Simple pipeline, report, CDC failure and DLQ destinations retain direct links. Keyboard activation, Escape/focus return, outside-click dismissal, mobile sizing and empty-state links are verified.
+- [ ] **Hybrid real-time presence and live diffs (proposal):** Evaluate selective Server-Sent Events or WebSockets for subtle "someone else is editing this record" indicators, live status badges, and relevant record-change notifications or diffs, without rewriting the application as a real-time SPA.
+  - [ ] Evaluate Hypercorn with Django ASGI for SSE and HTTP/2. Neither is configured or implemented yet; WebSockets would also require Django-compatible WebSocket handling.
+  - [ ] Define presence expiry and disconnect behavior, authorization and privacy for each record, and how concurrent edits and stale data are handled. Presence is advisory, not a lock or a guarantee against conflicting writes.
+  - [ ] Compare transport and deployment costs with existing polling; handle reconnects, missed updates, stale or unavailable connections, and accessible status feedback. Test permissions, concurrent editors, reconnection and fallback behavior.
 - [ ] **Contextual operations widget (proposal):** Add an optional compact dashboard card highlighting relevant recorded operational issues and linking to existing control-plane workflows. Existing operational records and dashboard components make this feasible; evaluate the implementation against the application's needs rather than assuming a specific architecture. Start with deterministic relevance rules; an LLM is not required.
   - [ ] Start with a staff-only, read-only card using a small set of existing signals, such as a CDC rebuild awaiting cutover, a recently recorded CDC execution failure, or a failed report file delivery. Link to the authorized rebuild or audit page; actions remain in their existing workflows. Define severity, event windows and stable tie-breaking, and distinguish an unresolved state from a historical failure that may already have been addressed. Avoid repeatedly presenting old failures as current incidents.
   - [ ] Scope every candidate and destination to the user's permissions before ranking; don't expose names, counts or details from inaccessible records. Staff access is the initial boundary for these signals, not tenant isolation. Non-staff or tenant-specific cards depend on Phase 5's consistent source/workspace authorization and tenant filtering, plus corresponding authorization on the linked pages. Do not assume an organization model or user-profile organization exists.
@@ -323,6 +389,192 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
 - [x] Add SFTP delivery audit tracking with search/status filters, per-destination errors and retry counts, confirmed failed-only resend and a staff-only optional dashboard widget.
 - [ ] Extend delivery audit tracking to future cloud object-storage deliveries.
 - [ ] Add consolidated ETL ingestion metrics and dedicated security/login audit views.
+- [ ] **OpenTelemetry operational log ingestion into ClickHouse (initial synthetic path verified; source coverage and hardening remain):**
+  - [ ] Inventory ReportHub process logs and their existing destinations, including Django, Celery workers and Beat, ETL file logs, and supporting services. Define which streams are collected and how each log entry is attributed; do not assume every process emits a complete audit trail.
+  - [ ] Benchmark realistic log volumes, compression, storage costs and analytical queries alongside reporting before relying on projected compression ratios or query speeds. Evaluate structured JSON ingestion, typed columns, text-search/index options and the cost of unstructured substring searches.
+  - [x] Keep PostgreSQL authoritative for existing audit, execution, delivery and recovery records. Store operational logs separately in ClickHouse; do not replace existing audit workflows.
+  - [x] Define the OpenTelemetry exporter schema in `operations.otel_logs`, with event and ingestion timestamps, resource/scope/log attributes, monthly event-time partitions, generated event IDs and no automatic TTL.
+  - [x] Add an OpenTelemetry Collector Contrib configuration for Fluent Forward, OTLP, host journald, the ETL log file and ClamAV files, with persistent buffering, sensitive-value redaction and task metadata extraction. Exclude ClickHouse's own server log files to prevent a feedback loop into the same database.
+  - [x] Provision the table and verify a synthetic OTLP event is redacted, written to ClickHouse and returned by Operations search. Subsequent normal-size Python/Java Docker forwarding probes also pass; this is not comprehensive source coverage.
+  - [ ] Confirm representative logs from active Django, Celery, Redis, CDC and ScanHub containers after their logging drivers are applied. Existing containers still using `json-file` require separate recreation; coordinate this to avoid interrupting active work.
+  - [ ] Exercise retries, backpressure, unavailable ClickHouse, full disk and loss reporting; validate the collector's resource limits and recovery behavior before relying on the pipeline.
+  - [x] Add an admin-only **Log Sources** screen under **Administration**, with audited per-source choices and a Fluent Forward master switch. A Collector-local supervisor validates and applies generated filters without a Docker socket or worker restart, reports application status, and retains the last good configuration. Live probes verified all source categories enabled, all disabled, Redis alone disabled, and the Fluent Forward master switch disabled. The UI warns about overlapping streams and forwarding prerequisites; it does not automatically deduplicate or inspect Docker logging-driver state.
+  - [x] Emit Django, Celery and ETL-file records as single-line JSON, decoding embedded traceback newlines before Collector redaction/export and retaining the record's original severity. A chained Python exception was verified as exactly one redacted ERROR row through Docker Fluent Forward. Celery workers and Beat were drained/restarted with approval; 25 Operations tests pass.
+  - [x] Emit Debezium Log4j2 and Kafka reload4j stdout records as single-line JSON containing full Java exception causes and suppressed exceptions. Verify one redacted ERROR event and a separate correctly normalized WARNING through real Docker Fluent Forward. Recreate only Kafka/Connect with approval and verify recovery of all nine existing connectors/tasks; retain local file appenders and existing Kafka version.
+  - [x] Isolate source resources before service-name normalization, preventing attribution leakage within mixed Fluent/OTLP batches. Verify container, file, journal and untagged OTLP records, retained source attributes, source filtering and severity in an isolated Collector regression and a live mixed-resource probe.
+  - [ ] Reassemble oversized Docker partial-message records before JSON decoding/redaction. Live 128 KiB Java probes retained all payload fragments in order but each exception occupied nine rows at Docker's 16 KiB boundary. Use container/stream/partial ID and ordinals, bounded buffering, timeout/size limits and explicit incomplete-message reporting. Arbitrary plaintext is not grouped by the JSON fixes; do not reconstruct records by timestamp alone.
+  - [x] Split generalized logs into a bounded Live logs page (25/50/100 entries) and a separate non-refreshing Search page. Keep the dashboard focused on Store connectivity, links to both log pages, and recent search/AI jobs; remove duplicate log previews and their query. Prioritize source/service/severity/text filters and move job fields into optional filters. Load full messages on demand in an accessible scrollable dialog, identify transport fragments, and share log-store status and notification components. Distinguish current ingestion choices from retained history. Migrations `0006_split_log_screens` and `0007_remove_recent_logs_widget` are applied.
+  - [x] Clear the initial test data from `operations.otel_logs` and legacy `operations.system_logs` after the Python exception round-trip passed, as requested. Both tables were verified empty while collection was stopped; source choices were restored and collection restarted. Warehouse and PostgreSQL audit data were not cleared.
+  - [ ] Review and test log redaction for credentials, personal data and other sensitive content; restrict access and protect transport and storage. Use least-privilege collector and reader identities, and evaluate the security implications of any Docker or host-log access.
+  - [x] Implement separate Operations account records and login for support/admin roles. Each app-facing Operations username maps to a distinct UUID-named Django auth `User`; Operations identity does not depend on Control Plane names or Django staff/superuser flags.
+  - [x] Implement host-only session-cookie support and optional host routing for the separate app domains. Verify the deployment-specific subdomain and proxy configuration before enabling both realms on separate hosts.
+  - [x] Define the Control Plane account and shared access-profile model. New `ControlPlaneUser` accounts use app-scoped usernames mapped one-to-one to UUID-named Django auth users. Reusable `ControlPlaneProfile` permissions are shared through explicit memberships and source-scoped roles. Existing Django accounts and their direct `UserSourceAccess` grants remain intact; profile grants combine with direct grants, with the most permissive role taking effect. Keep Control Plane memberships separate from Operations users and authorization.
+  - [x] Establish `operations_plane` as a distinct app presented as the **Operations Plane** at `/operations/`, separate from Django admin and supporting admin and support roles.
+  - [x] Implement the bounded recent-24-hour search UI, filters, unavailable state, task-ID timeline drill-down, async historical-search workflow and explicit AI-analysis workflow. Search has been verified against the synthetic OpenTelemetry event; broad live source delivery remains unverified.
+  - [ ] Link matching log entries to authoritative job, DLQ and audit records where correlation data permits, and provide an independent collector/ClickHouse health signal.
+  - [x] Provide a separate **Live logs** page with approximately five-second incremental receipt-time polling, a two-second overlap and event-ID deduplication. Bound the visible window, back off on failures and suspend hidden tabs. **Pause live view** freezes browser updates and scrolling only, confirms "Live view paused. Log collection continues.", and retains **Paused / Resume** controls after message dismissal. Scrolling away from the bottom or opening a message pauses automatically; explicit Resume follows the newest entries. Query status and last check/receipt are visible, but this is not a gap-free stream or proof of active ingestion.
+  - [x] Run searches extending beyond the recent 24-hour screen as asynchronous Celery jobs with ownership checks, bounded results and queued/running/completed/failed status.
+  - [x] Require explicit searches and paginate log results 25 at a time using reusable Previous/Next controls. Persist successful recent searches as well as background searches, and provide owner-only Search history with text/status filters and pagination.
+  - [x] Provide explicit View results and confirmed per-entry Delete actions in Search history; deletion removes linked AI runs and blocks active jobs. Search/filter saved result snapshots by text, level and source with local pagination, without querying ClickHouse or changing the original AI inputs.
+  - [x] Analyze filtered or unfiltered saved events only for new AI runs. Persist per-run text/level/source filters, list runs with their inputs, restore filters when selecting a run, and show only its result. Support collapsing large AI results without stopping background processing. Preserve clearly labelled older full-range runs.
+  - [ ] Define retention/quotas for saved search snapshots, AI results and retained audit copies as well as raw logs; per-entry deletion does not replace a retention policy.
+  - [ ] Automate AI worker input-scope compatibility checks during deployment; until then, pause submissions until migrations and the verified worker reload are complete.
+  - [x] Offer AI log analysis only on explicit request through a separate Celery queue and local Ollama; report bounded sample coverage and avoid implying the sample represents every event.
+  - [x] Link AI runs to their originating saved search and recover prior runs through Search history. Submit and update Queued/Processing/results inline, without navigation. Bound prompts by encoded byte size, group repeated sampled excerpts, and cap per-request output. A real 35,540-match / 300-sample run completed locally in about 42 seconds and was recovered through history.
+  - [x] Keep the initial console read-only. Route any future operator actions through existing workflows or explicitly authorized, confirmed and audited actions; do not make log search a general-purpose command or query console.
+  - [ ] Evaluate Grafana with its ClickHouse plugin for optional operational dashboards, including access controls and deployment cost; it does not replace required control-plane workflows.
+  - [ ] Validate collection, permissions, retention, recovery and resource limits end to end using disposable services, and document deployment, backup and operational limitations. External-system log ingestion is outside this initial scope.
+
+### Proposal: centralize internal logs in ClickHouse
+
+**Goal:** Give authorized ReportHub operators a centralized, searchable view
+of application and Celery process logs without placing a high volume of
+operational log lines in PostgreSQL. Use the existing ClickHouse service as
+the initial destination, while keeping operational logs separate from
+authoritative audit, execution, delivery and recovery records. The Operations
+Plane interface and background query/analysis workflows are implemented; the
+end-to-end collector-to-ClickHouse connection is still in progress.
+
+**Operations console and access model:** The distinct Operations Plane is
+implemented for authorized administrators and support staff without granting
+them access to customer-facing data workflows. It uses separate Control Plane
+and Operations account records, with no automatic account link even when
+usernames or personal details match. Each domain has its own account lifecycle
+and permissions; do not treat a matching username as proof that two records
+represent the same principal.
+
+Django's default authentication setup uses one `AUTH_USER_MODEL`, so two
+independent user tables are not achieved simply by adding one model per app.
+The implemented identifier scheme gives each app's account table its own
+human-readable username, unique within that app but allowed to duplicate the
+other app's username. Each Control Plane or Operations account maps one-to-one
+to a distinct Django auth `User` with an opaque UUID username. App-specific
+login routes resolve accounts only in their own domain and never infer identity
+from a matching username or email. Host-only session cookies and separate host
+routing are supported; production subdomain deployment remains to be verified.
+
+Tests cover login routing, session separation, role assignment, account
+ownership and audit attribution. Password recovery and any additional account
+administration workflows remain future work. Operations authorization does not
+depend on Django's staff/superuser flags. The initial console is read-only;
+administrative configuration and later actions need explicit permissions,
+confirmations and an audit trail.
+
+The existing `UserSourceAccess` relationship continues to grant source access
+directly to legacy Django users. New Control Plane accounts are separate
+`ControlPlaneUser` records mapped one-to-one to UUID-named Django auth users.
+Reusable `ControlPlaneProfile` records hold source-scoped roles, and
+`ControlPlaneProfileMembership` allows multiple Control Plane users to share
+those permissions. Direct and profile grants are combined, with the most
+permissive applicable role effective. Do not use profile membership to link
+Control Plane and Operations identities, and do not grant Operations users
+source-data access merely by letting them inspect logs.
+
+The implemented Django app package is `operations_plane`, presented as the
+**Operations Plane** at `/operations/`. This parallels `control_plane` while
+covering both support and administrative workflows, without implying that the
+app is Django admin.
+
+**Log categories and sources:**
+
+- **Application/process events** include structured task outcomes, errors and
+  other useful application events. These can be searchable in ClickHouse, but
+  are not a complete or authoritative record of job lifecycle or user actions.
+- **Admin/support activity and workflow history** are security-sensitive audit
+  records, not interchangeable with process logs. Keep PostgreSQL as the
+  source of truth for existing audit, execution, delivery and recovery
+  workflows. A ClickHouse copy of selected records may support analysis, but
+  must retain provenance and delivery status and must not be presented as
+  complete when delayed or failed.
+- **Service/system logs** include Django, Celery worker and Beat output, the ETL
+  log file, supporting service and Docker/container output, and, where deployed
+  and authorized, systemd/journald, kernel and reverse-proxy logs. Store these
+  in the separate `operations.otel_logs` table. A log line is operational evidence,
+  not necessarily a complete or tamper-proof audit entry.
+
+**Usefulness and feasibility:** The first Operations screens and bounded
+task-centric search workflows are implemented, and the synthetic Collector to
+ClickHouse to search path is verified. Real container forwarding and
+correlation still need validation; not every task produces a complete
+structured lifecycle trace. The current Collector also reads host journald
+and ClamAV/ETL files, starting at the end of retained files to avoid a large
+initial backfill. ClickHouse remains appropriate for bounded, time-filtered
+search and aggregation, but does not replace task state, DLQ recovery or
+security audit workflows. A source-choice screen is planned so administrators
+can control overlapping streams such as Redis container logs without storing
+duplicate copies.
+
+**Why ClickHouse:** Its columnar layout can compress repetitive fields such as
+service, severity and timestamp efficiently, and SQL is well suited to
+time-windowed aggregations, such as counting HTTP 500 responses by service over
+seven days. Separate tables allow different schemas, access rules and retention
+periods. The original proposal suggested 10–20x compression and very fast
+queries over billions of rows; these are illustrative, not guarantees. Measure
+actual compression, ingestion overhead, query latency and reporting impact
+using representative ReportHub data and hardware.
+
+**Initial ingestion setup and remaining validation:** Compose uses an
+OpenTelemetry Collector Contrib service with Fluent Forward, OTLP, host
+journald, ETL-file and ClamAV-file inputs, redaction and task-metadata
+transforms, a persistent queue, and a ClickHouse exporter targeting
+`operations.otel_logs`. An idempotent management command provisions the
+exporter-compatible table with monthly event-time partitions and no automatic
+TTL. A synthetic redaction/write/search round trip is verified. The
+ClickHouse server's own log files are deliberately excluded: feeding them
+back into the same ClickHouse instance created a self-amplifying ingestion
+loop during testing; the test-generated feedback rows were cleared after
+approval. The historical Vector service, config, stopped container and
+persistent Docker volume have been removed after confirming no containers used
+the volume.
+
+The Compose files now configure Fluent Forward logging for ReportHub, CDC and
+ScanHub containers, but existing running containers retain their current
+`json-file` driver until individually recreated. Do not recreate active
+workers as part of routine verification without confirming task impact. Keep
+application/process events, system logs and any analytical audit copies in
+separate tables because their row shapes, sensitivity and useful lifetimes
+differ.
+
+The pipeline should not block application requests on log delivery. Continue
+testing its startup, batching, retries, duplicates, backpressure, unavailable
+ClickHouse, full-disk behavior and explicit loss reporting without disrupting
+application processes. Avoid recursive collection of the collector's own
+logs. Prefer structured JSON mapped to typed columns: event timestamp,
+ingestion timestamp, service/process, host or container, severity, message and
+available task or correlation IDs. Retain unstructured text and multiline
+exception context where needed, and define how missing or unparseable fields
+are represented rather than inventing them.
+
+The current table definition has no automatic TTL and partitions by event
+month, matching the preference to retain raw logs until an explicitly
+authorized clear-down is designed. This is intentionally unbounded retention,
+not a claim that ClickHouse storage is unlimited. Monitor disk use and
+capacity, define who may clear which ranges and how the action is confirmed
+and audited, and validate backup/restore and clear-down behavior before
+exposing such an action. The recent 24-hour screen and asynchronous Celery
+searches over older ranges are query modes, not retention limits. An
+independent health signal is needed when ClickHouse or the collector is
+unavailable.
+
+**Search, operations and trade-offs:** Time, service and severity filters
+should be efficient for common investigations. Free-form substring searches
+over large messages can consume substantial CPU; assess ClickHouse text
+indexes and alternatives against actual search patterns rather than assuming
+Elasticsearch-like behavior. Compare shared and separate ClickHouse
+deployments if ingestion or investigation queries compete with reports.
+Bound and monitor the shipper's buffer, retries, duplicates and loss behavior,
+and protect sensitive messages, credentials and access to host/container logs.
+An independent health signal is needed when ClickHouse or the collector is
+unavailable.
+
+The Operations area now provides a bounded recent-24-hour search, asynchronous
+historical Celery searches, task-ID drill-down and explicit AI analysis with
+sample-coverage disclosure. The current implementation is read-only. Once
+ingestion is verified, link results to existing job, DLQ and audit screens
+where correlation data permits; distinguish incomplete log coverage and
+ingestion delay from proof that an event did not occur. Optional live tailing
+and Grafana dashboards remain future work. Other systems posting logs to
+ReportHub is outside the initial scope.
 
 ---
 
@@ -331,6 +583,7 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
 - [ ] **Dependency & Configuration Pruning:**
   - [x] Consolidate duplicate package declarations in `requirements.txt` (`celery`, `pymysql`, `psycopg2-binary`); verified all declared package names are unique.
   - [ ] Evaluate unused stack dependencies (FastAPI, Uvicorn, AsyncPG) to trim container build overhead if not servicing separate microservice endpoints.
+    - Static review: Compose runs Django's development server; FastAPI is used by a standalone health-check stub, and no Uvicorn invocation was found. AsyncPG is used by the standalone Alembic/SQLAlchemy scaffold. Gunicorn is declared but not configured in the checked-in stack; Pydantic is a FastAPI dependency without direct imports. Confirm intended deployment and scaffold support before removing anything, then rebuild and test in isolation.
   - [ ] Evaluate reducing duplicated Compose environment configuration without changing variable precedence, service-specific settings, or secret exposure.
 - [ ] **Upgrade to Django 6.1:** Stay on Django 5.2 for now. The released `django-celery-beat` 2.9.0 requires Django <6.1; track [upstream support](https://github.com/celery/django-celery-beat/issues/1079) before upgrading.
   - [ ] Upgrade the application image and development environment to a supported Python version (3.12 or newer), then review Django and third-party dependency compatibility, including CSP, encrypted fields, sessions, history and Celery.
@@ -353,6 +606,9 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [x] Track report execution lifecycle metadata in PostgreSQL (`pending`, `running`, `completed`, `failed`, `cancelled`).
   - [x] Upload completed report artifacts to MinIO and persist their object paths with execution records.
   - [x] Add recoverable consistency handling between MinIO uploads and PostgreSQL execution updates. Each upload attempt has a unique object path and records its expected size and SHA-256 before upload; completion verifies the stored size and checksum metadata. Staff can reconcile the current uncertain attempt from report history. Missing or mismatched objects are retained for review and never automatically deleted. Reconciliation finalizes the artifact only; it does not replay email or file-delivery fan-out.
+- [ ] **Report and Celery run-time estimates (proposal):** Show elapsed time and, where sufficient reliable data exists, an estimated remaining time for running reports and applicable Celery tasks in their existing control-plane status views.
+  - [ ] Evaluate estimates from comparable historical runs and measurable progress, accounting for differing workloads, queue wait, retries and execution stages. Label estimates as approximate and show an unavailable or insufficient-data state rather than a misleading countdown when an estimate is not reliable.
+  - [ ] Test long and short runs, missing history or progress, retries, stalled or failed tasks, and terminal states; distinguish queued time from execution time.
 - [ ] **Dynamic Query Builder & Join Engine:**
   - [x] Build the `ReportDefinition` model and report configuration interface.
   - [x] Generate validated direct `LEFT JOIN` queries against ClickHouse analytical tables using stored `SourceRelationship` foreign keys.

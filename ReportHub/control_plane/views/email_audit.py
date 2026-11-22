@@ -43,6 +43,7 @@ def email_audit_log_view(request):
         'search_query': search_query,
         'filter_options': [
             {'value': 'sent', 'label': 'Sent'},
+            {'value': 'skipped', 'label': 'Skipped'},
             {'value': 'delivered', 'label': 'Delivered'},
             {'value': 'failed', 'label': 'Failed'},
             {'value': 'bounced', 'label': 'Bounced'},
@@ -64,6 +65,9 @@ def email_webhook_receiver(request):
 def email_audit_requeue_view(request, log_id):
     log = get_object_or_404(EmailAuditLog, pk=log_id)
     if request.method == 'POST':
+        if log.status == 'skipped':
+            messages.error(request, "Skipped deliveries cannot be re-queued from the audit log.")
+            return redirect('control_plane:email_audit_logs')
         log.status = 'sent'
         log.retry_count = getattr(log, 'retry_count', 0) + 1
         log.error_message = '' # Clear previous error on retry

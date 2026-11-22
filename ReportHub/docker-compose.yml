@@ -1,7 +1,19 @@
+x-reporthub-logging: &reporthub-logging
+  driver: fluentd
+  options:
+    fluentd-address: "127.0.0.1:24224"
+    fluentd-async: "true"
+    fluentd-async-reconnect-interval: "1s"
+    fluentd-buffer-limit: "10000"
+    fluentd-write-timeout: "2s"
+    tag: "reporthub.{{.Name}}"
+    env: REPORTHUB_LOG_QUEUE
+
 services:
   ollama:
     image: ollama/ollama:latest
     container_name: reporthub-ollama
+    logging: *reporthub-logging
     environment:
       OLLAMA_HOST: 0.0.0.0:11434
       OLLAMA_KEEP_ALIVE: 5m
@@ -18,6 +30,7 @@ services:
   postgres:
     image: postgres:15-alpine
     container_name: reporthub-postgres
+    logging: *reporthub-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -54,10 +67,72 @@ services:
         hard: 262144
     restart: unless-stopped
 
+  operations_log_schema:
+    build: .
+    container_name: reporthub-operations-log-schema
+    command: python manage.py provision_operations_logs
+    env_file: .env
+    volumes:
+      - .:/app
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+    depends_on:
+      clickhouse:
+        condition: service_started
+      postgres:
+        condition: service_started
+    restart: "no"
+
+  otel_collector:
+    build:
+      context: ./otel
+    container_name: reporthub-otel-collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    env_file: .env
+    environment:
+      CLICKHOUSE_USER: ${OPERATIONS_LOGS_CLICKHOUSE_USER:-${APP_CLICKHOUSE_USER:-${CLICKHOUSE_USER:-default}}}
+      CLICKHOUSE_PASSWORD: ${OPERATIONS_LOGS_CLICKHOUSE_PASSWORD:-${APP_CLICKHOUSE_PASSWORD:-${CLICKHOUSE_PASSWORD:-your_secure_password}}}
+    ports:
+      - "127.0.0.1:24224:24224"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:13133:13133"
+    volumes:
+      - ./otel/collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - /var/log:/hostfs/var/log:ro
+      - otelcol_data:/var/lib/otelcol
+      - operations_logging:/var/lib/reporthub-logging
+    user: "0:0"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_READ_SEARCH
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      operations_log_schema:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_started
+    restart: unless-stopped
+
   # --- MinIO Object Storage Service ---
   minio:
     image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     container_name: reporthub-minio
+    logging: *reporthub-logging
     command: server /data --console-address ":9001"
     ports:
       - "9001:9001"
@@ -74,6 +149,7 @@ services:
   redis:
       image: redis:7-alpine
       container_name: reporthub-redis
+      logging: *reporthub-logging
       ports:
         - "6379:6379"
       networks:
@@ -88,6 +164,7 @@ services:
     build: .
     command: python manage.py runserver 0.0.0.0:8000
     container_name: reporthub-app
+    logging: *reporthub-logging
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -114,6 +191,7 @@ services:
     volumes:
       - .:/app
       - ./logs:/app/logs
+      - operations_logging:/var/lib/reporthub-logging
     depends_on:
       - postgres
       - redis
@@ -126,6 +204,7 @@ services:
     build: .
     command: celery -A config worker -Q queue_ux,queue_hot --concurrency=2 --loglevel=info -n ux_worker@%h
     container_name: reporthub_celery_ux_worker
+    logging: *reporthub-logging
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -134,6 +213,7 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - REPORTHUB_LOG_QUEUE=queue_ux,queue_hot
       - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
       - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadminpassword}
       - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-reporthub-reports}
@@ -158,6 +238,7 @@ services:
     build: .
     command: celery -A config worker -Q queue_warm --concurrency=2 --loglevel=info -n warm_worker@%h
     container_name: reporthub_celery_warm_worker
+    logging: *reporthub-logging
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -166,6 +247,7 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - REPORTHUB_LOG_QUEUE=queue_warm
       - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
       - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadminpassword}
       - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-reporthub-reports}
@@ -190,6 +272,7 @@ services:
     build: .
     command: celery -A config worker -Q queue_transfers --concurrency=2 --loglevel=info -n transfer_worker@%h
     container_name: reporthub_celery_transfer_worker
+    logging: *reporthub-logging
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -198,6 +281,7 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - REPORTHUB_LOG_QUEUE=queue_transfers
     networks:
       - default
       - shared_network
@@ -214,6 +298,7 @@ services:
     build: .
     command: celery -A config worker -Q queue_cdc --concurrency=${CDC_WORKER_CONCURRENCY:-2} --loglevel=info -n cdc_worker@%h
     container_name: reporthub_celery_cdc_worker
+    logging: *reporthub-logging
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -222,6 +307,7 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - REPORTHUB_LOG_QUEUE=queue_cdc
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -240,6 +326,7 @@ services:
     build: .
     command: celery -A config worker -Q queue_maintenance --concurrency=1 --loglevel=info -n maintenance_worker@%h
     container_name: reporthub_celery_maintenance_worker
+    logging: *reporthub-logging
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -248,6 +335,7 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - REPORTHUB_LOG_QUEUE=queue_maintenance
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -266,6 +354,7 @@ services:
     build: .
     command: celery -A config worker -Q queue_backfill --concurrency=${BATCH_WORKER_CONCURRENCY:-2} --loglevel=info -n batch_worker@%h
     container_name: reporthub_celery_batch_worker
+    logging: *reporthub-logging
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -274,6 +363,7 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - REPORTHUB_LOG_QUEUE=queue_backfill
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -292,6 +382,7 @@ services:
     build: .
     command: celery -A config worker -Q queue_cold,queue_dlq --concurrency=1 --loglevel=info -n cold_worker@%h
     container_name: reporthub_celery_cold_worker
+    logging: *reporthub-logging
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -300,6 +391,7 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - REPORTHUB_LOG_QUEUE=queue_cold,queue_dlq
       - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
       - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadminpassword}
       - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-reporthub-reports}
@@ -324,6 +416,7 @@ services:
     build: .
     command: celery -A config worker -Q queue_periodic --concurrency=1 --loglevel=info -n periodic_worker@%h
     container_name: reporthub_celery_periodic_worker
+    logging: *reporthub-logging
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -332,6 +425,7 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=${REDIS_URL}
       - CLICKHOUSE_HOST=clickhouse
+      - REPORTHUB_LOG_QUEUE=queue_periodic
       - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
       - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadminpassword}
       - AWS_STORAGE_BUCKET_NAME=${AWS_STORAGE_BUCKET_NAME:-reporthub-reports}
@@ -356,6 +450,7 @@ services:
     build: .
     command: celery -A config beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     container_name: reporthub_celery_beat
+    logging: *reporthub-logging
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -384,9 +479,67 @@ services:
       - minio
     restart: unless-stopped
 
+  celery_operations_logs:
+    build: .
+    command: celery -A config worker -Q queue_operations_logs --concurrency=1 --loglevel=info -n operations_logs@%h
+    container_name: reporthub_celery_operations_logs
+    logging: *reporthub-logging
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=${REDIS_URL}
+      - CLICKHOUSE_HOST=clickhouse
+      - REPORTHUB_LOG_QUEUE=queue_operations_logs
+    networks:
+      - default
+      - shared_network
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+      - clickhouse
+    restart: unless-stopped
+
+  celery_operations_ai:
+    build: .
+    command: celery -A config worker -Q queue_operations_ai --concurrency=1 --loglevel=info -n operations_ai@%h
+    container_name: reporthub_celery_operations_ai
+    logging: *reporthub-logging
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=${REDIS_URL}
+      - CLICKHOUSE_HOST=clickhouse
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b}
+      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT:-120}
+      - REPORTHUB_LOG_QUEUE=queue_operations_ai
+    networks:
+      - default
+      - shared_network
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+      - clickhouse
+      - ollama
+    restart: unless-stopped
+
 networks:
   shared_network:
     name: reporthub_shared_network
 
 volumes:
   ollama_data:
+  otelcol_data:
+  operations_logging:

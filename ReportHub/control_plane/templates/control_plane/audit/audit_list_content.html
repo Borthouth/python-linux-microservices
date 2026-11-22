@@ -7,11 +7,12 @@
     {% url 'control_plane:audit_log' as search_action_url %}
     {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search by source, name, or user..." filter_name="action" filter_value=selected_action filter_label="All Actions" filter_options=filter_options search_query=search_query %}
 
-    <!-- Component: Table -->
+    {% if searched %}
     {% include 'control_plane/audit/components/audit_table.html' %}
-
-    <!-- Pagination -->
     {% include 'control_plane/components/pagination.html' %}
+    {% else %}
+    <p class="text-sm text-gray-400">Enter a search or select an action, then select Search to view audit logs. Leave both blank to view all logs.</p>
+    {% endif %}
 </div>
 
 <!-- Component: Modal -->

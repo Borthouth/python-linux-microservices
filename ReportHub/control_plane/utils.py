@@ -1,6 +1,66 @@
 import redis
+from uuid import UUID, uuid4
+
 from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.db.models.functions import Lower, Trim
 from django.utils import timezone
+from django.utils.text import slugify
+
+
+USER_DETAILS_ERROR = "Unable to save user. Check the details or contact an administrator."
+
+
+def generate_control_plane_username(first_name, last_name):
+    name = slugify(f"{first_name}-{last_name}") or "user"
+    return f"{name[:110]}-{uuid4().hex[:8]}"
+
+
+def validate_control_plane_email(email, exclude_id=None):
+    from control_plane.models import ControlPlaneUser
+
+    accounts = ControlPlaneUser.objects.filter(archived_at__isnull=True).annotate(
+        normalized_email=Lower(Trim("email")),
+    ).filter(normalized_email__iexact=email)
+    if exclude_id is not None:
+        accounts = accounts.exclude(pk=exclude_id)
+    if accounts.exists():
+        raise ValidationError(USER_DETAILS_ERROR)
+    return email
+
+
+def add_email_conflict_error(form, exclude_id=None):
+    try:
+        validate_control_plane_email(form.cleaned_data["email"], exclude_id)
+    except ValidationError as error:
+        form.add_error("email", error)
+        return True
+    return False
+
+
+def user_identity(user):
+    account = getattr(user, "control_plane_account", None) or getattr(
+        user, "operations_account", None
+    )
+    if account:
+        username = account.username
+        name = f"{account.first_name} {account.last_name}".strip() or username
+    else:
+        username = user.username
+        try:
+            UUID(username)
+        except ValueError:
+            pass
+        else:
+            username = ""
+        name = user.get_full_name().strip() or username or "User"
+
+    label = name
+    if username and username != name:
+        label += f" ({username})"
+    label += f" [User ID: {user.pk}]"
+    return {"name": name, "username": username, "label": label}
+
 
 def get_redis_client():
     """Returns a Redis client instance connected to DB 1 (Task Telemetry)."""

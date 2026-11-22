@@ -1,0 +1,38 @@
+{% extends 'control_plane/base.html' %}
+
+{% block title %}Archived Accounts - Control Plane{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-6 py-8">
+    <h1 class="text-3xl font-extrabold tracking-tight text-white mb-2">Archived Accounts</h1>
+    <p class="text-slate-400 text-sm mb-6">Archived accounts retain their audit history. Restored accounts remain inactive until reactivated.</p>
+    {% url 'control_plane:archived_accounts' as search_action_url %}
+    {% include 'control_plane/components/search_bar.html' with action_url=search_action_url placeholder="Search name, username or email..." search_query=search_query %}
+    <section class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left">
+                <thead class="border-b border-slate-800 text-xs uppercase text-slate-400">
+                    <tr><th class="py-3 px-3">User</th><th class="py-3 px-3">Email</th><th class="py-3 px-3">Archived</th><th class="py-3 px-3 text-right">Actions</th></tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/60 text-sm">
+                    {% for account in page_obj %}
+                    <tr>
+                        <td class="py-3 px-3 text-white">{{ account.full_name }} ({{ account.username }}) [User ID: {{ account.auth_user_id }}]</td>
+                        <td class="py-3 px-3 text-slate-300">{{ account.email }}</td>
+                        <td class="py-3 px-3 text-slate-400">{{ account.archived_at|date:"M j, Y H:i" }}</td>
+                        <td class="py-3 px-3 text-right">
+                            <form method="post" action="{% url 'control_plane:account_restore' account.pk %}">
+                                {% csrf_token %}<button type="submit" class="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 rounded-lg text-xs font-medium">Restore</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="4" class="py-8 text-center text-slate-500">{% if search_query %}No archived accounts match your search.{% else %}No archived accounts.{% endif %}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+    {% include 'control_plane/components/pagination.html' %}
+</div>
+{% endblock %}

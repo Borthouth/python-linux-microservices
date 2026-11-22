@@ -1,0 +1,19 @@
+<div class="mb-6 border-b border-slate-800 pb-3">
+    <nav aria-label="Breadcrumb" class="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-slate-400">
+        <a href="{% url 'operations_plane:dashboard' %}" aria-label="Dashboard" title="Dashboard" class="flex items-center transition hover:text-white">
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1V10z"/>
+            </svg>
+        </a>
+        {% for crumb in breadcrumbs %}
+            {% if crumb.name != "Dashboard" %}
+                <span class="text-slate-600">/</span>
+                {% if crumb.url %}
+                    <a href="{{ crumb.url }}" class="transition hover:text-white">{{ crumb.name }}</a>
+                {% else %}
+                    <span aria-current="page" class="font-medium text-slate-300">{{ crumb.name }}</span>
+                {% endif %}
+            {% endif %}
+        {% endfor %}
+    </nav>
+</div>

@@ -11,7 +11,7 @@
                    class="h-full flex items-center border-b-2 transition-all {% if request.resolver_match.url_name == 'dashboard' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
                     Dashboard
                 </a>
-                {% if request.user.is_staff or request.user.is_superuser or request.user.source_access.exists %}
+                {% if request.user.is_staff or request.user.is_superuser or request.user.source_access.exists or request.user.control_plane_account.has_source_access %}
                     <div class="relative h-full flex items-center" x-data="{ open: false }">
                         <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'cdc_failure_history,cdc_rebuild_list,cdc_rebuild_source_tables,cdc_rebuild_table_history,cdc_rebuild_start,cdc_rebuild_resume,cdc_cleanup_list,cdc_cleanup_source,cdc_cleanup_attempt,cdc_cleanup_scan,cdc_cleanup_confirm,cdc_cleanup_recover,cdc_cleanup_override' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
                             <span>CDC</span>
@@ -27,13 +27,12 @@
                     </div>
                 {% endif %}
                 
-                <!-- Restricted to System Admin / Superuser only -->
-                {% if request.user.is_staff or request.user.is_superuser %}
                     <a href="{% url 'reports:report_list' %}" 
                        class="h-full flex items-center border-b-2 transition-all {% if request.resolver_match.namespace == 'reports' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
                         Reports
                     </a>                
-                    
+                <!-- Restricted to System Admin / Superuser only -->
+                {% if request.user.is_staff or request.user.is_superuser %}
                     <div class="relative h-full flex items-center" x-data="{ open: false }">
                         <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'source_list,source_add,source_create,source_edit,source_delete,source_sync,source_status,source_toggle_active,source_cdc_to_batch_status,source_cdc_to_batch_staging,warehouse_list,warehouse_field_selection,pipeline_automation_list,pipeline_automation_create,pipeline_automation_edit,pipeline_automation_toggle,pipeline_automation_run,pipeline_automation_delete' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
                             <span>Data &amp; Pipelines</span>
@@ -70,12 +69,14 @@
                     </div>
 
                     <div class="relative h-full flex items-center" x-data="{ open: false }">
-                        <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'user_management,user_edit,user_edit_access,audit_log,email_audit_logs,file_delivery_audit' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
+                        <button @click="open = !open" @click.away="open = false" type="button" class="h-full flex items-center space-x-1.5 border-b-2 transition-all {% if request.resolver_match.url_name in 'user_management,user_edit,user_edit_access,account_list,account_edit,profile_list,profile_create,profile_edit,permission_list,audit_log,email_audit_logs,file_delivery_audit' %}border-indigo-500 text-white{% else %}border-transparent text-slate-300 hover:text-white hover:border-slate-600{% endif %}">
                             <span>Governance</span>
                             <svg class="h-4 w-4 transition-transform duration-200" :class="{'rotate-180': open}" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
                         </button>
                         <div x-show="open" x-transition class="absolute right-0 top-full mt-1 w-60 rounded-lg shadow-xl bg-slate-800 ring-1 ring-slate-700 divide-y divide-slate-700/50 z-50 py-1" style="display: none;">
-                            <a href="{% url 'control_plane:user_management' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Users &amp; Access</a>
+                            <a href="{% url 'control_plane:account_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Control Plane Accounts</a>
+                            <a href="{% url 'control_plane:profile_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Shared Access Profiles</a>
+                            <a href="{% url 'control_plane:permission_list' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Permission Catalogue</a>
                             <a href="{% url 'control_plane:audit_log' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Audit Logs</a>
                             <a href="{% url 'control_plane:email_audit_logs' %}" class="block px-4 py-2 text-sm text-slate-200 hover:bg-slate-700 hover:text-white">Email Audit Logs</a>
                             {% if request.user.is_active and request.user.is_staff %}
@@ -100,7 +101,7 @@
             <div class="order-2 xl:order-3 xl:ml-3 flex shrink-0 items-center space-x-3 border-l border-slate-800 pl-4">
                 <div class="text-right hidden sm:block">
                     <a href="{% url 'control_plane:user_profile' %}" class="group inline-flex items-center space-x-1.5 text-xs font-semibold text-white hover:text-indigo-400 transition-colors" title="Edit Profile">
-                        <span class="max-w-32 truncate">{{ request.user.username }}</span>
+                        <span class="max-w-32 truncate">{{ request.user.control_plane_account.username|default:request.user.username }}</span>
                         <svg class="w-3.5 h-3.5 text-slate-500 group-hover:text-indigo-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path>
                         </svg>

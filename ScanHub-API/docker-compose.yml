@@ -1,7 +1,18 @@
+x-scanhub-logging: &scanhub-logging
+  driver: fluentd
+  options:
+    fluentd-address: "127.0.0.1:24224"
+    fluentd-async: "true"
+    fluentd-async-reconnect-interval: "1s"
+    fluentd-buffer-limit: "10000"
+    fluentd-write-timeout: "2s"
+    tag: "scanhub.{{.Name}}"
+
 services:
   scanhub-api:
     build: .
     container_name: scanhub-api
+    logging: *scanhub-logging
     restart: unless-stopped
     ports:
       - "9443:9443"
