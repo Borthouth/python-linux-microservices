@@ -20,7 +20,7 @@ for the current worktree.
 
 ## 🏗️ Core Architecture & Design
 
-- **Decoupled Data Architecture:** The Django database stores control-plane configuration and source metadata, while ClickHouse stores ingested analytical data. Ingestion provisions ClickHouse tables from source metadata. A separate Alembic configuration and an empty initial revision exist, but they do not manage those ClickHouse tables.
+- **Decoupled Data Architecture:** The Django database stores control-plane configuration and source metadata, while ClickHouse stores ingested analytical data. Ingestion provisions ClickHouse tables from source metadata.
 - **ClickHouse Analytical Warehouse:** Columnar database engine for analytical queries and aggregations. CDC-managed tables use versioned `ReplacingMergeTree` engines with delete tombstones; batch-mode sources and CDC tables without a discovered primary key use bounded full refreshes. Automated TTL data retention is not configured.
 - **MinIO S3-Compatible Object Storage:** MinIO persists data in the host-mounted `./docker/minio_data` directory. Celery uploads report artifacts to MinIO; authenticated administrator downloads are served through Django. The Compose file publishes MinIO's console port and should be restricted appropriately outside development.
 - **Session Security & Idle Timeout:** Hardened session management utilizing browser-close expiration (`SESSION_EXPIRE_AT_BROWSER_CLOSE = True`) and `django-auto-logout` with dynamic environment-driven idle timeout control (`SESSION_IDLE_MINUTES`).
@@ -1296,7 +1296,6 @@ reporthub/
 ├── warehouse/            # Dynamic schema reflection & table provisioner utilities
 ├── etl/                  # Celery tasks (Batch ingestion, roll-ups, backfilling, cleanup)
 ├── reports/              # Report generation engine, templates, execution logs, and MinIO storage pipelines
-├── alembic/              # Standalone Alembic configuration and initial empty revision
 ├── tests/                # Test database Compose file, setup script, and seed data
 ├── Dockerfile            # Container build instructions (including MS ODBC drivers)
 ├── docker-compose.yml    # Service orchestration (Web, Postgres, Redis, ClickHouse, MinIO, Celery)

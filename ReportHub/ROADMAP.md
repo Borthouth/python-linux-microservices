@@ -81,8 +81,8 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
 - Data-source polling was checked in a browser using a simulated running
   response followed by the real completed-status endpoint: polling stopped on
   completion. A real running task and report polling remain unverified in the
-  browser. The dependency review identified candidates for a future removal
-  decision; no packages were removed.
+  browser. A subsequent dependency cleanup removed unused standalone scaffolds;
+  the application still uses Django and Celery.
 - The OpenTelemetry Collector writes to `operations.otel_logs`. Synthetic OTLP
   and real Docker Fluent Forward Python/Java exception probes verified normal
   record attribution, severity and redaction; broad source coverage and
@@ -111,7 +111,7 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
 - [x] **Decoupled Architecture & Warehouse Engine:** Established dual-database design:
   - **Control Plane (Operational DB):** Django database for configuration, user-source access assignments, and target metadata.
   - **Analytical Warehouse:** ClickHouse tables provisioned from reflected source metadata.
-- [x] **Alembic scaffolding:** A standalone Alembic configuration and initial empty revision exist; ClickHouse ingestion currently provisions and alters its own tables rather than using these revisions.
+- [x] ClickHouse ingestion provisions and alters its own tables; an unused standalone Alembic scaffold was removed.
 - [x] **MinIO S3-Compatible Object Storage Architecture:**
   - [x] Deploy MinIO container in `docker-compose.yml` with data persisted to the host-mounted `./docker/minio_data` directory.
   - [x] Configure `django-storages` and `boto3` pointing to internal Docker S3 endpoints (`AWS_S3_ENDPOINT_URL = 'http://minio:9000'`).
@@ -582,8 +582,8 @@ ReportHub is outside the initial scope.
 - [ ] **Codebase simplification:** Identify and remove verified unused code, obsolete paths and unnecessary duplication. Simplify complex flows and clarify naming where useful, preserving behavior and public interfaces; validate affected functionality with focused tests and update related documentation.
 - [ ] **Dependency & Configuration Pruning:**
   - [x] Consolidate duplicate package declarations in `requirements.txt` (`celery`, `pymysql`, `psycopg2-binary`); verified all declared package names are unique.
-  - [ ] Evaluate unused stack dependencies (FastAPI, Uvicorn, AsyncPG) to trim container build overhead if not servicing separate microservice endpoints.
-    - Static review: Compose runs Django's development server; FastAPI is used by a standalone health-check stub, and no Uvicorn invocation was found. AsyncPG is used by the standalone Alembic/SQLAlchemy scaffold. Gunicorn is declared but not configured in the checked-in stack; Pydantic is a FastAPI dependency without direct imports. Confirm intended deployment and scaffold support before removing anything, then rebuild and test in isolation.
+  - [x] Remove the unused standalone FastAPI health stub, empty Alembic/AsyncPG scaffold and unregistered legacy MySQL schema task, together with their exclusive dependencies. Django, Celery and the active schema-introspection workflow remain.
+  - [ ] Correct the Docker build context: `.dockerignore` currently excludes the application `reports` and `warehouse` modules. Compose bind-mounts the source, but a standalone built image lacks these modules. Verify the corrected image without a source mount while continuing to exclude generated data.
   - [ ] Evaluate reducing duplicated Compose environment configuration without changing variable precedence, service-specific settings, or secret exposure.
 - [ ] **Upgrade to Django 6.1:** Stay on Django 5.2 for now. The released `django-celery-beat` 2.9.0 requires Django <6.1; track [upstream support](https://github.com/celery/django-celery-beat/issues/1079) before upgrading.
   - [ ] Upgrade the application image and development environment to a supported Python version (3.12 or newer), then review Django and third-party dependency compatibility, including CSP, encrypted fields, sessions, history and Celery.
