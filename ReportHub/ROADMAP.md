@@ -4,16 +4,16 @@ Track the development phases, architectural milestones, and codebase optimizatio
 
 ## Suggested next priorities
 
-1. Resume MongoDB CDC parity: wire the tested decoder into ingestion, preserve BSON identity and offset/write safety, expose read-only readiness guidance, and validate the stored customer URI end to end using disposable services. MongoDB CDC stays disabled. Use [the continuation handoff](./CDC_TO_BATCH_HANDOFF.md) as the detailed CDC tracker.
+1. Resume MongoDB CDC parity: extend validation of the in-progress consumer mapping beyond the disposable Debezium/Kafka/ClickHouse probe, preserve BSON identity and offset/write safety, and expose read-only readiness guidance. MongoDB CDC stays disabled. Use [the continuation handoff](./CDC_TO_BATCH_HANDOFF.md) as the detailed CDC tracker.
 2. Keep CDC-to-batch switching parked until uncertain external requests, existing-object ownership/privileges, restricted identities and worker/client fencing are safely resolved. Candidate roles and cancellation probes do not prove delayed requests cannot execute. Continue cleanup validation only against disposable services; do not inventory or delete shared resources.
-3. Verify the running logical log-source consolidation and representative source coverage, exercise outage/queue/disk recovery, agree raw/snapshot/AI audit retention, and automate safe worker-scope rollout. Keep OTel; oversized-fragment reassembly and alternative collectors are parked by the November 18 user decision. See [the logging handoff](./OPERATIONS_LOGGING_HANDOFF.md) for current evidence and concrete next steps.
+3. Extend the read-only logical log-source delivery checks to ongoing representative coverage, exercise outage/queue/disk recovery, agree raw/snapshot/AI audit retention, and automate safe worker-scope rollout. Keep OTel; oversized-fragment reassembly and alternative collectors are parked by the November 18 user decision. See [the logging handoff](./OPERATIONS_LOGGING_HANDOFF.md) for current evidence and concrete next steps.
 4. Enforce source and tenant access before introducing cross-source linking references and linked reports.
 5. Evaluate explicit incremental strategies and S3/Parquet sources where their source guarantees and operational costs justify them.
 6. Extend AI layouts or diagnostics and dashboard navigation where they improve the existing workflows.
 
 The unchecked items below are proposals, not implemented capabilities. Existing CDC and AI features have the limitations described in [README.md](./README.md).
 
-## Current checkpoint (2026-11-22)
+## Current checkpoint (2026-11-23)
 
 - Account management is consolidated at `/control-plane/accounts/`, with
   generated usernames, unique non-archived email addresses, deactivation and
@@ -31,6 +31,10 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
 - The running Collector's supervisor, source policy and mounted configuration
   match the current source files. This is a file comparison, not confirmation
   of source coverage or end-to-end log delivery.
+- A read-only live check observed a healthy Collector endpoint, applied source
+  revision and arrivals in 12 of 14 categories. MinIO and ScanHub startup
+  events were correctly attributed; later delivery and outage/recovery behavior
+  remain unverified. Details are in the [logging handoff](./OPERATIONS_LOGGING_HANDOFF.md).
 
 ## Previous checkpoint (2026-11-18)
 
@@ -69,9 +73,16 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   in [CDC_TO_BATCH_HANDOFF.md](./CDC_TO_BATCH_HANDOFF.md), along with the next
   steps. The switch remains fail-closed until fencing and recovery are proven.
 - MongoDB CDC: migration `0050` adds an optional encrypted customer connection
-  string. A read-only replica-set readiness check and the Debezium URI builder
-  are implemented and unit-tested. MongoDB CDC stays disabled until ingestion
-  and end-to-end validation pass.
+  string. The source edit page offers topology, version, change-stream and
+  bounded collection access checks, not a full readiness verdict. A disposable probe exercises the stored URI, replica-set
+  checks and experimental consumer mapping through ClickHouse, including a
+  failed write and replay. A disposable Celery worker exercised the consumer
+  through a test-only task and verified the normal MongoDB CDC gate; production
+  worker ingestion and recovery validation remain, and CDC stays disabled. The
+  probe also covers rebuild-stage mapping, partition and schema-drift rejection,
+  connector pause/resume, blocking new selected fields without a rebuild, and
+  manual replay after a test-only worker crash. These do not prove automatic
+  production task, source-outage or oplog-retention recovery.
 - Completed CDC groundwork (staging, cleanup probes, migrations `0047`–`0049`)
   is summarised here. The [handoff](./CDC_TO_BATCH_HANDOFF.md) tracks only open
   work.
@@ -185,10 +196,10 @@ The unchecked items below are proposals, not implemented capabilities. Existing 
   - [ ] Test ready, misconfigured, insufficient-permission and unreachable cases for PostgreSQL, MySQL, SQL Server and Oracle using disposable sources; include MongoDB when its CDC support is implemented. A passing preflight is not proof of ongoing CDC health or safe mode transition.
 - [ ] **Restore MongoDB CDC support (current CDC priority):** MongoDB currently uses batch refresh; CDC remains disabled until implemented and validated. A customer-supplied connection string (migration `0050`), the Debezium URI builder and a read-only replica-set readiness check are implemented; ingestion and end-to-end validation remain. Debezium requires MongoDB change streams from a replica set or sharded cluster, not a standalone server. The detailed parity checklist and next task are in [CDC_TO_BATCH_HANDOFF.md](./CDC_TO_BATCH_HANDOFF.md).
   - [x] Add a separate, persistent single-node replica-set fixture to the test database setup without replacing or resetting the existing standalone MongoDB data. Configure authentication, initialization, readiness and addresses reachable by ReportHub and Kafka Connect; a second member is unnecessary for basic CDC tests.
-  - [x] Capture snapshot, insert, full update and delete event shapes with an isolated Debezium 3.5.2/MongoDB/Kafka probe. The generated connector URI currently omits the required replica-set name; the probe supplies it explicitly, and MongoDB CDC remains disabled.
-  - [ ] Add an explicit, read-only MongoDB CDC readiness check in the control plane. Check supported server/version and replica-set or sharded topology, change-stream access and required permissions, and connectivity from the connector's network where verifiable. Explain each failed or unverified prerequisite and tell the user CDC cannot work until they configure MongoDB and rerun the check. Do not change MongoDB configuration or enable CDC automatically; unknown, stale, inaccessible or insufficiently privileged checks are not a ready verdict.
+  - [x] Capture snapshot, insert, full update and delete event shapes with an isolated Debezium 3.5.2/MongoDB/Kafka probe. The probe uses a stored customer-style URI and exercises the consumer and ClickHouse, including failed writes, failed offset commits with same-group replay, invalid-event rejection, and a test-only Celery task. The normal worker task rejects MongoDB CDC and remains gated.
+  - [ ] Add an explicit, read-only MongoDB CDC readiness check in the control plane. The source edit page checks topology, the Debezium 3.5 tested server versions, opening a deployment-wide change stream, and bounded listing/read access for up to 10 keyed collections using the saved URI. Results are not persisted and the UI identifies unverified prerequisites. Still validate full snapshot behavior and connector-network connectivity where verifiable. Explain each failed or unverified prerequisite and tell the user CDC cannot work until they configure MongoDB and rerun the check. Do not change MongoDB configuration or enable CDC automatically; unknown, stale, inaccessible or insufficiently privileged checks are not a ready verdict.
   - [ ] Test the readiness check against disposable standalone and replica-set fixtures, including insufficient permissions, unsupported or unreachable servers and stale results. Keep batch refresh available; readiness alone must not bypass the existing mode-change safety gate or enable MongoDB CDC before the implementation and end-to-end tests are complete.
-  - [ ] Review the existing MongoDB connector configuration and implement validated snapshot and change-event handling, including document identity, BSON/nested values, updates, deletes, ordering, replay, offsets and oplog-retention recovery.
+  - [ ] Review the existing MongoDB connector configuration and implement validated snapshot and change-event handling, including document identity, BSON/nested values, updates, deletes, ordering, replay, offsets and oplog-retention recovery. The in-progress consumers reject undiscovered top-level fields and require single-partition MongoDB topics; selected-field backfill and recovery are still open.
   - [ ] Exercise snapshot plus insert/update/delete propagation end-to-end through Debezium, Kafka, real workers and ClickHouse using disposable resources. Test restart, retries, concurrent changes and failure recovery before enabling the control-plane CDC option.
   - [ ] Preserve existing MongoDB batch sources and the mode-change safety gate. Separately design and test any future MongoDB batch/CDC transitions, rebuilds and cleanup; a single-node fixture does not test replication or failover.
 - [x] Configure optional Oracle CDB/PDB and separate LogMiner credentials; verify insert, update, and delete CDC flows for the local PostgreSQL, MySQL, Oracle, and SQL Server test sources.
@@ -583,7 +594,7 @@ ReportHub is outside the initial scope.
 - [ ] **Dependency & Configuration Pruning:**
   - [x] Consolidate duplicate package declarations in `requirements.txt` (`celery`, `pymysql`, `psycopg2-binary`); verified all declared package names are unique.
   - [x] Remove the unused standalone FastAPI health stub, empty Alembic/AsyncPG scaffold and unregistered legacy MySQL schema task, together with their exclusive dependencies. Django, Celery and the active schema-introspection workflow remain.
-  - [ ] Correct the Docker build context: `.dockerignore` currently excludes the application `reports` and `warehouse` modules. Compose bind-mounts the source, but a standalone built image lacks these modules. Verify the corrected image without a source mount while continuing to exclude generated data.
+  - [x] Correct the Docker build context to include the `reports` and `warehouse` applications. A standalone image test runs Django checks without a source mount and verifies that environment files and local data directories are excluded.
   - [ ] Evaluate reducing duplicated Compose environment configuration without changing variable precedence, service-specific settings, or secret exposure.
 - [ ] **Upgrade to Django 6.1:** Stay on Django 5.2 for now. The released `django-celery-beat` 2.9.0 requires Django <6.1; track [upstream support](https://github.com/celery/django-celery-beat/issues/1079) before upgrading.
   - [ ] Upgrade the application image and development environment to a supported Python version (3.12 or newer), then review Django and third-party dependency compatibility, including CSP, encrypted fields, sessions, history and Celery.

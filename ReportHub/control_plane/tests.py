@@ -47,6 +47,7 @@ from control_plane.forms.transfer_destinations import TransferDestinationForm
 from control_plane.tasks import test_transfer_destination_task
 from control_plane.views.dashboard import update_widget_preferences
 from etl.progress import PIPELINE_STEPS, PREPARING_INGESTION
+from etl.cdc import MongoCdcReadiness, MongoReplicaSetCheck
 from etl.tasks import stage_cdc_to_batch_transition_task
 from reports.models import EmailAuditLog, ReportDefinition, ReportExecution
 from reports.progress import REPORT_RUNNING_STEPS, ReportProgress
@@ -173,6 +174,97 @@ class SourceConnectionPollingTests(TestCase):
                             self.assertContains(response, 'hx-trigger="every 2s"', count=1)
                         else:
                             self.assertNotContains(response, f'hx-get="{status_url}"')
+
+
+@override_settings(CACHES={
+    "default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}
+})
+class MongoTopologyCheckViewTests(TestCase):
+    def setUp(self):
+        self.admin = get_user_model().objects.create_user(
+            username="mongo-topology-admin", is_staff=True,
+        )
+        self.viewer = get_user_model().objects.create_user(username="mongo-topology-viewer")
+        self.client.force_login(self.admin)
+        self.uri = "mongodb://user:private-password@mongo:27017/?replicaSet=rs0"
+        self.source = SourceProfile.objects.create(
+            name="Mongo topology source", db_type=DbChoice.MONGODB,
+            host="mongo", port=27017, database_name="analytics", username="user",
+            mongodb_connection_string=self.uri,
+        )
+        self.check_url = reverse("control_plane:source_mongodb_topology_check", args=[self.source.pk])
+        self.edit_url = reverse("control_plane:source_edit", args=[self.source.pk])
+
+    @patch("control_plane.views.cdc_mongodb.check_mongodb_cdc_readiness")
+    def test_check_displays_saved_topology_without_claiming_readiness(self, check):
+        check.return_value = MongoCdcReadiness(
+            MongoReplicaSetCheck("ok", "Replica set confirmed."),
+            MongoReplicaSetCheck("ok", "Version tested."),
+            MongoReplicaSetCheck("ok", "Stream opened."),
+            MongoReplicaSetCheck("ok", "Collections readable."),
+        )
+        initial = self.client.get(self.edit_url)
+        self.assertContains(initial, "Prerequisites have not been checked on this page.")
+        check.assert_not_called()
+
+        response = self.client.post(self.check_url)
+        self.assertContains(response, "Topology (ok)")
+        self.assertContains(response, "Replica set confirmed.")
+        self.assertContains(response, "not a CDC readiness verdict")
+        self.assertContains(response, "Version tested.")
+        self.assertContains(response, "Stream opened.")
+        self.assertContains(response, "Collections readable.")
+        self.assertContains(response, "Full snapshot behavior")
+        self.assertContains(response, "Kafka Connect")
+        self.assertContains(response, "MongoDB CDC remains disabled")
+        self.assertNotContains(response, "private-password")
+        self.assertIn("no-store", response["Cache-Control"])
+        self.assertEqual(check.call_args.args[0].mongodb_connection_string, self.uri)
+        self.source.refresh_from_db()
+        self.assertEqual(self.source.mongodb_connection_string, self.uri)
+        self.assertEqual(self.source.ingestion_mode, IngestionMode.BATCH)
+        self.assertContains(self.client.get(self.edit_url), "Prerequisites have not been checked on this page.")
+
+    @patch("control_plane.views.cdc_mongodb.check_mongodb_cdc_readiness")
+    def test_failure_is_visible_without_an_overall_ready_verdict(self, check):
+        check.return_value = MongoCdcReadiness(
+            MongoReplicaSetCheck("missing_replica_set_name", "Add replicaSet=rs0 to the connection string."),
+            MongoReplicaSetCheck("unknown", "Not checked."),
+            MongoReplicaSetCheck("unknown", "Not checked."),
+            MongoReplicaSetCheck("unknown", "Not checked."),
+        )
+        response = self.client.post(self.check_url)
+        self.assertContains(response, "Topology (missing_replica_set_name)")
+        self.assertContains(response, "Add replicaSet=rs0")
+        self.assertContains(response, "Change stream (unknown)")
+        self.assertContains(response, "not a CDC readiness verdict")
+
+        check.return_value = MongoCdcReadiness(
+            MongoReplicaSetCheck("ok", "Replica set confirmed."),
+            MongoReplicaSetCheck("untested", "Version is not in the tested versions."),
+            MongoReplicaSetCheck("denied", "Ask the database administrator to check permissions."),
+            MongoReplicaSetCheck("denied", "Collection access denied."),
+        )
+        response = self.client.post(self.check_url)
+        self.assertContains(response, "Version (untested)")
+        self.assertContains(response, "Change stream (denied)")
+        self.assertContains(response, "Collection access (denied)")
+        self.assertContains(response, "administrator to check permissions")
+        self.assertContains(response, "not a CDC readiness verdict")
+
+    @patch("control_plane.views.cdc_mongodb.check_mongodb_cdc_readiness")
+    def test_check_requires_admin_post_csrf_and_mongodb_source(self, check):
+        self.assertEqual(self.client.get(self.check_url).status_code, 405)
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(self.admin)
+        self.assertEqual(csrf_client.post(self.check_url).status_code, 403)
+        self.client.force_login(self.viewer)
+        self.assertEqual(self.client.post(self.check_url).status_code, 302)
+        self.client.force_login(self.admin)
+        self.source.db_type = DbChoice.POSTGRESQL
+        self.source.save(update_fields=["db_type"])
+        self.assertEqual(self.client.post(self.check_url).status_code, 404)
+        check.assert_not_called()
 
 
 class AuditSearchTests(TestCase):

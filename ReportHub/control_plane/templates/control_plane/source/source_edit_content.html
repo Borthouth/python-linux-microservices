@@ -77,6 +77,47 @@
                 </div>
             </form>
         </div>
+        {% if profile and profile.db_type == 'mongodb' %}
+            <section class="mt-6 bg-slate-900 border border-slate-800 rounded-2xl p-6">
+                <h2 class="text-lg font-semibold text-white">MongoDB CDC prerequisite checks</h2>
+                <p class="text-sm text-slate-400 mt-2">
+                    From ReportHub, checks the saved connection, server version, and whether a deployment-wide
+                    change stream can be opened and closed without reading changes. Also checks listing and
+                    reads at most one document ID from each of up to 10 configured keyed collections;
+                    document IDs are not saved.
+                    Unsaved edits will be discarded, not checked or saved. Save changes before running the check.
+                </p>
+                <p class="text-sm text-amber-400 mt-2">
+                    This is not a CDC readiness verdict. Full snapshot behavior, connectivity from
+                    Kafka Connect and recovery are not verified. MongoDB CDC remains disabled.
+                </p>
+                {% if mongodb_topology_result %}
+                    <div class="mt-4 text-sm" role="status">
+                        <p class="{% if mongodb_topology_result.topology.ok %}text-emerald-400{% else %}text-red-400{% endif %}">
+                            Topology ({{ mongodb_topology_result.topology.status }}): {{ mongodb_topology_result.topology.message }}
+                        </p>
+                        <p class="mt-2 {% if mongodb_topology_result.version.ok %}text-emerald-400{% else %}text-amber-400{% endif %}">
+                            Version ({{ mongodb_topology_result.version.status }}): {{ mongodb_topology_result.version.message }}
+                        </p>
+                        <p class="mt-2 {% if mongodb_topology_result.change_stream.ok %}text-emerald-400{% else %}text-amber-400{% endif %}">
+                            Change stream ({{ mongodb_topology_result.change_stream.status }}): {{ mongodb_topology_result.change_stream.message }}
+                        </p>
+                        <p class="mt-2 {% if mongodb_topology_result.snapshot_access.ok %}text-emerald-400{% else %}text-amber-400{% endif %}">
+                            Collection access ({{ mongodb_topology_result.snapshot_access.status }}): {{ mongodb_topology_result.snapshot_access.message }}
+                        </p>
+                        <p class="text-slate-400 mt-1">Checked {{ mongodb_topology_checked_at }}. Results are not saved; rerun after changes.</p>
+                    </div>
+                {% else %}
+                    <p class="text-sm text-slate-400 mt-4">Prerequisites have not been checked on this page.</p>
+                {% endif %}
+                <form method="post" action="{% url 'control_plane:source_mongodb_topology_check' profile.pk %}" class="mt-4">
+                    {% csrf_token %}
+                    <button type="submit" class="px-5 py-2.5 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 text-sm font-medium rounded-xl border border-sky-500/20 transition-all">
+                        Check saved MongoDB prerequisites
+                    </button>
+                </form>
+            </section>
+        {% endif %}
         {% if profile and profile.ingestion_mode == 'cdc' or profile and profile.cdc_to_batch_transitions.exists %}
             {% include 'control_plane/source/cdc_to_batch_panel.html' %}
         {% endif %}

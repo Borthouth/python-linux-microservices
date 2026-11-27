@@ -15,5 +15,3 @@ staticfiles/
 .DS_Store
 docker/
 logs/
-reports/
-warehouse/

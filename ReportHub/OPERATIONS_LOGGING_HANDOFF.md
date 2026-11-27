@@ -1,12 +1,41 @@
 # Operations Logging Handoff
 
-Last updated: 2026-11-22
+Last updated: 2026-11-23
 
 ## Current checkpoint and next steps
 
 This section describes the current behavior. Later sections retain the rollout
 history, including older full-range AI behavior that new saved-event runs
 supersede.
+
+**November 23 read-only delivery checkpoint, approximately 16:10 UTC:**
+
+- The Collector health endpoint returned `Server available`, ClickHouse
+  `/ping` returned `Ok.`, and the saved source revision was confirmed applied
+  with a fresh heartbeat and no reported error. All 14 source categories and
+  the Fluent Forward master switch were enabled. These are point-in-time
+  observations, not proof of ongoing delivery or recovery.
+- Bounded aggregate queries covering the previous 24 hours found arrivals in
+  12 categories: Django, Celery, Redis, PostgreSQL, MinIO, Ollama, Kafka,
+  Debezium, ScanHub, host journal, ETL and ClamAV. Other and direct OTLP had no
+  arrivals; this alone does not establish a fault.
+- Since the Collector became available at `15:43:46.762 UTC`, MinIO had nine
+  events attributed to service `minio` and tag `reporthub.reporthub-minio`;
+  ScanHub had six attributed to `scanhub-api` and `scanhub.scanhub-api`. Their
+  respective current-container Docker caches also contained nine and six output
+  lines in that interval. Both streams were quiet after startup; matching
+  counts do not prove that individual events match or that later delivery
+  works. A subsequent ordinary event or approved controlled probe is needed.
+- All ten workers and Beat had Celery-category arrivals with their expected
+  tags. The same window contained 25 ETL events through Fluent Forward and 76
+  ClamAV events from the journal, attributed to `clamav`; no ETL/ClamAV file
+  inputs appeared in those categories. This is not a completeness or
+  exactly-once guarantee.
+- Selected application, worker and service containers used Fluentd logging;
+  the Collector and ClickHouse used `json-file` as expected. Queries were
+  bounded by time, rows, bytes and threads. Event bodies were not displayed or
+  saved; Docker log output was captured only in memory to count lines. No
+  services, source selections or log records were changed.
 
 **November 22 file check:** the running Collector's baked-in `supervise.py` and
 `source_policy.py`, and its mounted `collector.yaml`, match the current source
@@ -63,13 +92,11 @@ Next work, not implemented or validated by the UI milestone:
    trials both failed acceptance; neither is approved for the running
    pipeline. Preserve the evaluations below for future continuation, not as
    instructions to start another trial now.
-2. Verify the running logical-source consolidation below, then verify
-   representative delivery and attribution for every intended active source.
-   Preserve current source choices; configuration
-   confirmation and an available store are not proof of actual ingestion.
-   The November 18 read-only checkpoint below found arrivals for 10 of 14
-   categories; MinIO/ScanHub delivery and active loss/recovery probes remain
-   unverified.
+2. Extend the November 23 read-only check above with representative ongoing
+   delivery and attribution for intended active sources. Preserve current
+   source choices; configuration confirmation and an available store are not
+   proof of continuous ingestion. MinIO/ScanHub startup arrivals are observed,
+   but later delivery and active loss/recovery remain unverified.
 3. Exercise Collector outages, invalid-config rollback, persistent queue
    recovery, saturation/full disk and explicit loss reporting using disposable
    infrastructure. Benchmark storage/query impact and varied AI samples;

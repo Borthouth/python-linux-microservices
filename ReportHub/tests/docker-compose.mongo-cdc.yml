@@ -11,6 +11,23 @@ services:
     volumes:
       - ./mongo-entrypoint.sh:/opt/reporthub/mongo-entrypoint.sh:ro
 
+  mongo-standalone:
+    image: mongo:latest
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo_test
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_CDC_TEST_PASSWORD:?Required isolated test password}
+    tmpfs:
+      - /data/db
+      - /data/configdb
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   kafka:
     image: apache/kafka:3.8.0
     environment:
@@ -52,6 +69,25 @@ services:
       kafka:
         condition: service_healthy
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_USER: mongo_cdc_test
+      CLICKHOUSE_PASSWORD: ${MONGO_CDC_TEST_PASSWORD:?Required isolated test password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    command:
+      - --
+      - --max_server_memory_usage=536870912
+      - --background_schedule_pool_size=16
+    tmpfs:
+      - /var/lib/clickhouse
+      - /var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://clickhouse:8123/ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
   probe:
     image: reporthub-app
     entrypoint: ["python", "tests/integration/mongo_cdc_probe.py"]
@@ -59,20 +95,29 @@ services:
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONPATH: /app
-      DJANGO_SETTINGS_MODULE: config.settings
+      DJANGO_SETTINGS_MODULE: tests.integration.mongo_cdc_settings
       SECRET_KEY: isolated-mongo-cdc-tests-only
       FIELD_ENCRYPTION_KEY: ${MONGO_CDC_TEST_FIELD_KEY:?Required isolated test encryption key}
       MONGO_CDC_TEST_PASSWORD: ${MONGO_CDC_TEST_PASSWORD:?Required isolated test password}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_URL: redis://redis:6379/0
     volumes:
       - ..:/app:ro
       - /dev/null:/app/.env:ro
     tmpfs:
       - /app/logs
+      - /tmp
     depends_on:
       mongo:
         condition: service_started
+      mongo-standalone:
+        condition: service_started
+      redis:
+        condition: service_healthy
       connect:
         condition: service_started
+      clickhouse:
+        condition: service_healthy
 
 networks:
   default:

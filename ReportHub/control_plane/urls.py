@@ -15,6 +15,7 @@ from .views import (
     cdc_cleanup,
     cdc_transition,
     cdc_rebuilds,
+    cdc_mongodb,
     transfer_destinations,
 )
 
@@ -103,6 +104,7 @@ urlpatterns = [
     path('sources/<int:pk>/toggle/', cdc_transition.source_toggle_with_metadata_guard, name='source_toggle_active'),
     path('sources/<int:pk>/sync/', sources.source_sync_view, name='source_sync'),
     path('sources/<int:pk>/status/', sources.source_status_view, name='source_status'),
+    path('sources/<int:pk>/mongodb-topology-check/', cdc_mongodb.source_mongodb_topology_check_view, name='source_mongodb_topology_check'),
     path('sources/<int:pk>/cdc-to-batch/status/', cdc_transition.source_cdc_to_batch_status_view, name='source_cdc_to_batch_status'),
     path('sources/<int:pk>/cdc-to-batch/staging/', cdc_transition.source_cdc_to_batch_staging_view, name='source_cdc_to_batch_staging'),
 

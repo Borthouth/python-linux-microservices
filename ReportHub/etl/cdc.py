@@ -1,5 +1,6 @@
 import json
 import hashlib
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -14,11 +15,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from bson import json_util
+from bson import ObjectId, json_util
 from bson.errors import InvalidId
 from django.conf import settings
 from pymongo import MongoClient
-from pymongo.errors import PyMongoError
+from pymongo.errors import OperationFailure, PyMongoError
 from pymongo.uri_parser import parse_uri
 from django.utils import timezone
 from kafka import KafkaConsumer, TopicPartition
@@ -153,6 +154,14 @@ class MongoReplicaSetCheck:
         return self.status == "ok"
 
 
+@dataclass(frozen=True)
+class MongoCdcReadiness:
+    topology: MongoReplicaSetCheck
+    version: MongoReplicaSetCheck
+    change_stream: MongoReplicaSetCheck
+    snapshot_access: MongoReplicaSetCheck
+
+
 def check_mongodb_replica_set(profile, *, timeout_ms=5000):
     """Read-only check that the connection string names the server's replica set.
 
@@ -160,7 +169,9 @@ def check_mongodb_replica_set(profile, *, timeout_ms=5000):
     """
     uri = mongodb_connection_string(profile)
     try:
-        expected = parse_uri(uri, validate=True)["options"].get("replicaSet")
+        expected = parse_uri(
+            uri, validate=True, connect_timeout=timeout_ms / 1000,
+        )["options"].get("replicaSet")
     except (PyMongoError, ValueError):
         return MongoReplicaSetCheck(
             "invalid_connection_string",
@@ -169,7 +180,16 @@ def check_mongodb_replica_set(profile, *, timeout_ms=5000):
 
     # Ignore the stored replicaSet name here so a wrong name is reported as a
     # mismatch instead of surfacing as an unreachable server.
-    client = MongoClient(uri, replicaSet=None, serverSelectionTimeoutMS=timeout_ms)
+    try:
+        client = MongoClient(
+            uri, replicaSet=None, serverSelectionTimeoutMS=timeout_ms,
+            connectTimeoutMS=timeout_ms,
+        )
+    except (PyMongoError, ValueError):
+        return MongoReplicaSetCheck(
+            "invalid_connection_string",
+            "The MongoDB connection string could not be used.",
+        )
     try:
         hello = client.admin.command("hello")
     except PyMongoError as exc:
@@ -202,6 +222,132 @@ def check_mongodb_replica_set(profile, *, timeout_ms=5000):
             f"but the server reports {actual}.",
         )
     return MongoReplicaSetCheck("ok", f"Replica set {actual} confirmed.")
+
+
+def check_mongodb_cdc_readiness(profile, *, timeout_ms=5000):
+    """Check selected CDC prerequisites without changing the source."""
+    topology = check_mongodb_replica_set(profile, timeout_ms=timeout_ms)
+    if not topology.ok:
+        unknown = MongoReplicaSetCheck(
+            "unknown", "Not checked because the topology check did not pass.",
+        )
+        return MongoCdcReadiness(topology, unknown, unknown, unknown)
+
+    try:
+        client = MongoClient(
+            mongodb_connection_string(profile),
+            serverSelectionTimeoutMS=timeout_ms,
+            connectTimeoutMS=timeout_ms,
+            socketTimeoutMS=timeout_ms,
+        )
+    except (PyMongoError, ValueError):
+        unknown = MongoReplicaSetCheck(
+            "unknown", "The saved connection could not be opened for further checks.",
+        )
+        return MongoCdcReadiness(topology, unknown, unknown, unknown)
+
+    try:
+        try:
+            version_array = client.admin.command("buildInfo").get("versionArray")
+            if (
+                not isinstance(version_array, list)
+                or len(version_array) < 2
+                or any(type(part) is not int or part < 0 for part in version_array[:2])
+            ):
+                version = MongoReplicaSetCheck(
+                    "unknown", "The server did not report a recognizable version.",
+                )
+            elif tuple(version_array[:2]) in {(6, 0), (7, 0), (8, 0)}:
+                version = MongoReplicaSetCheck(
+                    "ok", f"MongoDB {version_array[0]}.{version_array[1]} is in the Debezium 3.5 tested versions.",
+                )
+            else:
+                version = MongoReplicaSetCheck(
+                    "untested",
+                    f"MongoDB {version_array[0]}.{version_array[1]} is not in the Debezium 3.5 tested versions (6.0, 7.0, 8.0).",
+                )
+        except PyMongoError:
+            version = MongoReplicaSetCheck(
+                "unknown", "Could not read the server version using buildInfo.",
+            )
+
+        try:
+            with client.watch(max_await_time_ms=timeout_ms):
+                pass
+            change_stream = MongoReplicaSetCheck(
+                "ok", "A deployment-wide change stream opened and was closed successfully.",
+            )
+        except OperationFailure as error:
+            if error.code == 13:
+                change_stream = MongoReplicaSetCheck(
+                    "denied",
+                    "The saved account cannot open a deployment-wide change stream; "
+                    "ask the database administrator to check changeStream and find permissions.",
+                )
+            else:
+                change_stream = MongoReplicaSetCheck(
+                    "unknown", "The deployment-wide change stream could not be checked.",
+                )
+        except PyMongoError:
+            change_stream = MongoReplicaSetCheck(
+                "unknown", "The deployment-wide change stream could not be checked.",
+            )
+        snapshot_access = _check_mongodb_snapshot_access(client, profile, timeout_ms)
+    finally:
+        client.close()
+    return MongoCdcReadiness(topology, version, change_stream, snapshot_access)
+
+
+def _check_mongodb_snapshot_access(client, profile, timeout_ms):
+    collection_names = sorted({
+        table.table_name for table in profile.tables.all() if table.primary_key_fields
+    })
+    if not collection_names:
+        return MongoReplicaSetCheck(
+            "unknown", "No keyed collections are configured. Synchronize the source schema first.",
+        )
+    checked_names = collection_names[:10]
+    deadline = time.monotonic() + 10
+    database = client[profile.database_name]
+    try:
+        available = set(database.list_collection_names(
+            filter={"name": {"$in": checked_names}}, maxTimeMS=timeout_ms,
+        ))
+        if set(checked_names) - available:
+            return MongoReplicaSetCheck(
+                "unknown", "Some configured collections were not found. Synchronize the source schema and retry.",
+            )
+        for name in checked_names:
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                return MongoReplicaSetCheck(
+                    "unknown", "The collection access check timed out before completing.",
+                )
+            with database[name].find(
+                {}, {"_id": 1}, limit=1, max_time_ms=min(timeout_ms, remaining_ms),
+            ) as cursor:
+                next(cursor, None)
+    except OperationFailure as error:
+        if error.code == 13:
+            return MongoReplicaSetCheck(
+                "denied", "The saved account cannot list or read the configured collections; "
+                "ask the database administrator to check snapshot permissions.",
+            )
+        return MongoReplicaSetCheck(
+            "unknown", "Collection access could not be checked.",
+        )
+    except PyMongoError:
+        return MongoReplicaSetCheck(
+            "unknown", "Collection access could not be checked.",
+        )
+    if len(collection_names) > len(checked_names):
+        return MongoReplicaSetCheck(
+            "unknown", f"Read access was checked for only {len(checked_names)} of "
+            f"{len(collection_names)} keyed collections.",
+        )
+    return MongoReplicaSetCheck(
+        "ok", f"Listing and read access were checked for {len(checked_names)} keyed collection(s).",
+    )
 
 
 def build_debezium_connector_config(
@@ -738,14 +884,42 @@ def _create_cdc_table(
             "coordinated CDC snapshot is ready."
         )
     if existing and (staging or table.cdc_managed):
-        actual_columns = {
-            row[0] for row in ch_client.query(
-                f"DESCRIBE TABLE {quoted_name}"
-            ).result_rows
-        }
+        description = ch_client.query(f"DESCRIBE TABLE {quoted_name}").result_rows
+        actual_columns = {row[0] for row in description}
         source_fields = {
             field.field_name: field for field in table.fields.all()
         }
+        if profile.db_type == DbChoice.MONGODB:
+            actual_types = {row[0]: row[1] for row in description}
+            existing_fields = actual_columns - {CDC_VERSION_COLUMN, CDC_DELETED_COLUMN}
+            if not existing_fields.issubset(source_fields):
+                raise RuntimeError(
+                    f"MongoDB CDC metadata for {table.schema_name}.{table.table_name} "
+                    "no longer describes its warehouse fields; a coordinated rebuild "
+                    "is required before ingestion can resume."
+                )
+            field_names = sorted(set(field_names) | existing_fields)
+            expected_types = {
+                field_name: (
+                    "String" if field_name == "_id" else
+                    map_to_clickhouse_type(
+                        source_fields[field_name].data_type,
+                        is_nullable=field_name not in table.primary_key_fields,
+                    )
+                )
+                for field_name in field_names
+            }
+            expected_types.update({
+                CDC_VERSION_COLUMN: "UInt64",
+                CDC_DELETED_COLUMN: "UInt8",
+            })
+            if any(actual_types.get(name) != expected for name, expected in expected_types.items()):
+                raise RuntimeError(
+                    f"MongoDB CDC warehouse schema for {table.schema_name}.{table.table_name} "
+                    "does not match the selected source fields; a coordinated rebuild "
+                    "is required before ingestion can resume."
+                )
+            return quoted_name, field_names
         for field_name in field_names:
             if field_name in actual_columns:
                 continue
@@ -776,9 +950,12 @@ def _create_cdc_table(
     column_defs = []
     for field_name in all_fields:
         field = source_fields[field_name]
-        ch_type = map_to_clickhouse_type(
-            field.data_type,
-            is_nullable=field_name not in table.primary_key_fields,
+        ch_type = (
+            "String" if profile.db_type == DbChoice.MONGODB and field_name == "_id" else
+            map_to_clickhouse_type(
+                field.data_type,
+                is_nullable=field_name not in table.primary_key_fields,
+            )
         )
         safe_name = field_name.replace("`", "``")
         column_defs.append(f"`{safe_name}` {ch_type}")
@@ -811,6 +988,21 @@ def _clickhouse_table_uuid(ch_client, table_name):
             parameters={"table_name": table_name},
         ).result_rows
         return result[0][0] if result else ""
+
+
+def _validate_mongodb_topic_partitions(consumer, topics):
+    for topic in topics:
+        partitions = consumer.partitions_for_topic(topic)
+        if partitions is None:
+            raise RuntimeError(
+                f"MongoDB CDC topic {topic} partition metadata is unavailable; "
+                "the Kafka offset was not committed."
+            )
+        if len(partitions) != 1:
+            raise RuntimeError(
+                f"MongoDB CDC topic {topic} must have exactly one partition "
+                "for offset-based ordering; the Kafka offset was not committed."
+            )
 
 
 def consume_cdc_table_rebuild_batch(
@@ -860,6 +1052,8 @@ def consume_cdc_table_rebuild_batch(
                     f"Kafka consumer for CDC rebuild {recovery.pk} did not receive "
                     "a partition assignment."
                 )
+            if profile.db_type == DbChoice.MONGODB:
+                _validate_mongodb_topic_partitions(consumer, [topic])
 
             inserts = []
             snapshot_completed = recovery.status == recovery.Status.CUTOVER_PENDING
@@ -872,16 +1066,20 @@ def consume_cdc_table_rebuild_batch(
                             and message.offset >= int(partition_target)
                         ):
                             continue
-                        row = _record_from_message(
-                            message,
-                            table,
-                            field_names,
-                            normalize_identifiers=profile.db_type == DbChoice.ORACLE,
-                        )
-                        if row is not None:
-                            inserts.append(
-                                _coerce_cdc_row(row, table, field_types)
+                        if profile.db_type == DbChoice.MONGODB:
+                            row = _mongo_record_from_message(
+                                message, table, field_names, field_types,
                             )
+                        else:
+                            row = _record_from_message(
+                                message,
+                                table,
+                                field_names,
+                                normalize_identifiers=profile.db_type == DbChoice.ORACLE,
+                            )
+                        if row is not None:
+                            inserts.append(row if profile.db_type == DbChoice.MONGODB else
+                                           _coerce_cdc_row(row, table, field_types))
                     elif message.topic == recovery.notification_topic:
                         event = message.value
                         if not isinstance(event, dict):
@@ -1000,6 +1198,61 @@ def _decode_mongo_cdc_event(message):
     if canonical_id(document["_id"]) != document_id:
         raise RuntimeError("MongoDB CDC document key does not match _id; the Kafka offset was not committed.")
     return operation, document_id, document
+
+
+def _mongo_record_from_message(message, table, field_names, field_types):
+    decoded = _decode_mongo_cdc_event(message)
+    if decoded is None:
+        return None
+    if table.primary_key_fields != ["_id"] or "_id" not in field_names:
+        raise RuntimeError("MongoDB CDC requires the _id primary key; the Kafka offset was not committed.")
+    operation, document_id, document = decoded
+    if document is not None:
+        undiscovered_fields = set(document) - set(field_types) - {"_id"}
+        if undiscovered_fields:
+            raise RuntimeError(
+                "MongoDB CDC document contains fields absent from discovered metadata; "
+                "review schema changes before resuming. The Kafka offset was not committed."
+            )
+    row = {"_id": document_id}
+    for field_name in field_names:
+        if field_name == "_id":
+            continue
+        value = document.get(field_name) if document is not None else None
+        if value is None:
+            row[field_name] = None
+            continue
+        source_type = field_types.get(field_name, "").lower()
+        try:
+            if source_type == "json" and isinstance(value, (dict, list)):
+                value = json_util.dumps(
+                    value, json_options=json_util.CANONICAL_JSON_OPTIONS,
+                    separators=(",", ":"), ensure_ascii=False,
+                )
+            elif source_type == "objectid" and isinstance(value, ObjectId):
+                value = str(value)
+            elif source_type == "string" and isinstance(value, str):
+                pass
+            elif source_type == "boolean" and isinstance(value, bool):
+                value = int(value)
+            elif source_type == "int64" and isinstance(value, int) and not isinstance(value, bool) and -(2**63) <= value < 2**63:
+                pass
+            elif source_type == "float64" and type(value) is float and math.isfinite(value):
+                pass
+            elif source_type == "datetime" and isinstance(value, datetime):
+                value = value.replace(tzinfo=datetime_timezone.utc) if value.tzinfo is None else value
+                value = value.isoformat()
+            else:
+                raise ValueError("Value does not match the discovered field type")
+        except (TypeError, ValueError, OverflowError) as error:
+            raise RuntimeError(
+                f"MongoDB CDC field {field_name!r} cannot be represented safely; "
+                "the Kafka offset was not committed."
+            ) from error
+        row[field_name] = value
+    row[CDC_VERSION_COLUMN] = _event_version(message.offset)
+    row[CDC_DELETED_COLUMN] = 1 if operation == "d" else 0
+    return row
 
 
 def _record_from_message(message, table, field_names, normalize_identifiers=False):
@@ -1130,6 +1383,10 @@ def _consume_source_cdc_group(
             )
             for table in tables
         }
+        if profile.db_type == DbChoice.MONGODB:
+            field_names_by_table = {
+                table_id: names for table_id, (_, names) in physical_tables.items()
+            }
         field_types_by_table = {
             table.pk: {
                 field.field_name: field.data_type
@@ -1161,6 +1418,8 @@ def _consume_source_cdc_group(
                         f"Kafka consumer for {group_id} lost its partition "
                         "assignment while initializing offsets."
                     )
+        if profile.db_type == DbChoice.MONGODB:
+            _validate_mongodb_topic_partitions(consumer, topic_tables)
         for partition_records in records.values():
             messages.extend(partition_records)
         messages.sort(key=lambda message: (message.topic, message.partition, message.offset))
@@ -1170,19 +1429,26 @@ def _consume_source_cdc_group(
             table = topic_tables.get(message.topic)
             if table is None:
                 continue
-            row = _record_from_message(
-                message,
-                table,
-                field_names_by_table[table.pk],
-                normalize_identifiers=profile.db_type == DbChoice.ORACLE,
-            )
+            if profile.db_type == DbChoice.MONGODB:
+                row = _mongo_record_from_message(
+                    message, table, field_names_by_table[table.pk],
+                    field_types_by_table[table.pk],
+                )
+            else:
+                row = _record_from_message(
+                    message,
+                    table,
+                    field_names_by_table[table.pk],
+                    normalize_identifiers=profile.db_type == DbChoice.ORACLE,
+                )
             if row is None:
                 continue
-            row = _coerce_cdc_row(
-                row,
-                table,
-                field_types_by_table[table.pk],
-            )
+            if profile.db_type != DbChoice.MONGODB:
+                row = _coerce_cdc_row(
+                    row,
+                    table,
+                    field_types_by_table[table.pk],
+                )
             inserts_by_table.setdefault(table.pk, (table, []))[1].append(row)
 
         for table, rows in inserts_by_table.values():

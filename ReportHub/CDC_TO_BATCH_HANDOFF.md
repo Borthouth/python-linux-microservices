@@ -1,6 +1,6 @@
 # CDC and CDC-to-batch continuation handoff
 
-Last updated: 2026-11-22
+Last updated: 2026-11-27
 
 ## Goal and current status
 
@@ -37,16 +37,64 @@ string they already use, including `replicaSet` for replica sets. ReportHub must
 not hardcode `rs0` and must not silently rewrite the URI.
 
 Completed so far: the encrypted connection-string field and migration `0050`
-(applied), the Debezium URI builder, and the read-only replica-set readiness
-check (not yet wired into the control plane UI), with unit tests. Details are in
-the checklist below.
+(applied), the Debezium URI builder, and MongoDB prerequisite checks on the
+source edit page. These check topology, compare server version to the Debezium
+3.5 tested versions, open and close a deployment-wide change stream, and check
+listing and a one-ID read for up to 10 configured keyed collections. Larger,
+missing or incomplete checks report unknown. This is not a full readiness
+verdict: full snapshot behavior, connector-network reachability and recovery are
+unverified. The disposable probe verified a replica set, standalone, restricted
+and unauthorized users, missing collection and unreachable address; it does not
+validate connector-network reachability for customer deployments.
 
-Next step: wire the MongoDB decoder into ingestion, then validate the Debezium
-run with the stored connection string end to end.
+In progress: the ingestion consumer routes MongoDB events through the decoder
+and maps supported values conservatively. Focused consumer tests cover typed
+IDs, unsupported values and write-before-commit behavior. A disposable probe
+passed using a URI retrieved from an encrypted database record and real
+Debezium, Kafka, the consumer and ClickHouse: it checked snapshot, insert,
+update, delete, an injected warehouse-write failure without an offset commit,
+and replay. A disposable Celery worker also ran a test-only task calling the
+real consumer against those events and confirmed that the normal MongoDB CDC
+ingestion task remains blocked. The test-only worker was also terminated after a
+warehouse write but before the Kafka commit; after restart, a manually
+resubmitted task replayed and committed the event. Kafka group reassignment
+temporarily failed during recovery. This does not exercise production ingestion
+or prove automatic task recovery.
 
-Open decisions: whether the customer string should also drive batch ingestion,
-whether readiness should check change-stream permissions, and whether
-`mongodb+srv` needs live validation.
+The expanded probe also validated rebuild-stage mapping, multi-partition topic
+rejection, unknown-field rejection followed by metadata review and replay,
+and an update during connector pause captured after resume. Pause/resume is not
+a source outage or an oplog-retention recovery test. It now verifies that
+selecting a new warehouse field is blocked pending a coordinated rebuild and
+that previously selected fields continue updating while deselected. The
+consumer also rejects missing or mismatched warehouse types rather than silently
+adding columns without historical data.
+
+Next step: validate production worker failure/restart and snapshot completion,
+then implement and test the coordinated rebuild, historical backfill and oplog
+recovery. Preserve the MongoDB worker gate in normal deployments.
+
+November 27 checkpoint: the latest grouped run passed 63 focused tests and
+the disposable MongoDB, Debezium, Kafka, Redis and
+ClickHouse probe; an earlier grouped run passed 68 focused tests. The probe's
+Celery task is test-only and does not prove production ingestion or automatic
+retry. Existing services were left running and workers were not restarted for
+these incomplete changes. MongoDB CDC and CDC-to-batch switching remain gated.
+
+November 27 update: existing ReportHub, ScanHub and test containers were
+started without resetting volumes. A grouped run passed 64 focused tests and
+the expanded disposable probe, including the test-only Celery consumer task
+and the real ingestion task's MongoDB rejection. Full worker ingestion remains
+gated and untested; no production gate or mode-change behavior was changed.
+The in-progress rebuild consumer now uses MongoDB's typed mapper, and both
+consumers fail closed if topic partition metadata is unavailable or the topic
+does not have exactly one partition. New top-level document fields absent from
+discovered metadata fail closed; fields not previously selected remain excluded.
+These safeguards do not solve historical backfill when selected fields change,
+or prove safe MongoDB rebuild cutover.
+
+Open decisions: whether the customer string should also drive batch ingestion
+and whether `mongodb+srv` needs live validation.
 
 Shared-task status: no database type has reached the shared readiness and
 switching stage. PostgreSQL, MySQL, SQL Server and Oracle have basic CDC and
@@ -89,11 +137,11 @@ The user requested host shutdown after saving documentation. Keep OTel;
 fragment reassembly and replacement-collector work are parked. None of this
 changes the MongoDB parity priority or any CDC switching/cleanup gate.
 
-**Resume CDC work here:** wire the already-tested MongoDB decoder into ingestion,
-preserving typed BSON identity, offset/write ordering and existing batch
-behavior; then validate the stored customer URI through disposable end-to-end
-snapshot/insert/update/delete tests. Wire readiness into the Control Plane
-without silently rewriting URIs or enabling CDC. Resolve the open MongoDB
+**Resume CDC work here:** extend validation of the in-progress MongoDB ingestion
+mapping beyond the passing disposable consumer/ClickHouse probe, preserving
+typed BSON identity, offset/write ordering and existing batch behavior. Exercise
+actual workers and recovery scenarios. Extend the Control Plane topology check
+to full readiness without silently rewriting URIs or enabling CDC. Resolve the open MongoDB
 decisions above before expanding supported behavior. Keep the experimental
 CDC-to-batch executor and MongoDB CDC gates closed until their separate safety
 and end-to-end requirements are met.
@@ -111,7 +159,7 @@ and end-to-end requirements are met.
   complete for any of them.
 - MongoDB currently uses batch refresh only. A MongoDB connector configuration
   exists, but the control plane and ingestion worker explicitly reject MongoDB
-  CDC, and the relational decoder expects row-shaped events. MongoDB rebuilds
+  CDC. The consumer has experimental MongoDB event mapping, but MongoDB rebuilds
   are also blocked. Do not treat the connector configuration as working CDC.
 - A separate persistent single-node MongoDB replica-set fixture now starts and
   stops with the test database script. Its change stream has been tested for
@@ -132,9 +180,9 @@ and end-to-end requirements are met.
   and distinct ObjectId and string IDs with the same text. It uses no shared
   services and removes its uniquely named containers.
 - [ ] Complete connector configuration and snapshot validation: the connector
-  URI now comes from the customer connection string (steps 1–3 in "Next task"),
-  and the read-only `setName` check is implemented and tested. Still to
-  validate: the Debezium run with the stored string end to end, collection
+  URI comes from the customer connection string, and the read-only `setName`
+  check is implemented and tested. The disposable probe verified Debezium using
+  the URI from a stored encrypted profile. Still to validate: broader collection
   selection, snapshot completion, `mongodb+srv`, and supported deployment types.
 - [ ] Decode MongoDB's observed Debezium format: snapshot/insert/update `after`
   values and keys are Extended JSON strings, while deletes have no before/after
@@ -144,20 +192,34 @@ and end-to-end requirements are met.
   JSON IDs and checks the key against the document. Unit tests cover malformed
   and mismatched keys; the isolated Debezium probe exercises the decoder on real
   snapshot, insert, update and delete events with distinct ObjectId and string
-  IDs sharing the same text. It is not yet wired into ingestion or rebuilds;
-  MongoDB CDC remains disabled.
+  IDs sharing the same text. The decoder is wired into the ingestion and
+  rebuild consumers; the full MongoDB rebuild workflow and CDC remain disabled.
 - [ ] Implement and test snapshot and streaming ingestion for MongoDB
   collections. Define stable `_id` identity and BSON/nested-value mapping,
   including non-ObjectId IDs, schema changes, missing/null fields, updates and
   deletes. Preserve ordering, replay/idempotence and commit offsets only after
   successful warehouse writes. Fail visibly when a value or event cannot be
-  represented safely.
+  represented safely. The in-progress consumer uses canonical Extended JSON for
+  `_id` and nested values, handles selected scalar types, and rejects type
+  mismatches, non-finite floats and Decimal128 instead of losing precision.
+  MongoDB field types are sampled, so mixed types and schema drift still need
+  deliberate handling. Unknown top-level fields stop processing rather than
+  silently losing schema changes. An existing warehouse keeps consuming
+  previously selected fields even if deselected, and adding a field or changing
+  its warehouse type fails closed pending a coordinated rebuild and historical
+  backfill. Offset-derived versions require exactly one
+  Kafka partition per MongoDB collection topic. The disposable probe exercises actual ClickHouse
+  ingestion and replay, including a test-only Celery task; it does not exercise
+  the gated production ingestion path or all failure scenarios.
 - [ ] Add read-only MongoDB CDC readiness checks to the control plane for
   supported topology/version, change-stream access, permissions and
   connector-network reachability where verifiable. Show failed, unknown and
   stale results and actionable customer guidance; never silently change the
   database or enable CDC. Test standalone, healthy, insufficient-permission and
-  unreachable cases.
+  unreachable cases. The source edit page offers administrator-only topology,
+  version, deployment-wide change-stream and bounded collection access checks
+  against saved configuration, with ephemeral results and explicit unverified
+  prerequisites; it is not a full readiness verdict.
 - [ ] Run isolated end-to-end snapshot and insert/update/delete tests through
   Debezium, Kafka, actual workers and ClickHouse. Include concurrent writes,
   restart/replay, failed warehouse writes, source outages and oplog-retention

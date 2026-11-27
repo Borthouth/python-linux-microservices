@@ -312,10 +312,9 @@ completeness/isolation checks; it is not a replacement approved for deployment.
 The [trial and migration comparison](./OPERATIONS_LOGGING_HANDOFF.md#fluent-bit-raw-reassembly-trial-and-migration-impact-november-18)
 records what a replacement would need to preserve.
 
-The next CDC task remains MongoDB decoder integration and disposable end-to-end
-validation with the stored customer connection string, followed by readiness UI
-work. MongoDB CDC and CDC-to-batch switching remain gated; log visibility and AI
-summaries do not establish that ingestion or cutover is safe. Follow the
+MongoDB consumer mapping and a disposable Debezium-to-ClickHouse probe are in
+progress. MongoDB CDC and CDC-to-batch switching remain gated; log visibility
+and AI summaries do not establish that ingestion or cutover is safe. Follow the
 [CDC handoff](./CDC_TO_BATCH_HANDOFF.md) rather than enabling those gates.
 
 ### Operational log collection
@@ -568,6 +567,13 @@ CDC-to-batch flags must remain disabled until the documented fencing and
 recovery work is complete. Docker Compose reads `.env` for interpolation;
 Django also reads the mounted project file, while explicitly supplied process
 environment variables take precedence. The Docker build excludes `.env` files.
+The application image includes the `reports` and `warehouse` Django apps; it
+does not need a source bind mount for those modules. After changing the build
+context, verify the standalone image with:
+
+```bash
+REPORTHUB_BUILD_CONTEXT_TEST=1 python3 -m unittest tests.infrastructure.test_build_context -v
+```
 
 ### Optional separate application database identities
 
@@ -997,11 +1003,14 @@ The test creates and removes a uniquely named collection in the fixture.
 For the isolated Debezium event-format probe, use
 `REPORTHUB_MONGO_CDC_DEBEZIUM_TEST=1 ./venv/bin/python -m unittest tests.infrastructure.test_mongo_cdc_debezium`.
 It requires the local `reporthub-app` image and starts disposable MongoDB,
-Kafka and Connect containers with no published ports. The probe supplies the
-replica-set name explicitly; the application connector configuration does not
-yet do so, and MongoDB CDC remains disabled.
-
-If the test MongoDB container previously ran with replica-set options, recreate it with `docker compose -f tests/docker-compose.test.yml up -d mongo-test` to apply the standalone configuration; this preserves the data volume. For existing MongoDB Debezium connectors, stop or remove those connectors in Kafka Connect to avoid leaving them running. Restart ingestion workers after updating the application, and allow the next MongoDB refresh to replace existing CDC tables.
+Kafka, Redis, Connect and ClickHouse containers with no published ports. It uses
+a stored customer-style URI, including the fixture's replica-set name, and a
+test-only Celery task to exercise the consumer. It also checks that the normal
+MongoDB CDC ingestion task remains blocked. The probe covers rebuild-stage
+mapping, partition and schema checks, and connector pause/resume; it does not
+establish production worker, source-outage, or oplog-retention recovery. A
+test-only worker crash is followed by manual resubmission, not automatic retry.
+MongoDB CDC remains disabled.
 
 ### Starting and stopping test databases
 ```bash
@@ -1111,6 +1120,20 @@ networks, volumes and client keys afterward.
 ## ClickHouse ingestion and backfills
 
 Each new data source has an **Ingestion mode**: **Batch refresh** (the default, no Kafka required) or **CDC** (requires Kafka, Debezium, and supported source configuration). Existing relational sources retain their previous CDC behavior when migrating; existing MongoDB sources retain batch refresh. The mode cannot yet be changed after a source is created: safe transitions between existing batch and CDC tables require a coordinated snapshot and cutover. MongoDB CDC is not currently supported.
+
+For a saved MongoDB source, administrators can run **MongoDB CDC prerequisite
+checks** on its edit page. From the ReportHub server, these check topology,
+compare the server version with the
+[Debezium 3.5 tested versions](https://debezium.io/releases/3.5/), and briefly
+open and close a deployment-wide change stream without consuming events. They
+also check collection listing and read at most one document ID from each of up
+to 10 configured keyed collections; IDs are not saved. More than 10 collections,
+missing collections and incomplete checks are reported as unknown. They use
+saved settings, discard unsaved edits, and display results only for the current
+check. Other server versions are reported as untested, not necessarily
+unsupported. A passing result is not CDC readiness: full snapshot behavior,
+Kafka Connect connectivity and recovery remain unverified. Rerun after
+changes; the checks do not enable CDC.
 
 Scheduled ingestion consumes at most `DEFAULT_ETL_BATCH_SIZE` CDC events per Celery task (default `10000`) and then returns so other queued work can run. CDC batches are serialized per source with a Redis lock; concurrent requests are requeued. In CDC mode relational tables with discovered primary keys use Debezium change events; tables without a primary key use bounded full-refresh batches. Batch-mode sources use bounded full refreshes for all tables. Backfills use the same row limit and the dedicated `queue_backfill` queue, and are skipped for CDC sources with primary-key tables because a safe rebuild requires a coordinated CDC snapshot. Celery prefetch is set to 1.
 

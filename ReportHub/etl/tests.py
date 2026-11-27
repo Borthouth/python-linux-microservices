@@ -1,12 +1,13 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone as datetime_timezone
 from io import BytesIO
 from threading import Barrier, Event
 from types import SimpleNamespace
 from urllib.error import HTTPError
 from uuid import uuid4
-from unittest.mock import MagicMock, patch
-from pymongo.errors import ServerSelectionTimeoutError
+from unittest.mock import MagicMock, call, patch
+from pymongo.errors import ConfigurationError, OperationFailure, ServerSelectionTimeoutError
 
 from bson import ObjectId
 from bson.decimal128 import Decimal128
@@ -61,14 +62,18 @@ from etl.tasks import (
 from etl.cdc import (
     _connect_request,
     _coerce_cdc_row,
+    _check_mongodb_snapshot_access,
     _connector_configs_match,
     _create_cdc_table,
     _decode_mongo_cdc_event,
     _event_version,
+    _mongo_record_from_message,
     _required_field_names,
     _record_from_message,
     _topic_name,
+    MongoReplicaSetCheck,
     build_debezium_connector_config,
+    check_mongodb_cdc_readiness,
     check_mongodb_replica_set,
     consume_cdc_table_rebuild_batch,
     consume_source_cdc_batch,
@@ -845,6 +850,7 @@ class DebeziumConnectorConfigTests(SimpleTestCase):
     def test_mongodb_replica_set_check_reports_each_outcome(self):
         cases = [
             ("mongodb://h1:27017/?replicaSet=rs0", {"setName": "rs0"}, None, "ok"),
+            ("mongodb://h1:27017/", {"msg": "isdbgrid"}, None, "ok"),
             ("mongodb://h1:27017/", {"setName": "rs0"}, None, "missing_replica_set_name"),
             ("mongodb://h1:27017/?replicaSet=rs1", {"setName": "rs0"}, None, "replica_set_name_mismatch"),
             ("mongodb://h1:27017/?replicaSet=rs0", {"ok": 1}, None, "not_replica_set"),
@@ -872,6 +878,119 @@ class DebeziumConnectorConfigTests(SimpleTestCase):
                 self.assertNotIn("secret", result.message)
                 self.assertEqual(result.ok, expected_status == "ok")
                 self.assertTrue(result.message)
+
+    @patch("etl.cdc.MongoClient", side_effect=ConfigurationError("secret credentials"))
+    def test_mongodb_replica_set_client_creation_failure_is_sanitized(self, client):
+        profile = self.profile(DbChoice.MONGODB)
+        profile.mongodb_connection_string = "mongodb://user:secret@h1:27017/?replicaSet=rs0"
+        result = check_mongodb_replica_set(profile, timeout_ms=1234)
+        self.assertEqual(result.status, "invalid_connection_string")
+        self.assertNotIn("secret", result.message)
+        self.assertEqual(client.call_args.kwargs["connectTimeoutMS"], 1234)
+        self.assertEqual(client.call_args.kwargs["serverSelectionTimeoutMS"], 1234)
+
+    @patch("etl.cdc.MongoClient")
+    @patch("etl.cdc.check_mongodb_replica_set")
+    def test_mongodb_readiness_reports_version_and_checks_cluster_stream(self, topology, client_cls):
+        profile = self.profile(DbChoice.MONGODB)
+        profile.tables = SimpleNamespace(all=lambda: [])
+        profile.mongodb_connection_string = "mongodb://user:secret@h1:27017/?replicaSet=rs0"
+        topology.return_value = MongoReplicaSetCheck("ok", "Replica set confirmed.")
+        client = client_cls.return_value
+        for version_array, expected in (
+            ([6, 0, 0, 0], "ok"), ([7, 0, 0, 0], "ok"), ([8, 0, 0, 0], "ok"),
+            ([5, 0, 0, 0], "untested"), ([9, 0, 0, 0], "untested"),
+            (["8", 0], "unknown"), (None, "unknown"),
+        ):
+            with self.subTest(version=version_array):
+                client.reset_mock()
+                client.admin.command.return_value = {"versionArray": version_array}
+                result = check_mongodb_cdc_readiness(profile, timeout_ms=1234)
+                self.assertEqual(result.version.status, expected)
+                self.assertEqual(result.change_stream.status, "ok")
+                client.admin.command.assert_called_once_with("buildInfo")
+                client.watch.assert_called_once_with(max_await_time_ms=1234)
+                client.watch.return_value.__exit__.assert_called_once()
+                client.close.assert_called_once()
+                self.assertNotIn("secret", result.version.message)
+        self.assertEqual(client_cls.call_args.args[0], profile.mongodb_connection_string)
+        self.assertNotIn("replicaSet", client_cls.call_args.kwargs)
+
+    @patch("etl.cdc.MongoClient")
+    @patch("etl.cdc.check_mongodb_replica_set")
+    def test_mongodb_readiness_reports_denied_and_unknown_without_credentials(self, topology, client_cls):
+        profile = self.profile(DbChoice.MONGODB)
+        profile.tables = SimpleNamespace(all=lambda: [])
+        topology.return_value = MongoReplicaSetCheck("ok", "Replica set confirmed.")
+        client = client_cls.return_value
+        client.admin.command.side_effect = OperationFailure("secret", code=13)
+        for error, expected in (
+            (OperationFailure("secret", code=13), "denied"),
+            (OperationFailure("secret", code=123), "unknown"),
+            (ServerSelectionTimeoutError("secret"), "unknown"),
+        ):
+            with self.subTest(expected=expected):
+                client.watch.side_effect = error
+                result = check_mongodb_cdc_readiness(profile)
+                self.assertEqual(result.version.status, "unknown")
+                self.assertEqual(result.change_stream.status, expected)
+                self.assertNotIn("secret", result.version.message)
+                self.assertNotIn("secret", result.change_stream.message)
+
+    @patch("etl.cdc.MongoClient")
+    @patch("etl.cdc.check_mongodb_replica_set")
+    def test_mongodb_readiness_does_not_probe_if_topology_fails(self, topology, client):
+        topology.return_value = MongoReplicaSetCheck("unreachable", "Not reachable.")
+        result = check_mongodb_cdc_readiness(self.profile(DbChoice.MONGODB))
+        self.assertEqual(result.version.status, "unknown")
+        self.assertEqual(result.change_stream.status, "unknown")
+        self.assertEqual(result.snapshot_access.status, "unknown")
+        client.assert_not_called()
+
+    def test_mongodb_snapshot_access_requires_visible_readable_collections(self):
+        profile = self.profile(DbChoice.MONGODB)
+        tables = [
+            SimpleNamespace(table_name="orders", primary_key_fields=["_id"]),
+            SimpleNamespace(table_name="unkeyed", primary_key_fields=[]),
+        ]
+        profile.tables = SimpleNamespace(all=lambda: tables)
+        client = MagicMock()
+        database = client[profile.database_name]
+        database.list_collection_names.return_value = ["orders"]
+
+        result = _check_mongodb_snapshot_access(client, profile, 1000)
+        self.assertEqual(result.status, "ok")
+        database.list_collection_names.assert_called_once_with(
+            filter={"name": {"$in": ["orders"]}}, maxTimeMS=1000,
+        )
+        database["orders"].find.assert_called_once()
+        self.assertEqual(database["orders"].find.call_args.args, ({}, {"_id": 1}))
+        self.assertEqual(database["orders"].find.call_args.kwargs["limit"], 1)
+
+        database.list_collection_names.return_value = []
+        self.assertEqual(_check_mongodb_snapshot_access(client, profile, 1000).status, "unknown")
+        database.list_collection_names.side_effect = OperationFailure("private", code=13)
+        denied = _check_mongodb_snapshot_access(client, profile, 1000)
+        self.assertEqual(denied.status, "denied")
+        self.assertNotIn("private", denied.message)
+
+    def test_mongodb_snapshot_access_reports_partial_or_empty_configuration(self):
+        profile = self.profile(DbChoice.MONGODB)
+        tables = []
+        profile.tables = SimpleNamespace(all=lambda: tables)
+        client = MagicMock()
+        self.assertEqual(_check_mongodb_snapshot_access(client, profile, 1000).status, "unknown")
+        client.__getitem__.assert_not_called()
+        tables.extend(
+            SimpleNamespace(table_name=f"item_{index:02}", primary_key_fields=["_id"])
+            for index in range(11)
+        )
+        client[profile.database_name].list_collection_names.return_value = [
+            f"item_{index:02}" for index in range(10)
+        ]
+        result = _check_mongodb_snapshot_access(client, profile, 1000)
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("only 10 of 11", result.message)
 
     def test_mongodb_event_decoding_preserves_typed_ids_and_values(self):
         object_id = ObjectId()
@@ -1379,6 +1498,303 @@ class CdcConsumerTests(SimpleTestCase):
             consume_source_cdc_batch(self.profile, MagicMock(), batch_size=10)
         self.consumer.commit.assert_not_called()
         self.consumer.close.assert_called_once()
+
+
+class MongoCdcConsumerTests(SimpleTestCase):
+    def setUp(self):
+        self.table = SimpleNamespace(
+            pk=4, schema_name="analytics", table_name="events",
+            primary_key_fields=["_id"], cdc_topic_prefix="",
+            fields=SimpleNamespace(all=lambda: [
+                SimpleNamespace(field_name="_id", data_type="ObjectId"),
+                SimpleNamespace(field_name="count", data_type="Int64"),
+                SimpleNamespace(field_name="nested", data_type="JSON"),
+            ]),
+            save=MagicMock(),
+        )
+        self.profile = SimpleNamespace(
+            pk=12, db_type=DbChoice.MONGODB, database_name="analytics",
+            tables=SimpleNamespace(all=lambda: [self.table]),
+        )
+        self.consumer = MagicMock()
+        self.consumer.assignment.return_value = {("topic", 0)}
+        self.consumer.partitions_for_topic.return_value = {0}
+        self.topic = "reporthub-source-12.analytics.events"
+        self.object_id = ObjectId()
+
+    def message(self, offset, document_id, operation, document=None):
+        from bson import json_util
+
+        return SimpleNamespace(
+            topic=self.topic, partition=0, offset=offset,
+            key={"id": json_util.dumps(document_id)},
+            value={
+                "op": operation,
+                "after": json_util.dumps(document) if document is not None else None,
+            },
+        )
+
+    @patch("etl.cdc._create_cdc_table", return_value=("`events`", ["_id", "count", "nested"]))
+    @patch("etl.cdc._required_field_names", return_value=["_id", "count", "nested"])
+    @patch("etl.cdc.KafkaConsumer")
+    def test_snapshot_update_delete_preserve_typed_keys_and_commit_after_insert(
+        self, kafka_consumer, required_fields, create_table,
+    ):
+        kafka_consumer.return_value = self.consumer
+        object_id = self.object_id
+        string_id = str(object_id)
+        messages = [
+            self.message(0, object_id, "r", {"_id": object_id, "count": 1, "nested": {"n": 2}}),
+            self.message(1, string_id, "c", {"_id": string_id, "count": 3}),
+            self.message(2, object_id, "u", {"_id": object_id, "count": 4}),
+            self.message(3, string_id, "d"),
+        ]
+        self.consumer.poll.return_value = {object(): messages}
+        client = MagicMock()
+        calls = MagicMock()
+        calls.attach_mock(client, "clickhouse")
+        calls.attach_mock(self.consumer, "consumer")
+
+        self.assertEqual(consume_source_cdc_batch(self.profile, client, batch_size=10), 4)
+        rows = client.insert.call_args.args[1]
+        self.assertNotEqual(rows[0][0], rows[1][0])
+        self.assertEqual(rows[0][0], rows[2][0])
+        self.assertEqual(rows[1][0], rows[3][0])
+        self.assertEqual(rows[0][1:], [1, '{"n":{"$numberInt":"2"}}', 1, 0])
+        self.assertEqual(rows[3][1:], [None, None, 4, 1])
+        self.assertLess(
+            calls.mock_calls.index(call.clickhouse.insert(
+                *client.insert.call_args.args, **client.insert.call_args.kwargs
+            )),
+            calls.mock_calls.index(call.consumer.commit()),
+        )
+
+    @patch("etl.cdc._create_cdc_table", return_value=("`events`", ["_id", "count", "nested"]))
+    @patch("etl.cdc._required_field_names", return_value=["_id", "count", "nested"])
+    @patch("etl.cdc.KafkaConsumer")
+    def test_invalid_values_and_failed_writes_do_not_commit(
+        self, kafka_consumer, required_fields, create_table,
+    ):
+        kafka_consumer.return_value = self.consumer
+        for document, write_error in (
+            ({"_id": self.object_id, "count": "not an integer"}, None),
+            ({"_id": self.object_id, "count": Decimal128("12.34")}, None),
+            ({"_id": self.object_id, "count": 1}, RuntimeError("insert failed")),
+        ):
+            with self.subTest(document=document):
+                self.consumer.reset_mock()
+                self.consumer.poll.return_value = {
+                    object(): [self.message(0, self.object_id, "c", document)],
+                }
+                client = MagicMock()
+                client.insert.side_effect = write_error
+                with self.assertRaises(RuntimeError):
+                    consume_source_cdc_batch(self.profile, client, batch_size=10)
+                self.consumer.commit.assert_not_called()
+                self.consumer.close.assert_called_once()
+
+    def test_supported_values_missing_fields_and_nulls(self):
+        fields = ["_id", "object", "text", "flag", "count", "ratio", "when", "nested", "missing"]
+        types = {
+            "object": "ObjectId", "text": "String", "flag": "Boolean",
+            "count": "Int64", "ratio": "Float64", "when": "DateTime",
+            "nested": "JSON", "missing": "String",
+        }
+        when = datetime(2025, 1, 2, 3, 4, tzinfo=datetime_timezone.utc)
+        document = {
+            "_id": self.object_id, "object": self.object_id, "text": "example",
+            "flag": True, "count": -2, "ratio": 1.5, "when": when,
+            "nested": [self.object_id, {"count": 2}],
+        }
+        row = _mongo_record_from_message(
+            self.message(0, self.object_id, "c", document), self.table, fields, types,
+        )
+        self.assertEqual(row["object"], str(self.object_id))
+        self.assertEqual((row["text"], row["flag"], row["count"], row["ratio"]),
+                         ("example", 1, -2, 1.5))
+        self.assertEqual(row["when"], when.isoformat())
+        self.assertIn('{"$oid":', row["nested"])
+        self.assertIsNone(row["missing"])
+
+    def test_rejects_mixed_and_unsupported_values(self):
+        cases = (
+            ("count", "Int64", True),
+            ("count", "Int64", 2**63),
+            ("ratio", "Float64", float("nan")),
+            ("ratio", "Float64", float("inf")),
+            ("ratio", "Float64", Decimal128("12.34")),
+            ("nested", "JSON", "not a document"),
+            ("object", "ObjectId", str(self.object_id)),
+        )
+        for field, data_type, value in cases:
+            with self.subTest(field=field, value=value):
+                message = self.message(0, self.object_id, "c", {
+                    "_id": self.object_id, field: value,
+                })
+                with self.assertRaisesRegex(RuntimeError, "cannot be represented safely"):
+                    _mongo_record_from_message(
+                        message, self.table, ["_id", field], {field: data_type},
+                    )
+
+    @patch("etl.cdc._create_cdc_table", return_value=("`events`", ["_id", "count", "nested"]))
+    @patch("etl.cdc._required_field_names", return_value=["_id", "count", "nested"])
+    @patch("etl.cdc.KafkaConsumer")
+    def test_new_undiscovered_field_blocks_the_batch_without_committing(
+        self, kafka_consumer, required_fields, create_table,
+    ):
+        kafka_consumer.return_value = self.consumer
+        self.consumer.poll.return_value = {object(): [
+            self.message(0, self.object_id, "c", {
+                "_id": self.object_id, "count": 1, "new_field": "secret",
+            }),
+        ]}
+        client = MagicMock()
+        with self.assertRaisesRegex(RuntimeError, "absent from discovered metadata") as raised:
+            consume_source_cdc_batch(self.profile, client, batch_size=10)
+        self.assertNotIn("secret", str(raised.exception))
+        client.insert.assert_not_called()
+        self.consumer.commit.assert_not_called()
+
+    def test_known_unselected_field_does_not_block_mapping(self):
+        message = self.message(0, self.object_id, "c", {
+            "_id": self.object_id, "count": 1, "not_selected": Decimal128("12.34"),
+        })
+        row = _mongo_record_from_message(
+            message, self.table, ["_id", "count"],
+            {"_id": "ObjectId", "count": "Int64", "not_selected": "Decimal"},
+        )
+        self.assertEqual(row["count"], 1)
+        self.assertNotIn("not_selected", row)
+
+    def test_existing_mongodb_table_requires_matching_types_and_complete_columns(self):
+        self.table.cdc_managed = True
+        self.table.source_id = self.profile.pk
+        self.table.clickhouse_physical_table = ""
+        fields = ["_id", "count", "nested"]
+        expected = [
+            ("_id", "String"), ("count", "Nullable(Int64)"),
+            ("nested", "Nullable(String)"), ("_cdc_version", "UInt64"),
+            ("_cdc_deleted", "UInt8"),
+        ]
+        client = MagicMock()
+        client.query.side_effect = [
+            SimpleNamespace(result_rows=[[1]]), SimpleNamespace(result_rows=expected),
+        ]
+        _, retained_fields = _create_cdc_table(
+            client, self.profile, self.table, ["_id", "count"]
+        )
+        self.assertEqual(retained_fields, fields)
+        client.command.assert_not_called()
+        for description in (
+            [row for row in expected if row[0] != "nested"],
+            [("_id", "String"), ("count", "Nullable(Float64)"), *expected[2:]],
+            [row for row in expected if row[0] != "_cdc_deleted"],
+        ):
+            with self.subTest(description=description):
+                client.reset_mock()
+                client.query.side_effect = [
+                    SimpleNamespace(result_rows=[[1]]), SimpleNamespace(result_rows=description),
+                ]
+                with self.assertRaisesRegex(RuntimeError, "coordinated rebuild"):
+                    _create_cdc_table(client, self.profile, self.table, fields)
+                client.command.assert_not_called()
+
+    def test_mongodb_id_warehouse_type_is_string_for_non_objectid_metadata(self):
+        self.table.source_id = self.profile.pk
+        self.table.clickhouse_physical_table = ""
+        self.table.cdc_managed = False
+        self.table.fields = SimpleNamespace(all=lambda: [
+            SimpleNamespace(field_name="_id", data_type="Int64"),
+        ])
+        client = MagicMock()
+        client.query.return_value.result_rows = [[0]]
+        _create_cdc_table(client, self.profile, self.table, ["_id"])
+        self.assertIn("`_id` String", client.command.call_args.args[0])
+
+    @patch("etl.cdc._create_cdc_table", return_value=("`events`", ["_id", "count", "nested"]))
+    @patch("etl.cdc._required_field_names", return_value=["_id", "count", "nested"])
+    @patch("etl.cdc.KafkaConsumer")
+    def test_invalid_later_event_does_not_write_or_commit_the_batch(
+        self, kafka_consumer, required_fields, create_table,
+    ):
+        kafka_consumer.return_value = self.consumer
+        self.consumer.poll.return_value = {object(): [
+            self.message(0, self.object_id, "c", {"_id": self.object_id, "count": 1}),
+            self.message(1, self.object_id, "u", {"_id": self.object_id, "count": "invalid"}),
+        ]}
+        client = MagicMock()
+        with self.assertRaisesRegex(RuntimeError, "cannot be represented safely"):
+            consume_source_cdc_batch(self.profile, client, batch_size=10)
+        client.insert.assert_not_called()
+        self.consumer.commit.assert_not_called()
+
+    @patch("etl.cdc._create_cdc_table", return_value=("`events`", ["_id", "count", "nested"]))
+    @patch("etl.cdc._required_field_names", return_value=["_id", "count", "nested"])
+    @patch("etl.cdc.KafkaConsumer")
+    def test_partition_changes_or_missing_metadata_block_writes_and_commits(
+        self, kafka_consumer, required_fields, create_table,
+    ):
+        kafka_consumer.return_value = self.consumer
+        self.consumer.poll.return_value = {object(): [
+            self.message(0, self.object_id, "c", {"_id": self.object_id, "count": 1}),
+        ]}
+        for partitions in (None, set(), {0, 1}):
+            with self.subTest(partitions=partitions):
+                self.consumer.reset_mock()
+                self.consumer.partitions_for_topic.return_value = partitions
+                client = MagicMock()
+                with self.assertRaises(RuntimeError):
+                    consume_source_cdc_batch(self.profile, client, batch_size=10)
+                client.insert.assert_not_called()
+                self.consumer.commit.assert_not_called()
+                self.consumer.close.assert_called_once()
+
+    @patch("etl.cdc._create_cdc_table", return_value=("`stage`", ["_id", "count", "nested"]))
+    @patch("etl.cdc._required_field_names", return_value=["_id", "count", "nested"])
+    @patch("etl.cdc.KafkaConsumer")
+    def test_rebuild_uses_mongodb_identity_and_rejects_bad_values(
+        self, kafka_consumer, required_fields, create_table,
+    ):
+        kafka_consumer.return_value = self.consumer
+        topic = "rebuild.analytics.events"
+        recovery = SimpleNamespace(
+            pk=7, topic_prefix="rebuild", connector_name="rebuild",
+            notification_topic="rebuild.notifications", consumer_group="rebuild-group",
+            staging_table="stage", snapshot_end_offsets={"0": 2},
+            status="CUTOVER_PENDING",
+            Status=SimpleNamespace(SNAPSHOTTING="SNAPSHOTTING", CUTOVER_PENDING="CUTOVER_PENDING"),
+        )
+        self.consumer.position.return_value = 2
+        partition = TopicPartition(topic, 0)
+        self.consumer.assignment.return_value = {partition}
+        message = self.message(0, self.object_id, "r", {
+            "_id": self.object_id, "count": 1, "nested": {"n": 2},
+        })
+        message.topic = topic
+        self.consumer.poll.return_value = {partition: [message]}
+        client = MagicMock()
+        self.assertTrue(consume_cdc_table_rebuild_batch(
+            recovery, self.profile, self.table, client, batch_size=10,
+        ))
+        self.assertEqual(client.insert.call_args.args[1], [[
+            '{"$oid":"' + str(self.object_id) + '"}', 1,
+            '{"n":{"$numberInt":"2"}}', 1, 0,
+        ]])
+        self.consumer.commit.assert_called_once()
+
+        invalid = self.message(0, self.object_id, "u", {
+            "_id": self.object_id, "count": "invalid",
+        })
+        invalid.topic = topic
+        self.consumer.poll.return_value = {partition: [invalid]}
+        self.consumer.reset_mock()
+        client.reset_mock()
+        with self.assertRaisesRegex(RuntimeError, "cannot be represented safely"):
+            consume_cdc_table_rebuild_batch(
+                recovery, self.profile, self.table, client, batch_size=10,
+            )
+        client.insert.assert_not_called()
+        self.consumer.commit.assert_not_called()
 
 
 class CdcToBatchCutoverPlanningTests(SimpleTestCase):
